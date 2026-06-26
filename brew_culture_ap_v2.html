@@ -1,0 +1,3082 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Brew Culture Coffee — Accounts Payable</title>
+<style>
+  :root {
+    --bg:#F7F4EF;--surface:#FFFFFF;--border:#DDD8D0;--border-lo:#EAE6E0;
+    --ink:#1C1A17;--ink-mid:#6B6560;--ink-lo:#9C9690;
+    --accent:#3B2A1A;--amber:#C87941;--amber-lo:#F5EAD9;
+    --green:#2D6B4A;--green-lo:#E4F0EA;--red:#B03A2E;--red-lo:#FAE8E6;
+    --yellow:#E8A020;--yellow-lo:#FDF3E0;
+    --troy:#6B3FA0;--troy-lo:#F0EAF8;
+    --inv:#1A6B8A;--inv-lo:#E0F0F8;
+    --font-mono:"SF Mono","Fira Code","Courier New",monospace;
+    --r:4px;--shadow:0 1px 3px rgba(0,0,0,.08);--shadow-md:0 4px 12px rgba(0,0,0,.10);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:var(--bg);color:var(--ink);font-size:14px;line-height:1.5;min-height:100vh}
+  .app{display:flex;height:100vh;overflow:hidden}
+  .sidebar{width:224px;flex-shrink:0;background:var(--accent);color:#F5EFE8;display:flex;flex-direction:column;overflow-y:auto}
+  .sidebar-header{padding:20px 16px 14px;border-bottom:1px solid rgba(255,255,255,.10)}
+  .sidebar-logo{font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--amber);margin-bottom:2px}
+  .sidebar-title{font-size:13px;font-weight:600}
+  .sidebar-sub{font-size:11px;color:rgba(255,255,255,.40);margin-top:2px}
+  .sidebar-section{padding:12px 10px 4px;font-size:10px;font-weight:700;letter-spacing:.10em;text-transform:uppercase;color:rgba(255,255,255,.30)}
+  .nav-item{display:flex;align-items:center;gap:9px;padding:8px 14px;cursor:pointer;border-radius:var(--r);margin:1px 8px;font-size:13px;color:rgba(255,255,255,.65);transition:background .12s,color .12s;border:none;background:none;width:calc(100% - 16px);text-align:left}
+  .nav-item:hover{background:rgba(255,255,255,.08);color:#fff}
+  .nav-item.active{background:var(--amber);color:#fff}
+  .nav-icon{width:16px;text-align:center;flex-shrink:0}
+  .sidebar-stats{margin-top:auto;padding:14px 14px 16px;border-top:1px solid rgba(255,255,255,.10);font-size:11px}
+  .stat-row{display:flex;justify-content:space-between;margin-bottom:4px;color:rgba(255,255,255,.45)}
+  .stat-val{color:#F5EFE8;font-weight:600;font-variant-numeric:tabular-nums}
+  .stat-troy{color:#C9A8F0!important}
+  .main{flex:1;overflow-y:auto;display:flex;flex-direction:column}
+  .topbar{background:var(--surface);border-bottom:1px solid var(--border);padding:14px 24px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:10;box-shadow:var(--shadow)}
+  .topbar-title{font-size:16px;font-weight:700}
+  .topbar-sub{font-size:12px;color:var(--ink-mid);margin-top:1px}
+  .topbar-actions{display:flex;gap:8px;align-items:center}
+  .content{padding:24px;flex:1}
+  .btn{display:inline-flex;align-items:center;gap:6px;padding:7px 14px;border-radius:var(--r);font-size:13px;font-weight:500;cursor:pointer;border:1px solid transparent;transition:background .12s;white-space:nowrap}
+  .btn:disabled{opacity:.45;cursor:not-allowed}
+  .btn-primary{background:var(--amber);color:#fff;border-color:var(--amber)}
+  .btn-primary:hover:not(:disabled){background:#b06a35}
+  .btn-secondary{background:var(--surface);color:var(--ink);border-color:var(--border)}
+  .btn-secondary:hover:not(:disabled){background:var(--bg)}
+  .btn-ghost{background:none;border-color:transparent;color:var(--ink-mid)}
+  .btn-ghost:hover:not(:disabled){background:var(--bg);color:var(--ink)}
+  .btn-danger{background:var(--red-lo);color:var(--red);border-color:#EAB5B1}
+  .btn-danger:hover:not(:disabled){background:#f0cbc8}
+  .btn-troy{background:var(--troy-lo);color:var(--troy);border-color:#C9A8F0}
+  .btn-troy:hover:not(:disabled){background:#e4d5f5}
+  .btn-inv{background:var(--inv-lo);color:var(--inv);border-color:#A8D0E8}
+  .btn-sm{padding:4px 10px;font-size:12px}
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);box-shadow:var(--shadow);margin-bottom:16px}
+  .card-header{padding:14px 18px;border-bottom:1px solid var(--border-lo);display:flex;align-items:center;justify-content:space-between}
+  .card-title{font-size:13px;font-weight:600}
+  .card-body{padding:18px}
+  .tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px}
+  .tile{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:16px 18px;box-shadow:var(--shadow)}
+  .tile-label{font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-lo);margin-bottom:6px}
+  .tile-val{font-size:22px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1.1}
+  .tile-sub{font-size:11px;color:var(--ink-mid);margin-top:4px}
+  .tile.red .tile-val{color:var(--red)}.tile.amber .tile-val{color:var(--amber)}.tile.green .tile-val{color:var(--green)}.tile.troy .tile-val{color:var(--troy)}.tile.troy{border-color:#C9A8F0}
+  .tbl-wrap{overflow-x:auto}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  thead th{padding:9px 12px;text-align:left;font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-mid);border-bottom:1px solid var(--border);white-space:nowrap;background:var(--bg)}
+  tbody tr{border-bottom:1px solid var(--border-lo)}
+  tbody tr:last-child{border-bottom:none}
+  tbody tr:hover{background:#FAFAF8}
+  tbody td{padding:10px 12px;vertical-align:middle}
+  .mono{font-family:var(--font-mono);font-size:12px}
+  .tr-overdue td{background:#FEF8F8}
+  .tr-troy td{background:var(--troy-lo)!important}
+  .tr-troy:hover td{background:#e8d8f5!important}
+  .badge{display:inline-block;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:600;white-space:nowrap}
+  .badge-open{background:var(--yellow-lo);color:#9B6A10}
+  .badge-partial{background:#E8F0FB;color:#2D5BA8}
+  .badge-paid{background:var(--green-lo);color:var(--green)}
+  .badge-void{background:var(--border-lo);color:var(--ink-lo);text-decoration:line-through}
+  .badge-overdue{background:var(--red-lo);color:var(--red)}
+  .era-pill{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:600}
+  .era-dc{background:var(--green-lo);color:var(--green)}
+  .era-troy{background:var(--troy-lo);color:var(--troy)}
+  .era-dc-paid{background:#FFE8CC;color:#8B4500}
+  .inv-pill{display:inline-flex;align-items:center;gap:3px;padding:2px 6px;border-radius:20px;font-size:10px;font-weight:600;background:var(--inv-lo);color:var(--inv)}
+  .form-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .form-group{display:flex;flex-direction:column;gap:5px}
+  .form-group.span-2{grid-column:span 2}
+  .form-group.span-3{grid-column:span 3}
+  label{font-size:12px;font-weight:500;color:var(--ink-mid)}
+  input,select,textarea{padding:8px 10px;border:1px solid var(--border);border-radius:var(--r);font-size:13px;font-family:inherit;color:var(--ink);background:var(--surface);transition:border-color .12s,box-shadow .12s;width:100%}
+  input:focus,select:focus,textarea:focus{outline:none;border-color:var(--amber);box-shadow:0 0 0 3px rgba(200,121,65,.15)}
+  textarea{resize:vertical;min-height:64px}
+  .form-hint{font-size:11px;color:var(--ink-lo)}
+  .era-selector{display:flex;gap:6px}
+  .era-opt{flex:1;padding:8px 6px;border:2px solid var(--border);border-radius:var(--r);cursor:pointer;text-align:center;font-size:12px;font-weight:600;transition:all .12s;background:var(--surface)}
+  .era-opt:hover{border-color:var(--amber)}
+  .era-opt.sel-dc{border-color:var(--green);background:var(--green-lo);color:var(--green)}
+  .era-opt.sel-troy{border-color:var(--troy);background:var(--troy-lo);color:var(--troy)}
+  .era-opt.sel-dc-paid{border-color:#D4791A;background:#FFE8CC;color:#8B4500}
+  /* Line items - wider grid to accommodate ingredient column */
+  .line-items-hd{display:grid;grid-template-columns:1.8fr 1.2fr 1.4fr .65fr .75fr .75fr .75fr 36px;gap:6px;padding:0 0 6px;font-size:11px;font-weight:600;color:var(--ink-lo);letter-spacing:.06em;text-transform:uppercase}
+  .line-item-row{display:grid;grid-template-columns:1.8fr 1.2fr 1.4fr .65fr .75fr .75fr .75fr 36px;gap:6px;margin-bottom:8px;align-items:start}
+  .line-item-row.has-ingredient{border-left:3px solid var(--inv);padding-left:6px;margin-left:-9px}
+  .line-total{font-family:var(--font-mono);font-size:12px;padding:8px 10px;background:var(--bg);border-radius:var(--r);border:1px solid var(--border-lo);display:flex;align-items:center}
+  .rm-btn{width:32px;height:32px;border:1px solid var(--border);border-radius:var(--r);background:var(--surface);cursor:pointer;display:flex;align-items:center;justify-content:center;color:var(--ink-lo);font-size:16px;transition:background .12s,color .12s;flex-shrink:0}
+  .rm-btn:hover{background:var(--red-lo);color:var(--red);border-color:#EAB5B1}
+  .invoice-totals{display:flex;flex-direction:column;align-items:flex-end;gap:4px;margin-top:10px;padding-top:10px;border-top:1px solid var(--border-lo);font-size:13px}
+  .totals-row{display:flex;gap:24px;justify-content:flex-end}
+  .totals-label{color:var(--ink-mid)}
+  .totals-val{font-weight:600;font-family:var(--font-mono);min-width:90px;text-align:right}
+  .totals-grand{font-size:15px;font-weight:700}
+  .overlay{position:fixed;inset:0;background:rgba(28,26,23,.45);z-index:100;display:flex;align-items:flex-start;justify-content:center;padding:40px 20px;overflow-y:auto}
+  .modal{background:var(--surface);border-radius:6px;box-shadow:var(--shadow-md),0 0 0 1px var(--border);width:100%;max-width:900px;flex-shrink:0}
+  .modal-header{padding:18px 22px 14px;border-bottom:1px solid var(--border-lo);display:flex;align-items:flex-start;justify-content:space-between}
+  .modal-title{font-size:15px;font-weight:700}
+  .modal-sub{font-size:12px;color:var(--ink-mid);margin-top:2px}
+  .close-btn{background:none;border:none;cursor:pointer;font-size:20px;color:var(--ink-lo);padding:2px 6px;border-radius:var(--r)}
+  .close-btn:hover{background:var(--bg);color:var(--ink)}
+  .modal-body{padding:20px 22px}
+  .modal-footer{padding:14px 22px;border-top:1px solid var(--border-lo);display:flex;justify-content:flex-end;gap:8px;align-items:center}
+  .recv-row{display:grid;grid-template-columns:90px 1fr 80px 80px 100px;gap:8px;padding:8px 0;border-bottom:1px solid var(--border-lo);align-items:start}
+  .recv-row:last-child{border-bottom:none}
+  .recv-hd{font-size:11px;font-weight:600;color:var(--ink-lo);text-transform:uppercase;letter-spacing:.06em}
+  .recv-running{font-family:var(--font-mono);font-weight:600}
+  .je-row{display:grid;grid-template-columns:1fr 2fr 110px 110px 32px;gap:6px;margin-bottom:6px;align-items:center}
+  .je-hd{display:grid;grid-template-columns:1fr 2fr 110px 110px 32px;gap:6px;padding-bottom:6px;font-size:11px;font-weight:600;color:var(--ink-lo);text-transform:uppercase;letter-spacing:.06em}
+  .filter-bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:16px}
+  .filter-bar input,.filter-bar select{width:auto;flex:1;min-width:140px}
+  .filter-label{font-size:12px;color:var(--ink-mid);white-space:nowrap}
+  .vendor-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px}
+  .vendor-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:14px;cursor:pointer;transition:border-color .12s,box-shadow .12s}
+  .vendor-card:hover{border-color:var(--amber);box-shadow:0 0 0 3px rgba(200,121,65,.10)}
+  .vendor-name{font-weight:600;font-size:13px;margin-bottom:4px}
+  .vendor-meta{font-size:11px;color:var(--ink-mid)}
+  .pmt-row{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border-lo);font-size:13px}
+  .pmt-row:last-child{border-bottom:none}
+  .empty-state{text-align:center;padding:48px 24px;color:var(--ink-lo)}
+  .empty-icon{font-size:32px;margin-bottom:10px}
+  .divider{border:none;border-top:1px solid var(--border-lo);margin:16px 0}
+  .text-right{text-align:right}.text-center{text-align:center}.fw600{font-weight:600}
+  .alert{padding:10px 14px;border-radius:var(--r);font-size:13px;margin-bottom:14px}
+  .alert-info{background:var(--yellow-lo);border:1px solid #EDD090;color:#6B4A10}
+  .alert-troy{background:var(--troy-lo);border:1px solid #C9A8F0;color:var(--troy)}
+  .alert-inv{background:var(--inv-lo);border:1px solid #A8D0E8;color:var(--inv)}
+  .tag{display:inline-block;padding:2px 7px;border-radius:3px;font-size:11px;background:var(--border-lo);color:var(--ink-mid)}
+  .rule-match{font-size:11px;color:var(--inv);margin-top:3px;font-style:italic}
+  .ing-cell{display:flex;flex-direction:column;gap:3px}
+  @media(max-width:900px){.tiles{grid-template-columns:1fr 1fr}.form-grid{grid-template-columns:1fr}.form-group.span-2{grid-column:1}.sidebar{width:190px}}
+  .recipe-line-hd{display:grid;grid-template-columns:2fr 1fr 1fr 36px;gap:8px;padding:0 0 6px;font-size:11px;font-weight:600;color:var(--ink-lo);letter-spacing:.06em;text-transform:uppercase}
+  .recipe-line-row{display:grid;grid-template-columns:2fr 1fr 1fr 36px;gap:8px;margin-bottom:6px;align-items:center}
+  .pastry-grid{display:grid;grid-template-columns:2fr 80px 80px 80px;gap:0;border:1px solid var(--border);border-radius:var(--r);overflow:hidden;margin-bottom:16px}
+  .pastry-hd{display:contents}
+  .pastry-hd span{padding:9px 12px;font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-mid);background:var(--bg);border-bottom:1px solid var(--border)}
+  .pastry-row{display:contents}
+  .pastry-row div{padding:8px 12px;border-bottom:1px solid var(--border-lo);display:flex;align-items:center;font-size:13px;background:var(--surface)}
+  .pastry-row:last-child div{border-bottom:none}
+  .pastry-row div input{padding:5px 8px;border:1px solid var(--border);border-radius:var(--r);font-size:13px;font-family:inherit;text-align:center;width:100%}
+  .pastry-row div input:focus{outline:none;border-color:var(--amber);box-shadow:0 0 0 2px rgba(200,121,65,.15)}
+  .var-pos{color:var(--green);font-weight:600}
+  .var-neg{color:var(--red);font-weight:600}
+  .var-zero{color:var(--ink-lo)}
+  .week-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);margin-bottom:12px;overflow:hidden}
+  .week-card-header{padding:12px 16px;background:var(--bg);border-bottom:1px solid var(--border-lo);display:flex;align-items:center;justify-content:space-between;cursor:pointer}
+  .week-card-body{padding:0}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body>
+<div id="login-screen" style="display:none;position:fixed;inset:0;background:var(--bg);z-index:200;display:flex;align-items:center;justify-content:center">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:40px;width:380px;box-shadow:var(--shadow-md)">
+    <div style="text-align:center;margin-bottom:28px">
+      <div style="font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--amber);margin-bottom:6px">Brew Culture Coffee</div>
+      <div style="font-size:20px;font-weight:700;margin-bottom:4px">Financial System</div>
+      <div style="font-size:13px;color:var(--ink-mid)">Sign in to continue</div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:12px">
+      <div style="display:flex;flex-direction:column;gap:5px">
+        <label style="font-size:12px;font-weight:500;color:var(--ink-mid)">Email</label>
+        <input type="email" id="login-email" placeholder="your@email.com" style="padding:10px 12px;border:1px solid var(--border);border-radius:var(--r);font-size:14px;font-family:inherit">
+      </div>
+      <div style="display:flex;flex-direction:column;gap:5px">
+        <label style="font-size:12px;font-weight:500;color:var(--ink-mid)">Password</label>
+        <input type="password" id="login-password" placeholder="Password" style="padding:10px 12px;border:1px solid var(--border);border-radius:var(--r);font-size:14px;font-family:inherit" onkeydown="if(event.key==='Enter')doLogin()">
+      </div>
+      <div id="login-err" style="color:var(--red);font-size:12px;min-height:16px"></div>
+
+      <button onclick="doLogin()" style="padding:11px;background:var(--amber);color:#fff;border:none;border-radius:var(--r);font-size:14px;font-weight:600;cursor:pointer;margin-top:4px">Sign In</button>
+    </div>
+  </div>
+</div>
+<div class="app" id="main-app" style="display:none">
+  <nav class="sidebar">
+    <div class="sidebar-header">
+      <div class="sidebar-logo">Brew Culture</div>
+      <div class="sidebar-title">Financial System</div>
+      <div class="sidebar-sub">Accrual basis · nonprofit · est. 11/1/25</div>
+    </div>
+    <div class="sidebar-section">Accounts Payable</div>
+    <button class="nav-item active" onclick="showView('dashboard')" id="nav-dashboard"><span class="nav-icon">◈</span> Dashboard</button>
+    <button class="nav-item" onclick="showView('invoices')" id="nav-invoices"><span class="nav-icon">≡</span> Invoices</button>
+    <button class="nav-item" onclick="showView('vendors')" id="nav-vendors"><span class="nav-icon">◉</span> Vendors</button>
+    <button class="nav-item" onclick="showView('payments')" id="nav-payments"><span class="nav-icon">⊡</span> Payments</button>
+    <div class="sidebar-section">Accounting</div>
+    <button class="nav-item" onclick="showView('gl')" id="nav-gl"><span class="nav-icon">⊞</span> GL Entries</button>
+    <button class="nav-item" onclick="showView('troy')" id="nav-troy"><span class="nav-icon">◇</span> 1300 · Troy Recv.</button>
+    <button class="nav-item" onclick="openJEModal()"><span class="nav-icon">✦</span> Journal Entry</button>
+    <div class="sidebar-section">Inventory</div>
+    <button class="nav-item" onclick="showView('fifo')" id="nav-fifo"><span class="nav-icon">&#9633;</span> FIFO Deliveries</button>
+    <button class="nav-item" onclick="showView('rules')" id="nav-rules"><span class="nav-icon">&#8644;</span> Matching Rules</button>
+    <div class="sidebar-section">Recipes</div>
+    <button class="nav-item" onclick="showView('ingredients')" id="nav-ingredients"><span class="nav-icon">&#9679;</span> Ingredients</button>
+    <button class="nav-item" onclick="showView('recipes')" id="nav-recipes"><span class="nav-icon">&#8801;</span> Recipes</button>
+    <div class="sidebar-section">Pastry Operations</div>
+    <button class="nav-item" onclick="showView('pastry-close')" id="nav-pastry-close"><span class="nav-icon">&#9633;</span> Daily Close</button>
+    <button class="nav-item" onclick="showView('pastry-tracker')" id="nav-pastry-tracker"><span class="nav-icon">&#9650;</span> Variance Tracker</button>
+    <button class="nav-item" onclick="showView('pastry-skus')" id="nav-pastry-skus"><span class="nav-icon">&#8801;</span> Pastry SKUs</button>
+    <div class="sidebar-section">Data</div>
+    <button class="nav-item" onclick="exportData()"><span class="nav-icon">↓</span> Export Backup</button>
+    <button class="nav-item" onclick="triggerImport()"><span class="nav-icon">&#8593;</span> Restore Backup</button>
+    <button class="nav-item" onclick="openMigrationTool()"><span class="nav-icon">&#8644;</span> Migrate to Supabase</button>
+    <input type="file" id="import-file-input" accept=".json" style="display:none" onchange="importData(this)">
+    <div style="padding:8px 8px 0">
+      <button class="nav-item" onclick="doSignOut()" style="color:rgba(255,255,255,.5);width:calc(100% - 0px);margin:0">
+        <span class="nav-icon">&#8594;</span> Sign Out
+      </button>
+    </div>
+    <div class="sidebar-stats" id="sidebar-stats"></div>
+  </nav>
+  <div class="main">
+    <div class="topbar">
+      <div>
+        <div class="topbar-title" id="page-title">AP Dashboard</div>
+        <div class="topbar-sub" id="page-sub">Brew Culture Coffee · Denver, CO</div>
+      </div>
+      <div class="topbar-actions" id="topbar-actions"></div>
+    </div>
+    <div class="content" id="content"></div>
+  </div>
+</div>
+</div>
+<div id="modal-root"></div>
+<script>
+// ═══════════════════════════════════════════════
+// INGREDIENT MASTER LIST
+// Reads from bc_ingredients (set by importer) with
+// hardcoded fallback so AP works standalone too.
+// ═══════════════════════════════════════════════
+const INGREDIENTS_FALLBACK=[
+  {name:"Almond Milk",unit:"oz",cat:"alt milk"},
+  {name:"Au Lait",unit:"oz",cat:"alt milk"},
+  {name:"Biscotti",unit:"ea",cat:"food"},
+  {name:"Breve Milk",unit:"oz",cat:"alt milk"},
+  {name:"Brew Culture Blend Beans",unit:"g",cat:"whole beans"},
+  {name:"Brew Culture Blend",unit:"ea",cat:"whole beans"},
+  {name:"Brew Culture Costa Rica",unit:"ea",cat:"whole beans"},
+  {name:"Brew Culture Dark",unit:"ea",cat:"whole beans"},
+  {name:"Brew Culture Decaf",unit:"ea",cat:"whole beans"},
+  {name:"Brew Culture Guatemala",unit:"ea",cat:"whole beans"},
+  {name:"Brew Culture Mexico",unit:"ea",cat:"whole beans"},
+  {name:"Brew Culture Peru",unit:"ea",cat:"whole beans"},
+  {name:"Burrito - Bacon",unit:"ea",cat:"food"},
+  {name:"Burrito - Chorizo",unit:"ea",cat:"food"},
+  {name:"Burrito - Chupacabra",unit:"ea",cat:"food"},
+  {name:"Burrito - Vegan",unit:"ea",cat:"food"},
+  {name:"Burrito - Veggie",unit:"ea",cat:"food"},
+  {name:"Cacio e Pepe Croissant",unit:"ea",cat:"food"},
+  {name:"Campazi",unit:"ea",cat:"coffee"},
+  {name:"Cardamon Syrup",unit:"g",cat:"syrup"},
+  {name:"Chocolate Chip Cookie",unit:"ea",cat:"food"},
+  {name:"Chocolate Croissant",unit:"ea",cat:"food"},
+  {name:"Chocolate Syrup",unit:"g",cat:"syrup"},
+  {name:"Cinnamon Roll",unit:"ea",cat:"food"},
+  {name:"Cinnamon Sugar Morning Bun",unit:"ea",cat:"food"},
+  {name:"Classic Crossaint",unit:"ea",cat:"food"},
+  {name:"Coconut Milk",unit:"oz",cat:"alt milk"},
+  {name:"Cold Brew",unit:"oz",cat:"coffee"},
+  {name:"Double Chocolate Muffin",unit:"ea",cat:"food"},
+  {name:"Drip Coffee",unit:"oz",cat:"coffee"},
+  {name:"Empanada",unit:"ea",cat:"food"},
+  {name:"Everything Bagel Puff",unit:"ea",cat:"food"},
+  {name:"Flor De Corazon",unit:"ea",cat:"whole beans"},
+  {name:"GF Spruce Bread",unit:"ea",cat:"food"},
+  {name:"Gluten Free Bacon Burriito",unit:"ea",cat:"food"},
+  {name:"Half and Half",unit:"oz",cat:"dairy"},
+  {name:"Herbal Chai",unit:"oz",cat:"chai"},
+  {name:"Hirwa",unit:"ea",cat:"whole beans"},
+  {name:"Hometown",unit:"ea",cat:"whole beans"},
+  {name:"Honey",unit:"g",cat:"syrup"},
+  {name:"Hot Water",unit:"oz",cat:"not coffee"},
+  {name:"Ibonia",unit:"ea",cat:"whole beans"},
+  {name:"Indonesia",unit:"ea",cat:"whole beans"},
+  {name:"Italian Soda",unit:"ea",cat:"not coffee"},
+  {name:"Kombucha",unit:"oz",cat:"kombucha"},
+  {name:"Lemon Poppyseed Scone",unit:"ea",cat:"food"},
+  {name:"Lemonade",unit:"oz",cat:"not coffee"},
+  {name:"Los Naranjos",unit:"ea",cat:"whole beans"},
+  {name:"Matcha",unit:"g",cat:"base"},
+  {name:"Noosa Yogurt",unit:"ea",cat:"food"},
+  {name:"Nutella Brioche Bun",unit:"ea",cat:"food"},
+  {name:"Oat Milk",unit:"oz",cat:"alt milk"},
+  {name:"Oatmeal",unit:"ea",cat:"food"},
+  {name:"OJ",unit:"ea",cat:"food"},
+  {name:"Parcero",unit:"ea",cat:"whole beans"},
+  {name:"Patter Bar",unit:"ea",cat:"food"},
+  {name:"Peanut Butter",unit:"tbsp",cat:"base"},
+  {name:"Pistachio Milk",unit:"oz",cat:"alt milk"},
+  {name:"Raspberry Cream Cheese Danish",unit:"ea",cat:"food"},
+  {name:"Rich Brownies",unit:"ea",cat:"food"},
+  {name:"Soy Milk",unit:"oz",cat:"alt milk"},
+  {name:"Spicy Chai",unit:"oz",cat:"chai"},
+  {name:"Sweet Chai",unit:"oz",cat:"chai"},
+  {name:"Tea Leaves",unit:"g",cat:"not coffee"},
+  {name:"Tea Bread",unit:"ea",cat:"food"},
+  {name:"Tiramisu Croissant Knot",unit:"ea",cat:"food"},
+  {name:"Tom's Bars - Chocolate",unit:"ea",cat:"food"},
+  {name:"Tom's Bars - Regular",unit:"ea",cat:"food"},
+  {name:"Tonic Water",unit:"oz",cat:"not coffee"},
+  {name:"Topo Chico / Perrier",unit:"ea",cat:"not coffee"},
+  {name:"Turmeric",unit:"tsp",cat:"base"},
+  {name:"Twice-Baked Blueberry Almond Croissant",unit:"ea",cat:"food"},
+  {name:"Vanilla Syrup",unit:"g",cat:"syrup"},
+  {name:"Vegan",unit:"ea",cat:"food"},
+  {name:"Velo De Novia",unit:"ea",cat:"whole beans"},
+  {name:"Whole Milk",unit:"oz",cat:"dairy"}
+];
+
+function loadIngredients(){
+  // Read from in-memory DB cache (loaded from Supabase on login)
+  if(DB.ingredients && DB.ingredients.length > 0){
+    return DB.ingredients.filter(i=>i.active!==false);
+  }
+  return INGREDIENTS_FALLBACK.filter(i=>i.active!==false);
+}
+
+// ═══════════════════════════════════════════════
+// CONSTANTS
+// ═══════════════════════════════════════════════
+const ACQUISITION_DATE='2025-11-01';
+const ERA={DC:'dc',TROY:'troy',DC_PAID:'dc-paid'};
+const ERA_LABELS={dc:'Dream Center',troy:'Troy (Pre-Acq.)','dc-paid':'DC Paid for Troy'};
+
+const COA=[
+  {acct:'1010',name:'Operating Checking',type:'Asset'},
+  {acct:'1020',name:'Savings / Reserve',type:'Asset'},
+  {acct:'1300',name:'Receivable — Prior Owner (Troy)',type:'Asset'},
+  {acct:'1410',name:'Coffee Inventory',type:'Asset'},
+  {acct:'1420',name:'Food & Pastry Inventory',type:'Asset'},
+  {acct:'1430',name:'Retail Merchandise Inventory',type:'Asset'},
+  {acct:'1440',name:'Supplies Inventory',type:'Asset'},
+  {acct:'1450',name:'Milk & Dairy Inventory',type:'Asset'},
+  {acct:'1460',name:'Syrup & Alt-Milk Inventory',type:'Asset'},
+  {acct:'2000',name:'Accounts Payable',type:'Liability'},
+  {acct:'2040',name:'Gift Card Liability',type:'Liability'},
+  {acct:'2100',name:'Loan — Denver Dream Center',type:'Liability'},
+  {acct:'3100',name:'Net Assets — Donated Acquisition',type:'Equity'},
+  {acct:'5010',name:'COGS — Coffee & Espresso',type:'Expense'},
+  {acct:'5020',name:'COGS — Food & Pastry',type:'Expense'},
+  {acct:'5030',name:'COGS — Retail',type:'Expense'},
+  {acct:'5040',name:'COGS — Supplies',type:'Expense'},
+  {acct:'5050',name:'COGS — Cold Brew Inputs',type:'Expense'},
+  {acct:'6010',name:'Rent',type:'Expense'},
+  {acct:'6020',name:'Utilities',type:'Expense'},
+  {acct:'6030',name:'Equipment Leases',type:'Expense'},
+  {acct:'6040',name:'Insurance',type:'Expense'},
+  {acct:'6050',name:'Volunteer Labor (Imputed)',type:'Expense'},
+  {acct:'6060',name:'Payroll — Wages & Salary',type:'Expense'},
+  {acct:'6070',name:'Payroll Taxes',type:'Expense'},
+  {acct:'6100',name:'Marketing & Events',type:'Expense'},
+  {acct:'6110',name:'Credit Card Fees',type:'Expense'},
+  {acct:'6120',name:'DoorDash Commission',type:'Expense'},
+  {acct:'6200',name:'General & Administrative',type:'Expense'},
+  {acct:'6210',name:'Software & Subscriptions',type:'Expense'},
+  {acct:'6220',name:'Repairs & Maintenance',type:'Expense'},
+];
+
+// GL account suggestions by ingredient category
+const CAT_GL={
+  'whole beans':'1410','coffee':'1410','alt milk':'1450','dairy':'1450',
+  'syrup':'1460','chai':'1460','base':'1440','food':'1420','kombucha':'1420',
+  'not coffee':'1440'
+};
+
+const VENDOR_TYPES=['Coffee Roaster','Food / Bakery','Dairy / Milk','Syrups / Supplies','Retail Goods','Rent / Lease','Utilities','Equipment Lease','Insurance','Software','Marketing','Other'];
+const VENDOR_DEFAULTS={'Coffee Roaster':['1410','5010'],'Food / Bakery':['1420','5020'],'Dairy / Milk':['1450','5040'],'Syrups / Supplies':['1460','5040'],'Retail Goods':['1430','5030'],'Rent / Lease':['6010'],'Utilities':['6020'],'Equipment Lease':['6030'],'Insurance':['6040'],'Software':['6210'],'Marketing':['6100'],'Other':['6200']};
+
+// ═══════════════════════════════════════════════
+// DATA LAYER
+// ═══════════════════════════════════════════════
+// ==================================================
+// SUPABASE CONNECTION
+// ==================================================
+const SUPABASE_URL = 'https://xsjcvvafhtpqifmzxzss.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhzamN2dmFmaHRwcWlmbXp4enNzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI0MDk0MjAsImV4cCI6MjA5Nzk4NTQyMH0.qZTRhtB8vQ4cCyRmvv2Gk9lYa7eJMsLSIkYoAHa0970';
+const _sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+  auth: {
+    autoRefreshToken: true,
+    persistSession: true,
+    detectSessionInUrl: false
+  }
+});
+
+const PASTRY_KEY='bc_pastry_log';
+const PASTRY_SKUS_KEY='bc_pastry_skus';
+const REBEL_BREAD_VENDOR='Rebel Bread';
+
+
+// Current user session
+let _session = null;
+let _userRole = 'admin';
+
+// In-memory DB cache -- loaded from Supabase on login
+// All writes go to Supabase immediately, then update cache
+let DB = {
+  vendors: [],
+  invoices: [],
+  payments: [],
+  gl: [],
+  fifo: [],
+  rules: [],
+  ingredients: [],
+  recipes: [],
+  pastryLog: [],
+  pastrySkus: []
+};
+
+// Supabase helpers
+async function sbGet(table, opts) {
+  opts = opts || {};
+  let q = _sb.from(table).select(opts.select || '*');
+  if(opts.order) q = q.order(opts.order, {ascending: opts.asc !== false});
+  if(opts.limit) q = q.limit(opts.limit);
+  const {data, error} = await q;
+  if(error) { console.error('sbGet error', table, error); return []; }
+  return data || [];
+}
+
+async function sbUpsert(table, records, opts) {
+  opts = opts || {};
+  const arr = Array.isArray(records) ? records : [records];
+  const {data, error} = await _sb.from(table).upsert(arr, {onConflict: opts.onConflict || 'id'});
+  if(error) { console.error('sbUpsert error', table, error); return false; }
+  return true;
+}
+
+async function sbDelete(table, id, col) {
+  col = col || 'id';
+  const {error} = await _sb.from(table).delete().eq(col, id);
+  if(error) { console.error('sbDelete error', table, error); return false; }
+  return true;
+}
+
+async function sbInsert(table, records) {
+  const arr = Array.isArray(records) ? records : [records];
+  const {data, error} = await _sb.from(table).insert(arr);
+  if(error) { console.error('sbInsert error', table, error); return false; }
+  return true;
+}
+
+// Load all data from Supabase into memory
+async function loadAllData() {
+  showLoadingOverlay('Loading your data...');
+  try {
+    const [vendors, invoices, payments, gl, fifo, rules,
+           ingredients, recipes, pastryLog, pastrySkus] = await Promise.all([
+      sbGet('vendors', {order:'name'}),
+      sbGet('invoices', {order:'invoice_date', asc:false}),
+      sbGet('payments', {order:'payment_date', asc:false}),
+      sbGet('gl_entries', {order:'entry_date', asc:false}),
+      sbGet('fifo_deliveries', {order:'delivery_date', asc:false}),
+      sbGet('fifo_rules'),
+      sbGet('ingredients', {order:'name'}),
+      sbGet('recipes', {order:'menu_item'}),
+      sbGet('pastry_log', {order:'log_date', asc:false}),
+      sbGet('pastry_skus', {order:'name'})
+    ]);
+
+    // Map Supabase column names to app field names
+    DB.vendors = vendors.map(v=>({...v, defaultAccts:v.default_accts||[]}));
+    DB.invoices = invoices.map(mapInvoiceFromDB);
+    DB.payments = payments.map(mapPaymentFromDB);
+    DB.gl = gl.map(mapGLFromDB);
+    DB.fifo = fifo.map(mapFIFOFromDB);
+    DB.rules = rules;
+    DB.ingredients = ingredients.map(function(i){return{name:i.name,unit:i.unit,cat:i.cat,notes:i.notes,active:i.active}});
+    DB.recipes = recipes.map(function(r){return{menu_item:r.menu_item,category:r.category,sale_price:r.sale_price,ingredient_name:r.ingredient_name,quantity:r.quantity,unit:r.unit}});
+    DB.pastryLog = pastryLog.map(mapPastryLogFromDB);
+    DB.pastrySkus = pastrySkus.map(function(s){return{name:s.name,code:s.code,unitPrice:s.unit_price,notes:s.notes,active:s.active}});
+
+    hideLoadingOverlay();
+  } catch(e) {
+    hideLoadingOverlay();
+    console.error('loadAllData error:', e);
+    alert('Error loading data: ' + e.message);
+  }
+}
+
+// Field mapping functions -- Supabase uses snake_case, app uses camelCase
+function mapInvoiceFromDB(r) {
+  return {
+    id: r.id, vendorId: r.vendor_id, invoiceNum: r.invoice_number,
+    date: r.invoice_date, dueDate: r.due_date, era: r.era, status: r.status,
+    lines: r.lines || [], total: r.total, amountPaid: r.amount_paid || 0,
+    balance: r.balance || 0, memo: r.memo, glPosted: r.gl_posted
+  };
+}
+
+function mapInvoiceToDB(inv) {
+  return {
+    id: inv.id, vendor_id: inv.vendorId, invoice_number: inv.invoiceNum,
+    invoice_date: inv.date, due_date: inv.dueDate, era: inv.era, status: inv.status,
+    lines: inv.lines, total: inv.total, amount_paid: inv.amountPaid || 0,
+    balance: inv.balance || 0, memo: inv.memo, gl_posted: inv.glPosted || false
+  };
+}
+
+function mapPaymentFromDB(r) {
+  return {
+    id: r.id, era: r.era, invoiceId: r.invoice_id, vendorId: r.vendor_id,
+    date: r.payment_date, amount: r.amount, method: r.method,
+    ref: r.reference, memo: r.memo, glPosted: r.gl_posted
+  };
+}
+
+function mapPaymentToDB(p) {
+  return {
+    id: p.id, era: p.era, invoice_id: p.invoiceId, vendor_id: p.vendorId,
+    payment_date: p.date, amount: p.amount, method: p.method,
+    reference: p.ref, memo: p.memo, gl_posted: p.glPosted || false
+  };
+}
+
+function mapGLFromDB(r) {
+  return {
+    id: r.id, date: r.entry_date, ref: r.ref, era: r.era,
+    memo: r.memo, entries: r.entries || []
+  };
+}
+
+function mapGLToDB(je) {
+  return {
+    id: je.id, entry_date: je.date, ref: je.ref, era: je.era,
+    memo: je.memo, entries: je.entries
+  };
+}
+
+function mapFIFOFromDB(r) {
+  return {
+    id: r.id, date: r.delivery_date, ingredient: r.ingredient,
+    category: r.category, qty: r.qty, remainingQty: r.remaining_qty,
+    invoiceQty: r.invoice_qty, invoiceUnit: r.invoice_unit,
+    multiplier: r.multiplier, totalCost: r.total_cost, unit: r.unit,
+    vendor: r.vendor, invoiceNo: r.invoice_no, apInvoiceId: r.ap_invoice_id
+  };
+}
+
+function mapFIFOToDB(d) {
+  return {
+    id: String(d.id), delivery_date: d.date, ingredient: d.ingredient,
+    category: d.category, qty: d.qty, remaining_qty: d.remainingQty,
+    invoice_qty: d.invoiceQty, invoice_unit: d.invoiceUnit,
+    multiplier: d.multiplier, total_cost: d.totalCost, unit: d.unit,
+    vendor: d.vendor, invoice_no: d.invoiceNo, ap_invoice_id: d.apInvoiceId
+  };
+}
+
+function mapPastryLogFromDB(r) {
+  return {
+    date: r.log_date, sku: r.sku, received: r.received,
+    billed: r.billed, unitPrice: r.unit_price, invoiceId: r.invoice_id
+  };
+}
+
+function mapPastryLogToDB(e) {
+  return {
+    log_date: e.date, sku: e.sku, received: e.received,
+    billed: e.billed, unit_price: e.unitPrice, invoice_id: e.invoiceId
+  };
+}
+
+// Sequence counter -- stored in localStorage as fallback
+const load=k=>{try{return JSON.parse(localStorage.getItem(k)||'null')}catch{return null}};
+const save=(k,v)=>localStorage.setItem(k,JSON.stringify(v));
+
+function nextSeq(p){const s=load('bc_seq')||{};s[p]=(s[p]||0)+1;save('bc_seq',s);return`${p}-${String(s[p]).padStart(4,'0')}`}
+const nextGLId=()=>`GL-${String(DB.gl.length+1).padStart(4,'0')}`;
+
+// persist() -- now saves to Supabase (called after bulk operations)
+// Individual saves use sbUpsert directly
+const persist=()=>{
+  // No-op for Supabase -- writes happen immediately via sbUpsert
+  // Kept for compatibility with functions that call persist()
+};
+
+// Loading overlay
+function showLoadingOverlay(msg){
+  let ov=document.getElementById('loading-overlay');
+  if(!ov){ov=document.createElement('div');ov.id='loading-overlay';
+    ov.style.cssText='position:fixed;inset:0;background:rgba(255,255,255,.85);z-index:300;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:12px';
+    document.body.appendChild(ov);}
+  ov.innerHTML='<div style="width:32px;height:32px;border:3px solid var(--border);border-top-color:var(--amber);border-radius:50%;animation:spin .8s linear infinite"></div><div style="font-size:13px;color:var(--ink-mid)">'+msg+'</div>';
+  ov.style.display='flex';
+}
+function hideLoadingOverlay(){const ov=document.getElementById('loading-overlay');if(ov)ov.style.display='none'}
+
+// Add spin animation
+const _style=document.createElement('style');
+_style.textContent='@keyframes spin{to{transform:rotate(360deg)}}';
+document.head.appendChild(_style);
+
+// ═══════════════════════════════════════════════
+// RULE MATCHING
+// ═══════════════════════════════════════════════
+function findRule(description){
+  if(!description)return null;
+  const desc=description.toLowerCase();
+  return DB.rules.find(r=>r.match&&desc.includes(r.match.toLowerCase()))||null;
+}
+
+function ingredientForLine(line){
+  // Returns {ingredient, category, unit, multiplier, qty} or null
+  if(!line.ingredient)return null;
+  const ing=loadIngredients().find(i=>i.name===line.ingredient);
+  if(!ing)return null;
+  const rule=DB.rules.find(r=>r.ingredient===line.ingredient);
+  const multiplier=rule?rule.multiplier:1;
+  const qty=(line.qty||1)*multiplier;
+  return{ingredient:ing.name,category:ing.cat,unit:ing.unit,multiplier,qty};
+}
+
+// ═══════════════════════════════════════════════
+// HELPERS
+// ═══════════════════════════════════════════════
+const $=id=>document.getElementById(id);
+const fmt=n=>{const abs=Math.abs(n||0).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g,',');return n<0?`($${abs})`:`$${abs}`};
+const fmtDate=s=>s?new Date(s+'T12:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}):'—';
+const todayStr=()=>new Date().toISOString().slice(0,10);
+const isOverdue=inv=>inv.status!=='paid'&&inv.status!=='void'&&inv.dueDate&&inv.dueDate<todayStr();
+const daysUntilDue=inv=>{if(!inv.dueDate)return null;return Math.ceil((new Date(inv.dueDate+'T12:00:00')-new Date())/86400000)};
+const vendorName=id=>{const v=DB.vendors.find(x=>x.id===id);return v?v.name:id};
+const acctLabel=c=>{const a=COA.find(x=>x.acct===c);return a?`${c} · ${a.name}`:c};
+function inferStatus(inv){if(inv.status==='void')return'void';if(inv.amountPaid<=0)return isOverdue(inv)?'overdue':'open';if(inv.amountPaid>=inv.total)return'paid';return'partial'}
+function badgeHtml(s){const c={open:'badge-open',partial:'badge-partial',paid:'badge-paid',void:'badge-void',overdue:'badge-overdue'};return`<span class="badge ${c[s]||'badge-open'}">${s.charAt(0).toUpperCase()+s.slice(1)}</span>`}
+function eraPill(e){const cfg={dc:['era-dc','● DC'],troy:['era-troy','◇ Troy'],'dc-paid':['era-dc-paid','↑ DC→Troy']};const[cls,lbl]=cfg[e]||['era-dc','DC'];return`<span class="era-pill ${cls}">${lbl}</span>`}
+
+function troyReceivable(){
+  let balance=0;const lines=[];
+  DB.gl.forEach(je=>je.entries.forEach(e=>{
+    if(e.acct==='1300'){const net=(e.dr||0)-(e.cr||0);balance+=net;lines.push({date:je.date,ref:je.ref,memo:je.memo,dr:e.dr||0,cr:e.cr||0,net,era:je.era})}
+  }));
+  lines.sort((a,b)=>a.date.localeCompare(b.date));
+  let r=0;lines.forEach(l=>{r+=l.net;l.running=r});
+  return{balance,lines};
+}
+
+function apSummary(){
+  let totalOpen=0,totalOverdue=0,dueSoon=0,paidMTD=0;
+  const now=new Date();
+  DB.invoices.forEach(inv=>{
+    if(inv.status==='void'||inv.era===ERA.TROY)return;
+    if(inv.balance>0){totalOpen+=inv.balance;if(isOverdue(inv))totalOverdue+=inv.balance;const d=daysUntilDue(inv);if(d!==null&&d>=0&&d<=7)dueSoon+=inv.balance}
+    const id=new Date(inv.date+'T12:00:00');
+    if(id.getMonth()===now.getMonth()&&id.getFullYear()===now.getFullYear()&&inv.era===ERA.DC)paidMTD+=inv.amountPaid||0;
+  });
+  return{totalOpen,totalOverdue,dueSoon,paidMTD};
+}
+
+// ═══════════════════════════════════════════════
+// NAV
+// ═══════════════════════════════════════════════
+let currentView='dashboard';
+function showView(view){
+  currentView=view;
+  document.querySelectorAll('.nav-item').forEach(el=>el.classList.remove('active'));
+  const el=$(`nav-${view}`);if(el)el.classList.add('active');
+  updateSidebarStats();
+  const titles={dashboard:['AP Dashboard','Open payables · aging summary'],invoices:['Invoices','All vendor invoices'],vendors:['Vendors','Manage payees'],payments:['Payments','Payment history'],gl:['GL Entries','Journal entries — all eras'],troy:['1300 · Troy Receivable','Prior owner balance ledger'],fifo:['FIFO Deliveries','Inventory delivery log'],rules:['Matching Rules','Vendor product → ingredient mapping'],ingredients:['Ingredients','Active ingredient master list'],recipes:['Recipes','Menu item ingredient definitions'],'pastry-close':['Pastry Daily Close','Enter received quantities · compare vs invoiced'],'pastry-tracker':['Pastry Variance Tracker','Received vs billed by item and week'],'pastry-skus':['Pastry SKUs','Rebel Bread item management']};
+  const[title,sub]=titles[view]||['AP',''];
+  $('page-title').textContent=title;$('page-sub').textContent=sub;
+  const renders={dashboard:renderDashboard,invoices:renderInvoices,vendors:renderVendors,payments:renderPayments,gl:renderGL,troy:renderTroy,fifo:renderFIFO,rules:renderRules,ingredients:renderIngredients,recipes:renderRecipes,'pastry-close':renderPastryClose,'pastry-tracker':renderPastryTracker,'pastry-skus':renderPastrySkus};
+  if(renders[view])renders[view]();
+}
+
+function updateSidebarStats(){
+  const s=apSummary();const troy=troyReceivable();
+  const invCount=DB.fifo.length;
+  const ings=loadIngredients();
+  const activeIngs=ings.length;
+  const inactiveIngs=(()=>{try{const v=localStorage.getItem('bc_ingredients');return v?JSON.parse(v):[]}catch{return[]}})().filter(i=>i.active===false).length;
+  const menuItemCount=Object.keys(getMenuItems()).length;
+  const recipeLineCount=(()=>{try{const v=localStorage.getItem('bc_recipes');return v?JSON.parse(v):[]}catch{return[]}})().length;
+  $('sidebar-stats').innerHTML=`
+    <div class="stat-row"><span>DC Open AP</span><span class="stat-val">${fmt(s.totalOpen)}</span></div>
+    <div class="stat-row"><span>Overdue</span><span class="stat-val" style="color:#E07060">${fmt(s.totalOverdue)}</span></div>
+    <div class="stat-row"><span>Due ≤7d</span><span class="stat-val" style="color:#D4943A">${fmt(s.dueSoon)}</span></div>
+    <div style="border-top:1px solid rgba(255,255,255,.10);margin:8px 0"></div>
+    <div class="stat-row"><span>Troy 1300</span><span class="stat-val stat-troy">${fmt(troy.balance)}</span></div>
+    <div style="border-top:1px solid rgba(255,255,255,.10);margin:8px 0"></div>
+    <div class="stat-row"><span>Invoices</span><span class="stat-val">${DB.invoices.length}</span></div>
+    <div class="stat-row"><span>FIFO layers</span><span class="stat-val">${invCount}</span></div>
+    <div class="stat-row"><span>Match rules</span><span class="stat-val">${DB.rules.length}</span></div>
+    <div style="border-top:1px solid rgba(255,255,255,.10);margin:8px 0"></div>
+    <div class="stat-row"><span>Ingredients</span><span class="stat-val">${activeIngs} / ${inactiveIngs} inactive</span></div>
+    <div class="stat-row"><span>Menu items</span><span class="stat-val">${menuItemCount}</span></div>
+    <div class="stat-row"><span>Recipe lines</span><span class="stat-val">${recipeLineCount}</span></div>
+    <div style="margin-top:10px;font-size:10px;color:rgba(255,255,255,.22)">${new Date().toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}</div>`;
+}
+
+// ═══════════════════════════════════════════════
+// DASHBOARD
+// ═══════════════════════════════════════════════
+function renderDashboard(){
+  $('topbar-actions').innerHTML=`<button class="btn btn-primary" onclick="openInvoiceModal()">＋ New Invoice</button>`;
+  const s=apSummary();const troy=troyReceivable();
+  const aging={current:0,d1_30:0,d31_60:0,d61_90:0,over90:0};
+  DB.invoices.filter(i=>i.era===ERA.DC||i.era==='dc-paid').forEach(inv=>{
+    if(inv.status==='void'||inv.balance<=0)return;
+    const age=-(daysUntilDue(inv)||0);
+    if(age<=0)aging.current+=inv.balance;else if(age<=30)aging.d1_30+=inv.balance;else if(age<=60)aging.d31_60+=inv.balance;else if(age<=90)aging.d61_90+=inv.balance;else aging.over90+=inv.balance;
+  });
+  const troyTotal=DB.invoices.filter(i=>i.era===ERA.TROY).reduce((s,i)=>s+i.total,0);
+  const dcPaidTotal=DB.invoices.filter(i=>i.era==='dc-paid').reduce((s,i)=>s+i.total,0);
+  const troyCr=troy.lines.filter(l=>l.cr>0).reduce((s,l)=>s+l.cr,0);
+  const recent=[...DB.invoices].sort((a,b)=>b.date.localeCompare(a.date)).slice(0,7);
+  const recentRows=recent.map(inv=>{
+    const st=inferStatus(inv);
+    const invLines=inv.lines?inv.lines.filter(l=>l.ingredient).length:0;
+    return`<tr class="${inv.era==='troy'||inv.era==='dc-paid'?'tr-troy':isOverdue(inv)?'tr-overdue':''}">
+      <td class="mono">${inv.id}</td><td>${eraPill(inv.era||ERA.DC)}</td><td>${vendorName(inv.vendorId)}</td>
+      <td class="mono" style="color:var(--ink-mid)">${inv.invoiceNum||'—'}</td><td>${fmtDate(inv.date)}</td>
+      <td class="text-right mono">${fmt(inv.total)}</td>
+      <td class="text-right mono fw600" style="color:${inv.balance>0?'var(--red)':'var(--green)'}">${fmt(inv.balance)}</td>
+      <td>${badgeHtml(st)}</td>
+      <td>${invLines>0?`<span class="inv-pill">⬡ ${invLines} inv</span>`:''}</td>
+      <td><button class="btn btn-ghost btn-sm" onclick="viewInvoice('${inv.id}')">View</button></td>
+    </tr>`;
+  }).join('');
+  $('content').innerHTML=`
+    <div class="tiles">
+      <div class="tile red"><div class="tile-label">DC Open AP</div><div class="tile-val">${fmt(s.totalOpen)}</div><div class="tile-sub">${DB.invoices.filter(i=>i.era===ERA.DC&&i.balance>0&&i.status!=='void').length} open invoices</div></div>
+      <div class="tile ${s.totalOverdue>0?'red':'green'}"><div class="tile-label">Overdue</div><div class="tile-val">${fmt(s.totalOverdue)}</div><div class="tile-sub">${DB.invoices.filter(i=>isOverdue(i)&&i.era===ERA.DC).length} past due</div></div>
+      <div class="tile amber"><div class="tile-label">Due in 7 Days</div><div class="tile-val">${fmt(s.dueSoon)}</div><div class="tile-sub">Action needed soon</div></div>
+      <div class="tile troy"><div class="tile-label">1300 · Troy Receivable</div><div class="tile-val">${fmt(troy.balance)}</div><div class="tile-sub"><a href="#" onclick="showView('troy');return false" style="color:var(--troy)">View ledger →</a></div></div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px">
+      <div class="card">
+        <div class="card-header"><span class="card-title">DC AP Aging</span></div>
+        <div class="card-body">
+          ${[['Current',aging.current,false],['1–30 days past due',aging.d1_30,true],['31–60 days',aging.d31_60,true],['61–90 days',aging.d61_90,true],['>90 days',aging.over90,true]].map(([l,v,w])=>`
+            <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border-lo)">
+              <span style="font-size:13px;color:${w&&v>0?'var(--red)':'var(--ink)'}">${l}</span>
+              <span class="mono fw600" style="color:${w&&v>0?'var(--red)':'var(--ink-mid)'}">${fmt(v)}</span>
+            </div>`).join('')}
+          <div style="display:flex;justify-content:space-between;padding:10px 0 0"><span style="font-weight:700">Total</span><span class="mono fw600" style="font-size:15px;color:var(--red)">${fmt(s.totalOpen)}</span></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header"><span class="card-title">Troy Receivable</span><button class="btn btn-troy btn-sm" onclick="showView('troy')">Ledger →</button></div>
+        <div class="card-body">
+          ${[['Pre-acq. AP at 10/31/25',troyTotal,'var(--troy)'],['DC paid on Troy\'s behalf',dcPaidTotal,'#8B4500'],['Troy payments received',troyCr,'var(--green)']].map(([l,v,c])=>`
+            <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border-lo)">
+              <span style="font-size:13px">${l}</span><span class="mono fw600" style="color:${c}">${fmt(v)}</span>
+            </div>`).join('')}
+          <div style="display:flex;justify-content:space-between;padding:10px 0 0"><span style="font-weight:700">Net Balance</span><span class="mono fw600" style="font-size:15px;color:var(--troy)">${fmt(troy.balance)}</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-title">Recent Invoices</span><button class="btn btn-ghost btn-sm" onclick="showView('invoices')">View all →</button></div>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>ID</th><th>Era</th><th>Vendor</th><th>Ref #</th><th>Date</th><th class="text-right">Total</th><th class="text-right">Balance</th><th>Status</th><th>Inv</th><th></th></tr></thead>
+        <tbody>${recentRows||'<tr><td colspan="10" class="text-center" style="padding:24px;color:var(--ink-lo)">No invoices yet</td></tr>'}</tbody>
+      </table></div>
+    </div>`;
+}
+
+// ═══════════════════════════════════════════════
+// INVOICES VIEW
+// ═══════════════════════════════════════════════
+let invFilter={search:'',status:'all',vendor:'all',era:'all'};
+function renderInvoices(){
+  $('topbar-actions').innerHTML=`<button class="btn btn-primary" onclick="openInvoiceModal()">＋ New Invoice</button>`;
+  let invs=[...DB.invoices].sort((a,b)=>b.date.localeCompare(a.date));
+  if(invFilter.search){const q=invFilter.search.toLowerCase();invs=invs.filter(i=>i.id.toLowerCase().includes(q)||vendorName(i.vendorId).toLowerCase().includes(q)||(i.invoiceNum||'').toLowerCase().includes(q)||(i.memo||'').toLowerCase().includes(q))}
+  if(invFilter.status!=='all')invs=invs.filter(i=>inferStatus(i)===invFilter.status);
+  if(invFilter.vendor!=='all')invs=invs.filter(i=>i.vendorId===invFilter.vendor);
+  if(invFilter.era!=='all')invs=invs.filter(i=>(i.era||ERA.DC)===invFilter.era);
+  const rows=invs.map(inv=>{
+    const st=inferStatus(inv);const era=inv.era||ERA.DC;
+    const d=daysUntilDue(inv);
+    const dueLabel=d===null?'—':d<0?`<span style="color:var(--red)">Due ${Math.abs(d)}d ago</span>`:d===0?`<span style="color:var(--amber)">Due today</span>`:fmtDate(inv.dueDate);
+    const invLines=inv.lines?inv.lines.filter(l=>l.ingredient).length:0;
+    return`<tr class="${era==='troy'||era==='dc-paid'?'tr-troy':isOverdue(inv)?'tr-overdue':''}">
+      <td class="mono">${inv.id}</td><td>${eraPill(era)}</td><td>${vendorName(inv.vendorId)}</td>
+      <td class="mono" style="color:var(--ink-mid)">${inv.invoiceNum||'—'}</td><td>${fmtDate(inv.date)}</td><td>${dueLabel}</td>
+      <td class="text-right mono">${fmt(inv.total)}</td>
+      <td class="text-right mono fw600" style="color:${inv.balance>0?'var(--red)':'var(--green)'}">${fmt(inv.balance)}</td>
+      <td>${badgeHtml(st)}</td>
+      <td>${invLines>0?`<span class="inv-pill">⬡ ${invLines}</span>`:''}</td>
+      <td><div style="display:flex;gap:4px">
+        <button class="btn btn-ghost btn-sm" onclick="viewInvoice('${inv.id}')">View</button>
+        ${inv.balance>0&&st!=='void'?`<button class="btn btn-secondary btn-sm" onclick="openPaymentModal('${inv.id}')">Pay</button>`:''}
+      </div></td>
+    </tr>`;
+  }).join('');
+  $('content').innerHTML=`
+    <div class="filter-bar">
+      <span class="filter-label">Filter:</span>
+      <input placeholder="Search…" value="${invFilter.search}" oninput="invFilter.search=this.value;renderInvoices()">
+      <select onchange="invFilter.era=this.value;renderInvoices()">
+        <option value="all">All eras</option>
+        <option value="dc" ${invFilter.era==='dc'?'selected':''}>Dream Center</option>
+        <option value="troy" ${invFilter.era==='troy'?'selected':''}>Troy (Pre-Acq.)</option>
+        <option value="dc-paid" ${invFilter.era==='dc-paid'?'selected':''}>DC Paid for Troy</option>
+      </select>
+      <select onchange="invFilter.status=this.value;renderInvoices()">
+        <option value="all">All statuses</option>
+        <option value="open">Open</option><option value="overdue">Overdue</option>
+        <option value="partial">Partial</option><option value="paid">Paid</option><option value="void">Void</option>
+      </select>
+      <select onchange="invFilter.vendor=this.value;renderInvoices()">
+        <option value="all">All vendors</option>
+        ${[...DB.vendors].sort((a,b)=>a.name.localeCompare(b.name)).map(v=>`<option value="${v.id}" ${invFilter.vendor===v.id?'selected':''}>${v.name}</option>`).join('')}
+      </select>
+    </div>
+    <div class="card"><div class="tbl-wrap"><table>
+      <thead><tr><th>ID</th><th>Era</th><th>Vendor</th><th>Ref</th><th>Date</th><th>Due</th><th class="text-right">Total</th><th class="text-right">Balance</th><th>Status</th><th>Inv</th><th></th></tr></thead>
+      <tbody>${rows||'<tr><td colspan="11" class="text-center" style="padding:32px;color:var(--ink-lo)">No invoices match</td></tr>'}</tbody>
+    </table></div></div>`;
+}
+
+// ═══════════════════════════════════════════════
+// VENDORS
+// ═══════════════════════════════════════════════
+function renderVendors(){
+  $('topbar-actions').innerHTML=`<button class="btn btn-primary" onclick="openVendorModal()">＋ New Vendor</button>`;
+  const cards=[...DB.vendors].sort((a,b)=>a.name.localeCompare(b.name)).map(v=>{
+    const bal=DB.invoices.filter(i=>i.vendorId===v.id&&i.balance>0&&i.status!=='void').reduce((s,i)=>s+i.balance,0);
+    const cnt=DB.invoices.filter(i=>i.vendorId===v.id).length;
+    return`<div class="vendor-card" onclick="openVendorModal('${v.id}')">
+      <div class="vendor-name">${v.name}</div>
+      <div class="vendor-meta">${v.type} · Net ${v.terms||0}</div>
+      <div class="vendor-meta">${cnt} invoice${cnt!==1?'s':''}</div>
+      ${bal>0?`<div style="font-size:13px;font-weight:700;margin-top:8px;color:var(--red);font-family:var(--font-mono)">${fmt(bal)} open</div>`:`<div style="font-size:12px;color:var(--green);margin-top:8px;font-weight:600">Cleared ✓</div>`}
+    </div>`;
+  }).join('');
+  $('content').innerHTML=DB.vendors.length?`<div class="vendor-grid">${cards}</div>`:`<div class="empty-state"><div class="empty-icon">◉</div><div>No vendors yet</div></div>`;
+}
+
+// ═══════════════════════════════════════════════
+// PAYMENTS
+// ═══════════════════════════════════════════════
+function renderPayments(){
+  $('topbar-actions').innerHTML=`<button class="btn btn-primary" onclick="openPaymentModal()">＋ Record Payment</button>`;
+  const pmts=[...DB.payments].sort((a,b)=>b.date.localeCompare(a.date));
+  const total=pmts.reduce((s,p)=>s+p.amount,0);
+  const rows=pmts.map(p=>`<tr class="${p.era==='troy'||p.era==='dc-paid'?'tr-troy':''}">
+    <td class="mono">${p.id}</td><td>${eraPill(p.era||ERA.DC)}</td><td>${fmtDate(p.date)}</td>
+    <td>${vendorName(p.vendorId)}</td><td class="mono" style="color:var(--ink-mid)">${p.invoiceId}</td>
+    <td>${p.method}</td><td class="mono" style="color:var(--ink-mid)">${p.ref||'—'}</td>
+    <td class="text-right mono fw600" style="color:var(--green)">${fmt(p.amount)}</td>
+    <td>${p.memo||'—'}</td>
+  </tr>`).join('');
+  $('content').innerHTML=`<div class="card">
+    <div class="card-header"><span class="card-title">Payment History</span><span class="mono fw600" style="color:var(--green)">${fmt(total)} total</span></div>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>ID</th><th>Era</th><th>Date</th><th>Vendor</th><th>Invoice</th><th>Method</th><th>Reference</th><th class="text-right">Amount</th><th>Memo</th></tr></thead>
+      <tbody>${rows||'<tr><td colspan="9" class="text-center" style="padding:32px;color:var(--ink-lo)">No payments yet</td></tr>'}</tbody>
+    </table></div>
+  </div>`;
+}
+
+// ═══════════════════════════════════════════════
+// GL ENTRIES
+// ═══════════════════════════════════════════════
+function renderGL(){
+  $('topbar-actions').innerHTML=`<button class="btn btn-secondary" onclick="openJEModal()">＋ Journal Entry</button>`;
+  const entries=[...DB.gl].sort((a,b)=>b.date.localeCompare(a.date));
+  const html=entries.map(je=>{
+    const rows=je.entries.map(e=>`<tr>
+      <td style="padding:4px 12px;font-size:12px;font-family:var(--font-mono)">${e.acct}</td>
+      <td style="padding:4px 12px;font-size:12px;${e.cr>0?'padding-left:28px':''}">${e.cr>0?`<span style="color:var(--ink-mid);margin-left:14px">${e.name}</span>`:e.name}</td>
+      <td style="padding:4px 12px;font-size:12px;text-align:right;font-family:var(--font-mono)">${e.dr>0?fmt(e.dr):''}</td>
+      <td style="padding:4px 12px;font-size:12px;text-align:right;font-family:var(--font-mono);color:var(--ink-mid)">${e.cr>0?fmt(e.cr):''}</td>
+    </tr>`).join('');
+    return`<div class="card" style="margin-bottom:10px">
+      <div class="card-header" style="background:var(--bg)">
+        <div style="display:flex;align-items:center;gap:10px">
+          <span class="mono" style="font-size:12px;color:var(--ink-mid)">${je.id}</span>${eraPill(je.era||ERA.DC)}
+          <span style="font-size:13px;font-weight:600">${je.memo}</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px"><span class="tag">${je.ref}</span><span style="font-size:12px;color:var(--ink-mid)">${fmtDate(je.date)}</span></div>
+      </div>
+      <div style="padding:8px 0"><table style="width:100%">
+        <thead><tr>${['Acct','Description','Debit','Credit'].map((h,i)=>`<th style="padding:6px 12px;font-size:10px;color:var(--ink-lo);font-weight:600;letter-spacing:.06em;text-transform:uppercase;background:none;border-bottom:1px solid var(--border-lo);${i>=2?'text-align:right;width:110px':i===0?'width:80px':''}">${h}</th>`).join('')}</tr></thead>
+        <tbody>${rows}</tbody>
+      </table></div>
+    </div>`;
+  }).join('');
+  $('content').innerHTML=`<div class="alert alert-info" style="margin-bottom:16px">Auto-generated from invoices and payments. Use <strong>Journal Entry</strong> for adjustments and payroll deduction postings to 1300.</div>${html||'<div class="empty-state"><div class="empty-icon">⊞</div><div>No entries yet</div></div>'}`;
+}
+
+// ═══════════════════════════════════════════════
+// TROY LEDGER
+// ═══════════════════════════════════════════════
+function renderTroy(){
+  $('topbar-actions').innerHTML=`<button class="btn btn-troy" onclick="openJEModal('1300')">＋ Post Adjustment</button>`;
+  const{balance,lines}=troyReceivable();
+  const troyInvs=DB.invoices.filter(i=>i.era===ERA.TROY);
+  const dcPaidInvs=DB.invoices.filter(i=>i.era==='dc-paid');
+  const rows=lines.map(l=>`<div class="recv-row">
+    <span style="font-size:12px;color:var(--ink-mid)">${fmtDate(l.date)}</span>
+    <div><div style="font-size:13px">${l.memo}</div><div style="font-size:11px;color:var(--ink-lo)">${l.ref} · ${eraPill(l.era||ERA.TROY)}</div></div>
+    <span class="mono" style="text-align:right;color:var(--troy)">${l.dr>0?fmt(l.dr):''}</span>
+    <span class="mono" style="text-align:right;color:var(--green)">${l.cr>0?fmt(l.cr):''}</span>
+    <span class="recv-running" style="text-align:right;color:${l.running>0?'var(--troy)':'var(--green)'}">${fmt(l.running)}</span>
+  </div>`).join('');
+  $('content').innerHTML=`
+    <div class="alert alert-troy" style="margin-bottom:20px"><strong>1300 · Receivable — Prior Owner (Troy Reynolds)</strong><br>Read-only — calculated from GL. Adjust via era flags or Journal Entries. Will be settled through payroll deductions.</div>
+    <div class="tiles" style="grid-template-columns:repeat(3,1fr)">
+      <div class="tile troy"><div class="tile-label">Current Balance</div><div class="tile-val">${fmt(balance)}</div><div class="tile-sub">Troy owes Dream Center</div></div>
+      <div class="tile"><div class="tile-label">Pre-Acq. AP (Troy)</div><div class="tile-val" style="color:var(--troy)">${fmt(troyInvs.reduce((s,i)=>s+i.total,0))}</div><div class="tile-sub">${troyInvs.length} invoices</div></div>
+      <div class="tile"><div class="tile-label">DC Paid for Troy</div><div class="tile-val" style="color:#8B4500">${fmt(dcPaidInvs.reduce((s,i)=>s+i.total,0))}</div><div class="tile-sub">${dcPaidInvs.length} transactions</div></div>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-title">1300 Ledger</span><span style="font-size:12px;color:var(--ink-mid)">Debit = Troy owes more · Credit = balance reduced</span></div>
+      <div class="card-body" style="padding:14px 18px">
+        <div class="recv-row recv-hd"><span>Date</span><span>Description</span><span style="text-align:right">Debit</span><span style="text-align:right">Credit</span><span style="text-align:right">Balance</span></div>
+        ${rows||'<div class="empty-state" style="padding:24px"><div>No 1300 entries yet</div></div>'}
+        <div class="recv-row" style="border-top:2px solid var(--border);margin-top:4px;padding-top:12px">
+          <span></span><span style="font-weight:700">Net Balance Owed by Troy</span><span></span><span></span>
+          <span class="recv-running" style="text-align:right;font-size:15px;color:${balance>0?'var(--troy)':'var(--green)'}">${fmt(balance)}</span>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-title">Pre-Acquisition Invoices</span></div>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Invoice</th><th>Era</th><th>Vendor</th><th>Date</th><th class="text-right">Total</th><th class="text-right">Balance</th><th>Status</th><th></th></tr></thead>
+        <tbody>${[...troyInvs,...dcPaidInvs].sort((a,b)=>b.date.localeCompare(a.date)).map(inv=>`<tr class="tr-troy">
+          <td class="mono">${inv.id}</td><td>${eraPill(inv.era)}</td><td>${vendorName(inv.vendorId)}</td><td>${fmtDate(inv.date)}</td>
+          <td class="text-right mono">${fmt(inv.total)}</td>
+          <td class="text-right mono fw600" style="color:${inv.balance>0?'var(--troy)':'var(--green)'}">${fmt(inv.balance)}</td>
+          <td>${badgeHtml(inferStatus(inv))}</td>
+          <td><button class="btn btn-ghost btn-sm" onclick="viewInvoice('${inv.id}')">View</button></td>
+        </tr>`).join('')||'<tr><td colspan="8" class="text-center" style="padding:24px;color:var(--ink-lo)">None yet</td></tr>'}
+        </tbody>
+      </table></div>
+    </div>`;
+}
+
+// ═══════════════════════════════════════════════
+// FIFO DELIVERIES VIEW
+// ═══════════════════════════════════════════════
+function renderFIFO(){
+  $('topbar-actions').innerHTML='';
+  const layers=[...DB.fifo].sort((a,b)=>b.date.localeCompare(a.date));
+  const byIng={};
+  DB.fifo.filter(d=>d.remainingQty>0).forEach(d=>{
+    if(!byIng[d.ingredient])byIng[d.ingredient]={cat:d.category,total:0};
+    byIng[d.ingredient].total+=d.remainingQty;
+  });
+  const summaryRows=Object.entries(byIng).sort((a,b)=>a[0].localeCompare(b[0])).map(([name,info])=>{
+    const ing=loadIngredients().find(i=>i.name===name);
+    return`<tr><td>${name}</td><td><span class="tag">${info.cat}</span></td><td class="text-right mono">${info.total.toFixed(1)} ${ing?.unit||''}</td></tr>`;
+  }).join('');
+  const rows=layers.map(d=>`<tr>
+    <td>${fmtDate(d.date)}</td><td>${d.ingredient}</td><td><span class="tag">${d.category}</span></td>
+    <td class="text-right mono">${d.qty} ${d.unit}</td>
+    <td class="text-right mono" style="color:${d.remainingQty>0?'var(--green)':'var(--ink-lo)'}">${d.remainingQty} ${d.unit}</td>
+    <td class="text-right mono">${fmt(d.totalCost)}</td>
+    <td class="mono" style="color:var(--ink-mid)">${d.invoiceNo||'—'}</td>
+    <td>${d.vendor||'—'}</td>
+  </tr>`).join('');
+  $('content').innerHTML=`
+    <div class="alert alert-inv" style="margin-bottom:16px">⬡ Inventory layers written automatically when invoices with matched ingredients are saved. Each layer tracks remaining quantity for FIFO cost calculations.</div>
+    <div style="display:grid;grid-template-columns:1fr 2fr;gap:16px;margin-bottom:16px">
+      <div class="card">
+        <div class="card-header"><span class="card-title">Current Stock</span></div>
+        <div class="tbl-wrap"><table>
+          <thead><tr><th>Ingredient</th><th>Category</th><th class="text-right">On Hand</th></tr></thead>
+          <tbody>${summaryRows||'<tr><td colspan="3" class="text-center" style="padding:24px;color:var(--ink-lo)">No inventory yet</td></tr>'}</tbody>
+        </table></div>
+      </div>
+      <div class="card">
+        <div class="card-header"><span class="card-title">All Delivery Layers</span><span style="font-size:12px;color:var(--ink-mid)">${layers.length} total</span></div>
+        <div class="tbl-wrap"><table>
+          <thead><tr><th>Date</th><th>Ingredient</th><th>Category</th><th class="text-right">Received</th><th class="text-right">Remaining</th><th class="text-right">Cost</th><th>Invoice #</th><th>Vendor</th></tr></thead>
+          <tbody>${rows||'<tr><td colspan="8" class="text-center" style="padding:24px;color:var(--ink-lo)">No deliveries yet</td></tr>'}</tbody>
+        </table></div>
+      </div>
+    </div>`;
+}
+
+// ═══════════════════════════════════════════════
+// MATCHING RULES VIEW
+// ═══════════════════════════════════════════════
+function renderRules(){
+  $('topbar-actions').innerHTML=`<button class="btn btn-primary" onclick="openRuleModal()">＋ New Rule</button>`;
+  const rows=DB.rules.map(r=>`<tr>
+    <td>${r.match}</td><td>${r.ingredient}</td>
+    <td class="text-right mono">${r.multiplier}</td><td>${r.unit}</td>
+    <td style="color:var(--ink-mid);font-size:12px">${r.notes||'—'}</td>
+    <td><div style="display:flex;gap:4px">
+      <button class="btn btn-ghost btn-sm" onclick="openRuleModal('${r.id}')">Edit</button>
+      <button class="btn btn-danger btn-sm" onclick="deleteRule('${r.id}')">×</button>
+    </div></td>
+  </tr>`).join('');
+  $('content').innerHTML=`
+    <div class="alert alert-inv" style="margin-bottom:16px">Rules map vendor product descriptions to ingredients. When an invoice line item's description contains the match text, the ingredient is auto-selected and the multiplier converts purchase units to inventory units.</div>
+    <div class="card"><div class="tbl-wrap"><table>
+      <thead><tr><th>Match Text</th><th>Ingredient</th><th class="text-right">Multiplier</th><th>Inv Unit</th><th>Notes</th><th></th></tr></thead>
+      <tbody>${rows||'<tr><td colspan="6" class="text-center" style="padding:32px;color:var(--ink-lo)">No rules yet</td></tr>'}</tbody>
+    </table></div></div>`;
+}
+
+// ═══════════════════════════════════════════════
+// MODAL HELPERS
+// ═══════════════════════════════════════════════
+const closeModal=()=>$('modal-root').innerHTML='';
+function openModal(html){$('modal-root').innerHTML=`<div class="overlay" onclick="if(event.target===this)closeModal()">${html}</div>`}
+
+function eraSelector(current,sfx,fn){
+  const f=fn||'selectEra';
+  const opts=[['dc','sel-dc','Dream Center','Normal DC'],['troy','sel-troy','Troy (Pre-Acq.)','Unpaid at 10/31/25'],['dc-paid','sel-dc-paid','DC Paid for Troy','DC cash paid Troy\'s bill']];
+  return`<div class="era-selector" id="era-sel${sfx||''}">${opts.map(([val,cls,lbl,hint])=>`<div class="era-opt ${current===val?cls:''}" data-era="${val}" data-cls="${cls}" onclick="${f}('${val}','${cls}',this,'${sfx||''}')" title="${hint}">${lbl}</div>`).join('')}</div>`;
+}
+function selectEra(val,cls,el,sfx){
+  document.querySelectorAll(`#era-sel${sfx||''} .era-opt`).forEach(o=>o.className='era-opt');
+  el.classList.add(cls);const h=$(`era-val${sfx||''}`);if(h)h.value=val;
+}
+
+// ═══════════════════════════════════════════════
+// VIEW INVOICE
+// ═══════════════════════════════════════════════
+function viewInvoice(id){
+  const inv=DB.invoices.find(i=>i.id===id);if(!inv)return;
+  const vendor=DB.vendors.find(v=>v.id===inv.vendorId);
+  const st=inferStatus(inv);const era=inv.era||ERA.DC;
+  const pmts=DB.payments.filter(p=>p.invoiceId===id);
+  const eraNote=era==='troy'
+    ?`<div class="alert alert-troy" style="margin-bottom:14px">◇ <strong>Pre-acquisition</strong> — Troy's obligation at 10/31/25. Balance tracked in 1300 · Receivable.</div>`
+    :era==='dc-paid'
+    ?`<div class="alert" style="background:#FFE8CC;border:1px solid #D4791A;color:#8B4500;margin-bottom:14px">↑ <strong>DC paid on Troy's behalf</strong> — increases 1300 receivable.</div>`:'';
+  const lineRows=inv.lines.map(l=>{
+    const hasIng=!!l.ingredient;
+    const ing=hasIng?loadIngredients().find(i=>i.name===l.ingredient):null;
+    const rule=hasIng?DB.rules.find(r=>r.ingredient===l.ingredient):null;
+    const fifoQty=hasIng?(l.qty||1)*(rule?rule.multiplier:1):null;
+    return`<tr>
+      <td>${l.description}</td>
+      <td style="font-size:12px;color:var(--ink-mid)">${acctLabel(l.acct)}</td>
+      <td>${hasIng?`<div class="inv-pill">⬡ ${l.ingredient}</div>${rule?`<div style="font-size:10px;color:var(--ink-lo);margin-top:2px">${l.qty||1} × ${rule.multiplier} = ${fifoQty} ${ing?.unit}</div>`:''}`:''}</td>
+      <td class="text-right mono">${l.qty}</td>
+      <td class="text-right mono">${fmt(l.unitCost)}</td>
+      <td class="text-right mono fw600">${fmt(l.total)}</td>
+    </tr>`;
+  }).join('');
+  openModal(`<div class="modal">
+    <div class="modal-header">
+      <div><div class="modal-title">${inv.id} ${badgeHtml(st)} ${eraPill(era)}</div><div class="modal-sub">${vendor?.name||inv.vendorId} · Ref: ${inv.invoiceNum||'—'}</div></div>
+      <button class="close-btn" onclick="closeModal()">×</button>
+    </div>
+    <div class="modal-body">
+      ${eraNote}
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:16px;font-size:13px">
+        <div><div style="color:var(--ink-lo);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;margin-bottom:3px">Date</div>${fmtDate(inv.date)}</div>
+        <div><div style="color:var(--ink-lo);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;margin-bottom:3px">Due</div>${fmtDate(inv.dueDate)}</div>
+        <div><div style="color:var(--ink-lo);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;margin-bottom:3px">Era</div>${ERA_LABELS[era]}</div>
+      </div>
+      ${inv.memo?`<div style="margin-bottom:16px;padding:10px 12px;background:var(--bg);border-radius:var(--r);font-size:13px;color:var(--ink-mid)">${inv.memo}</div>`:''}
+      <table style="width:100%">
+        <thead><tr><th>Description</th><th>GL Account</th><th>Ingredient / FIFO</th><th class="text-right">Qty</th><th class="text-right">Unit Cost</th><th class="text-right">Total</th></tr></thead>
+        <tbody>${lineRows}</tbody>
+      </table>
+      <div class="invoice-totals">
+        <div class="totals-row"><span class="totals-label">Total</span><span class="totals-val">${fmt(inv.total)}</span></div>
+        <div class="totals-row"><span class="totals-label" style="color:var(--green)">Paid</span><span class="totals-val" style="color:var(--green)">(${fmt(inv.amountPaid)})</span></div>
+        <div class="totals-row totals-grand"><span class="totals-label" style="color:${inv.balance>0?(era==='troy'?'var(--troy)':'var(--red)'):'var(--green)'}">Balance Due</span><span class="totals-val" style="color:${inv.balance>0?(era==='troy'?'var(--troy)':'var(--red)'):'var(--green)'}">${fmt(inv.balance)}</span></div>
+      </div>
+      ${pmts.length?`<div style="margin-top:16px"><div class="card-title" style="margin-bottom:8px">Payments</div>${pmts.map(p=>`<div class="pmt-row"><div><span class="mono" style="font-size:12px;color:var(--ink-mid)">${p.id}</span> · ${fmtDate(p.date)} · ${p.method} ${p.ref?`<span class="tag">${p.ref}</span>`:''} ${eraPill(p.era||ERA.DC)}</div><span class="mono fw600" style="color:var(--green)">${fmt(p.amount)}</span></div>`).join('')}</div>`:''}
+    </div>
+    <div class="modal-footer">
+      ${vendorName(inv.vendorId).toLowerCase().includes('rebel bread')?`<button class="btn btn-inv" onclick="triggerPastryExtraction('${inv.id}')">Extract Pastry Detail</button>`:''}
+      ${inv.status!=='void'&&inv.balance>0?`<button class="btn btn-primary" onclick="closeModal();openPaymentModal('${inv.id}')">Record Payment</button>`:''}
+      <button class="btn btn-secondary" onclick="closeModal();openInvoiceModal('${inv.id}')">Edit</button>
+      ${inv.status!=='void'?`<button class="btn btn-danger" onclick="voidInvoice('${inv.id}')">Void</button>`:''}
+      <button class="btn btn-ghost" onclick="closeModal()">Close</button>
+    </div>
+  </div>`);
+}
+
+async function voidInvoice(id){
+  if(!confirm('Void this invoice? GL posting and FIFO layers will be reversed.'))return;
+  const inv=DB.invoices.find(i=>i.id===id);if(!inv)return;
+  inv.status='void';inv.balance=0;
+  // Remove FIFO layers from Supabase
+  await _sb.from('fifo_deliveries').delete().eq('ap_invoice_id', id);
+  DB.fifo=DB.fifo.filter(d=>d.apInvoiceId!==id);
+  // Reverse GL
+  const orig=DB.gl.find(g=>g.ref===inv.id);
+  if(orig){
+    const reversal={id:nextGLId(),date:todayStr(),ref:`${inv.id}-VOID`,era:inv.era||ERA.DC,
+      memo:`VOID reversal — ${inv.memo||inv.id}`,entries:orig.entries.map(e=>({...e,dr:e.cr,cr:e.dr}))};
+    await saveGLToSB(reversal);
+  }
+  await saveInvoiceToSB(inv);
+  closeModal();
+  const views={invoices:renderInvoices,dashboard:renderDashboard,troy:renderTroy};if(views[currentView])views[currentView]();
+  updateSidebarStats();
+}
+
+// ═══════════════════════════════════════════════
+// INVOICE MODAL — with FIFO integration
+// ═══════════════════════════════════════════════
+let lineItems=[];
+
+function openInvoiceModal(editId){
+  if(!editId) _lastRebelBreadFile = null; // reset on new invoice
+  const editing=editId?DB.invoices.find(i=>i.id===editId):null;
+  lineItems=editing?editing.lines.map(l=>({...l})):[{description:'',acct:'',ingredient:'',qty:1,unitCost:0,total:0}];
+  const era=editing?.era||ERA.DC;
+  const vendorOpts=[...DB.vendors.filter(v=>v.active)].sort((a,b)=>a.name.localeCompare(b.name)).map(v=>`<option value="${v.id}" ${editing?.vendorId===v.id?'selected':''}>${v.name}</option>`).join('');
+  openModal(`<div class="modal" style="max-width:960px">
+    <div class="modal-header">
+      <div><div class="modal-title">${editing?'Edit Invoice':'New Invoice'}</div><div class="modal-sub">${editing?editing.id:'Auto-assigned on save'}</div></div>
+      <button class="close-btn" onclick="closeModal()">×</button>
+    </div>
+    <div class="modal-body">
+      <div id="autoload-zone" style="margin-bottom:16px">
+        <div id="autoload-drop"
+          style="border:2px dashed var(--border);border-radius:var(--r);padding:18px;text-align:center;cursor:pointer;background:var(--bg);transition:border-color .15s,background .15s"
+          onclick="document.getElementById('autoload-file-input').click()"
+          ondragover="event.preventDefault();this.style.borderColor='var(--amber)';this.style.background='var(--amber-lo)'"
+          ondragleave="this.style.borderColor='var(--border)';this.style.background='var(--bg)'"
+          ondrop="event.preventDefault();this.style.borderColor='var(--border)';this.style.background='var(--bg)';handleInvoiceDrop(event)">
+          <div style="font-size:22px;margin-bottom:6px">📄</div>
+          <div style="font-size:13px;font-weight:600;margin-bottom:3px">Drop invoice PDF or image here</div>
+          <div style="font-size:11px;color:var(--ink-lo)">or click to browse · PDF, PNG, JPG, WebP · Auto-extracts line items via AI</div>
+        </div>
+        <input type="file" id="autoload-file-input" accept=".pdf,.png,.jpg,.jpeg,.webp" style="display:none" onchange="handleInvoiceFile(this.files[0])">
+        <div id="autoload-status" style="display:none;margin-top:10px;padding:10px 14px;background:var(--amber-lo);border:1px solid #E0B87A;border-radius:var(--r);font-size:13px;color:var(--accent)">
+          <span id="autoload-msg">Reading file…</span>
+        </div>
+        <div id="autoload-err" style="display:none;margin-top:8px;padding:8px 12px;background:var(--red-lo);border:1px solid #EAB5B1;border-radius:var(--r);font-size:12px;color:var(--red)"></div>
+      </div>
+      <div style="text-align:center;font-size:11px;color:var(--ink-lo);margin-bottom:14px">— or enter manually below —</div>
+      <div class="form-grid" style="margin-bottom:14px">
+        <div class="form-group"><label>Vendor *</label><select id="inv-vendor" onchange="onVendorChange(this.value)"><option value="">Select vendor…</option>${vendorOpts}</select></div>
+        <div class="form-group"><label>Vendor Invoice #</label><input id="inv-num" placeholder="e.g. 102455" value="${editing?.invoiceNum||''}"></div>
+        <div class="form-group"><label>Invoice Date *</label><input type="date" id="inv-date" value="${editing?.date||todayStr()}" onchange="autoEraFromDate(this.value)"></div>
+        <div class="form-group"><label>Due Date</label><input type="date" id="inv-due" value="${editing?.dueDate||''}"></div>
+        <div class="form-group span-2">
+          <label>Era — Who is responsible?</label>
+          ${eraSelector(era)}
+          <input type="hidden" id="era-val" value="${era}">
+          <span class="form-hint">Troy (Pre-Acq.) = unpaid at 10/31/25. DC Paid for Troy = DC cash paid Troy's bill. Both route to 1300 receivable.</span>
+        </div>
+        <div class="form-group span-2"><label>Memo</label><input id="inv-memo" placeholder="Brief description…" value="${editing?.memo||''}"></div>
+      </div>
+      <hr class="divider">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+        <div class="card-title">Line Items</div>
+        <div style="font-size:12px;color:var(--inv)">⬡ Lines with an ingredient selected will write to FIFO inventory on save</div>
+      </div>
+      <div class="line-items-hd"><span>Description</span><span>GL Account</span><span>Ingredient (optional)</span><span>Inv Qty</span><span>Conv Qty</span><span>Unit Cost</span><span>Total</span><span></span></div>
+      <div id="line-items-body"></div>
+      <button class="btn btn-ghost btn-sm" onclick="addLine()" style="margin-top:6px">＋ Add line</button>
+      <div class="invoice-totals" id="inv-totals"></div>
+    </div>
+    <div class="modal-footer">
+      <span id="inv-err" style="color:var(--red);font-size:12px;margin-right:auto"></span>
+      <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveInvoice('${editId||''}')">${editing?'Save Changes':'Save Invoice'}</button>
+    </div>
+  </div>`);
+  renderLineItems();
+  if(editing?.vendorId)onVendorChange(editing.vendorId,true);
+}
+
+// ─── AUTOLOADER ───
+let ANTHROPIC_API_KEY = ''; // loaded from Supabase config on login
+const ANTHROPIC_ENDPOINT='https://api.anthropic.com/v1/messages';
+
+function handleInvoiceDrop(e){
+  const file=e.dataTransfer.files[0];
+  if(file)handleInvoiceFile(file);
+}
+
+// handleInvoiceFile replaced by Rebel Bread aware version below
+
+function showAutoloadStatus(msg){
+  const s=$('autoload-status'),m=$('autoload-msg'),e=$('autoload-err');
+  if(s){s.style.display='block';if(m)m.textContent=msg}
+  if(e)e.style.display='none';
+}
+function hideAutoloadStatus(){const s=$('autoload-status');if(s)s.style.display='none'}
+function showAutoloadErr(msg){
+  hideAutoloadStatus();
+  const e=$('autoload-err');if(e){e.textContent=msg;e.style.display='block'}
+}
+
+async function runInvoiceExtraction(file){
+  showAutoloadStatus('Reading file…');
+  const ext=file.name.split('.').pop().toLowerCase();
+  const isPdf=ext==='pdf';
+  const mediaType=isPdf?'application/pdf':(file.type||'image/jpeg');
+  let b64;
+  try{
+    b64=await new Promise((res,rej)=>{
+      const r=new FileReader();
+      r.onload=()=>res(r.result.split(',')[1]);
+      r.onerror=()=>rej(new Error('Could not read file'));
+      r.readAsDataURL(file);
+    });
+  }catch(e){showAutoloadErr('Could not read file: '+e.message);return}
+
+  showAutoloadStatus('Extracting invoice data via AI…');
+
+  const content=isPdf
+    ?[{type:'document',source:{type:'base64',media_type:'application/pdf',data:b64}},{type:'text',text:'Extract invoice data as JSON.'}]
+    :[{type:'image',source:{type:'base64',media_type:mediaType,data:b64}},{type:'text',text:'Extract invoice data as JSON.'}];
+
+  const sysPrompt='You are an invoice parser for a coffee shop. Extract all line items and return ONLY valid JSON (no markdown, no backticks) with this structure: {"invoice_date":"YYYY-MM-DD","vendor":"string","invoice_number":"string","lines":[{"raw_description":"string","matched_ingredient":"string or null","match_confidence":"exact|fuzzy|none","quantity":number,"unit":"string","unit_price":number,"line_total":number,"notes":"string or null"}]}. Known ingredients: '+loadIngredients().map(i=>i.name).join(', ')+'. Match each line to the closest ingredient. exact=close name match, fuzzy=partial, none=no match. Return ONLY the JSON object.';
+
+  try{
+    const resp=await fetch(ANTHROPIC_ENDPOINT,{
+      method:'POST',
+      headers:{
+        'Content-Type':'application/json',
+        'x-api-key':ANTHROPIC_API_KEY,
+        'anthropic-version':'2023-06-01',
+        'anthropic-dangerous-direct-browser-access':'true'
+      },
+      body:JSON.stringify({model:'claude-haiku-4-5-20251001',max_tokens:2000,system:sysPrompt,messages:[{role:'user',content}]})
+    });
+    const rawText=await resp.text();
+    if(!resp.ok){showAutoloadErr('API error '+resp.status+': '+rawText.slice(0,200));return}
+    let data;
+    try{data=JSON.parse(rawText)}catch(e){showAutoloadErr('Bad API response: '+rawText.slice(0,150));return}
+    if(data.error){showAutoloadErr('API error: '+data.error.message);return}
+    const text=(data.content||[]).filter(c=>c.type==='text').map(c=>c.text).join('').trim();
+    if(!text){showAutoloadErr('Empty response from API.');return}
+    let parsed;
+    try{parsed=JSON.parse(text.replace(/```json|```/g,'').trim())}catch(e){showAutoloadErr('Could not parse response: '+text.slice(0,200));return}
+
+    hideAutoloadStatus();
+    if(parsed.invoice_date){$('inv-date').value=parsed.invoice_date;autoEraFromDate(parsed.invoice_date)}
+    if(parsed.invoice_number&&!$('inv-num').value)$('inv-num').value=parsed.invoice_number;
+    if(parsed.vendor){
+      const vendorEl=$('inv-vendor');
+      const match=DB.vendors.find(v=>v.name.toLowerCase().includes(parsed.vendor.toLowerCase())||parsed.vendor.toLowerCase().includes(v.name.toLowerCase()));
+      if(match&&vendorEl){vendorEl.value=match.id;onVendorChange(match.id,false)}
+    }
+    lineItems=(parsed.lines||[]).map(l=>{
+      const rule=DB.rules.find(r=>l.raw_description&&l.raw_description.toLowerCase().includes(r.match.toLowerCase()));
+      const ingredient=rule?rule.ingredient:(l.matched_ingredient&&l.match_confidence!=='none'?l.matched_ingredient:'');
+      const ing=ingredient?loadIngredients().find(i=>i.name===ingredient):null;
+      const suggestedAcct=ing?CAT_GL[ing.cat]||'1440':'';
+      return{description:l.raw_description||'',acct:suggestedAcct,ingredient:ingredient||'',unit:l.unit||'',qty:l.quantity||1,unitCost:l.unit_price||0,total:l.line_total||((l.quantity||1)*(l.unit_price||0))};
+    });
+    if(lineItems.length===0)lineItems=[{description:'',acct:'',ingredient:'',qty:1,unitCost:0,total:0}];
+    renderLineItems();
+    showToast('Extracted '+lineItems.length+' line item'+(lineItems.length!==1?'s':'')+' — review and save');
+    const dz=$('autoload-zone');
+    if(dz)dz.innerHTML='<div style="padding:8px 12px;background:var(--green-lo);border:1px solid #A8D5B8;border-radius:var(--r);font-size:12px;color:var(--green)">✓ Extracted from <strong>'+file.name+'</strong> — '+lineItems.length+' lines loaded. Review below and confirm ingredients.</div>';
+  }catch(e){showAutoloadErr('Extraction failed: '+e.message)}
+}
+
+
+function autoEraFromDate(v){
+  if(v&&v<ACQUISITION_DATE){const h=$('era-val');if(h&&h.value===ERA.DC){h.value=ERA.TROY;document.querySelectorAll('#era-sel .era-opt').forEach(o=>{o.className='era-opt';if(o.dataset.era==='troy')o.classList.add('sel-troy')})}}
+}
+
+function onVendorChange(vendorId,silent){
+  const vendor=DB.vendors.find(v=>v.id===vendorId);if(!vendor)return;
+  const de=$('inv-date'),du=$('inv-due');
+  if(de?.value&&(!du.value||!silent)){const d=new Date(de.value+'T12:00:00');d.setDate(d.getDate()+(vendor.terms||30));du.value=d.toISOString().slice(0,10)}
+  if(!silent&&lineItems.length===1&&!lineItems[0].acct&&vendor.defaultAccts?.length){lineItems[0].acct=vendor.defaultAccts[0];renderLineItems()}
+}
+
+function buildIngOptions(selectedName){
+  const ings=loadIngredients().sort((a,b)=>a.name.localeCompare(b.name));
+  return '<option value="">— no ingredient —</option>'+ings.map(i=>`<option value="${i.name}" ${i.name===(selectedName||'')?'selected':''}>${i.name} (${i.cat})</option>`).join('');
+}
+
+function renderLineItems(){
+  const body=$('line-items-body');if(!body)return;
+  body.innerHTML=lineItems.map((line,i)=>{
+    const rule=line.ingredient?DB.rules.find(r=>r.ingredient===line.ingredient):null;
+    const autoMatch=!line.ingredient&&line.description?findRule(line.description):null;
+    const convQty=rule?(line.qty||1)*rule.multiplier:null;
+    const convUnit=rule?(loadIngredients().find(x=>x.name===line.ingredient)?.unit||rule.unit):'';
+    // Converted qty cell — shows result when rule exists, dash otherwise
+    const convQtyCell=rule
+      ?`<div style="display:flex;flex-direction:column;gap:2px">
+          <div id="conv-qty-${i}" style="padding:8px 10px;background:var(--inv-lo);border:1px solid #A8D0E8;border-radius:var(--r);font-size:12px;font-family:var(--font-mono);color:var(--inv);font-weight:600">${convQty} ${convUnit}</div>
+          <div style="font-size:10px;color:var(--inv);opacity:.7">×${rule.multiplier} rule</div>
+        </div>`
+      :autoMatch
+      ?`<div style="padding:8px 10px;background:var(--amber-lo);border:1px solid #E0B87A;border-radius:var(--r);font-size:11px;color:var(--amber);cursor:pointer" onclick="applyAutoMatch(${i},'${autoMatch.ingredient}')">⚡ apply: ${autoMatch.ingredient}</div>`
+      :`<div style="padding:8px 10px;color:var(--ink-lo);font-size:12px;text-align:center">—</div>`;
+    return`<div class="line-item-row${line.ingredient?' has-ingredient':''}">
+      <input placeholder="Description from invoice" value="${line.description||''}"
+        oninput="lineItems[${i}].description=this.value;autoMatchIngredient(${i},this.value)">
+      <select onchange="lineItems[${i}].acct=this.value">
+        <option value="">Account…</option>
+        ${COA.filter(a=>a.type!=='Liability'&&a.type!=='Equity').map(a=>`<option value="${a.acct}" ${line.acct===a.acct?'selected':''}>${a.acct} · ${a.name}</option>`).join('')}
+      </select>
+      <div class="ing-cell">
+        <select id="ing-sel-${i}" onchange="lineItems[${i}].ingredient=this.value;onIngredientChange(${i})">
+          ${buildIngOptions(line.ingredient||"")}
+        </select>
+      </div>
+      <input type="number" min="0" step="any" value="${line.qty||1}" oninput="lineItems[${i}].qty=+this.value;updateLineTotal(${i});updateConvQty(${i})">
+      ${convQtyCell}
+      <input type="number" min="0" step="0.01" value="${line.unitCost||''}" placeholder="0.00" oninput="lineItems[${i}].unitCost=+this.value;updateLineTotal(${i})">
+      <div class="line-total" id="lt-${i}">${fmt((line.qty||1)*(line.unitCost||0))}</div>
+      <button class="rm-btn" onclick="removeLine(${i})">×</button>
+    </div>`;
+  }).join('');
+  updateTotals();
+}
+
+function applyAutoMatch(i, ingredient){
+  lineItems[i].ingredient=ingredient;
+  onIngredientChange(i);
+}
+
+function updateConvQty(i){
+  const rule=lineItems[i].ingredient?DB.rules.find(r=>r.ingredient===lineItems[i].ingredient):null;
+  if(!rule)return;
+  const el=$(`conv-qty-${i}`);
+  if(!el)return;
+  const ing=loadIngredients().find(x=>x.name===lineItems[i].ingredient);
+  const convQty=(lineItems[i].qty||1)*rule.multiplier;
+  el.textContent=convQty+' '+(ing?.unit||rule.unit);
+}
+
+function autoMatchIngredient(i,desc){
+  // Auto-suggest ingredient from rule if description matches and no ingredient set
+  if(lineItems[i].ingredient)return;
+  const rule=findRule(desc);
+  if(rule){
+    // Just refresh hint display — don't auto-set to avoid unwanted assignments
+    refreshRuleHint(i);
+  }
+  // Re-render just the hint area
+  const body=$('line-items-body');if(body)renderLineItems();
+}
+
+function onIngredientChange(i){
+  const ing=loadIngredients().find(x=>x.name===lineItems[i].ingredient);
+  if(!ing)return;
+  // Auto-suggest GL account based on ingredient category
+  if(!lineItems[i].acct||lineItems[i].acct===''){
+    const suggestedAcct=CAT_GL[ing.cat]||'1440';
+    lineItems[i].acct=suggestedAcct;
+  }
+  renderLineItems();
+}
+
+function refreshRuleHint(i){
+  // Conv qty cell is now handled by updateConvQty — kept for compatibility
+  updateConvQty(i);
+}
+
+function updateLineTotal(i){lineItems[i].total=(lineItems[i].qty||1)*(lineItems[i].unitCost||0);const el=$(`lt-${i}`);if(el)el.textContent=fmt(lineItems[i].total);updateTotals()}
+function updateTotals(){const sub=lineItems.reduce((s,l)=>s+((l.qty||1)*(l.unitCost||0)),0);const t=$('inv-totals');if(t)t.innerHTML=`<div class="totals-row"><span class="totals-label">Subtotal</span><span class="totals-val">${fmt(sub)}</span></div><div class="totals-row totals-grand"><span class="totals-label">Total</span><span class="totals-val">${fmt(sub)}</span></div>`}
+function addLine(){const v=$('inv-vendor')?.value;const vnd=DB.vendors.find(x=>x.id===v);lineItems.push({description:'',acct:vnd?.defaultAccts?.[0]||'',ingredient:'',qty:1,unitCost:0,total:0});renderLineItems()}
+function removeLine(i){if(lineItems.length===1)return;lineItems.splice(i,1);renderLineItems()}
+
+async function saveInvoice(editId){
+  const vendorId=$('inv-vendor').value,date=$('inv-date').value,dueDate=$('inv-due').value;
+  const memo=$('inv-memo').value.trim(),invoiceNum=$('inv-num').value.trim(),era=$('era-val').value||ERA.DC;
+  const errEl=$('inv-err');
+  if(!vendorId){errEl.textContent='Select a vendor.';return}
+  if(!date){errEl.textContent='Invoice date required.';return}
+  if(lineItems.some(l=>!l.acct)){errEl.textContent='Each line needs a GL account.';return}
+  const lines=lineItems.map(l=>({...l,total:(l.qty||1)*(l.unitCost||0)}));
+  const subtotal=lines.reduce((s,l)=>s+l.total,0);
+  const vName=vendorName(vendorId);
+
+  if(editId){
+    const inv=DB.invoices.find(i=>i.id===editId);const paid=inv.amountPaid||0;
+    // Remove old FIFO layers for this invoice from Supabase
+    await _sb.from('fifo_deliveries').delete().eq('ap_invoice_id', editId);
+    DB.fifo=DB.fifo.filter(d=>d.apInvoiceId!==editId);
+    Object.assign(inv,{vendorId,invoiceNum,date,dueDate,memo,era,lines,subtotal,tax:0,total:subtotal,balance:subtotal-paid});
+    await saveInvoiceToSB(inv);
+    // Remove old GL entries for this invoice
+    await _sb.from('gl_entries').delete().eq('ref', editId);
+    DB.gl=DB.gl.filter(g=>g.ref!==editId);
+    postInvoiceGL(inv);
+    writeFIFOLayers(inv);
+  }else{
+    const id=nextSeq('INV');
+    const inv={id,vendorId,invoiceNum,date,dueDate,memo,era,lines,subtotal,tax:0,total:subtotal,amountPaid:0,balance:subtotal,status:'open',glPosted:true};
+    await saveInvoiceToSB(inv);
+    postInvoiceGL(inv);
+    writeFIFOLayers(inv);
+  }
+  closeModal();
+  const views={invoices:renderInvoices,dashboard:renderDashboard,troy:renderTroy,fifo:renderFIFO};if(views[currentView])views[currentView]();
+  updateSidebarStats();
+
+  // Auto-run pastry extraction if this is a Rebel Bread invoice
+  const savedInvId = editId || DB.invoices[DB.invoices.length-1]?.id;
+  const savedInv = DB.invoices.find(i=>i.id===savedInvId);
+  const isRB = savedInv && vendorName(savedInv.vendorId).toLowerCase().includes('rebel bread');
+  if(isRB){
+    if(_lastRebelBreadFile){
+      // Small delay to let the modal close and UI settle before async extraction
+      setTimeout(function(){
+        showToast('Extracting Rebel Bread daily pastry detail...');
+        runRebelBreadPastryExtraction(_lastRebelBreadFile, savedInv);
+      }, 400);
+    } else {
+      showToast('Rebel Bread invoice saved -- open invoice and click Extract Pastry Detail to load daily counts');
+    }
+  } else {
+    showToast(`Invoice saved${countFIFOLines(lineItems)>0?' · '+countFIFOLines(lineItems)+' inventory layer(s) written':''}`);
+  }
+}
+
+function countFIFOLines(lines){return lines.filter(l=>l.ingredient).length}
+
+async function writeFIFOLayers(inv){
+  const vName=vendorName(inv.vendorId);
+  for(const line of inv.lines){
+    if(!line.ingredient)continue;
+    const ing=loadIngredients().find(i=>i.name===line.ingredient);if(!ing)continue;
+    const rule=DB.rules.find(r=>r.ingredient===line.ingredient);
+    const multiplier=rule?rule.multiplier:1;
+    const invoiceQty=line.qty||1;
+    const convertedQty=invoiceQty*multiplier;
+    const layer={
+      id:String(Date.now()+Math.random()),
+      date:inv.date,
+      ingredient:line.ingredient,
+      category:ing.cat,
+      qty:convertedQty,
+      remainingQty:convertedQty,
+      invoiceQty:invoiceQty,
+      invoiceUnit:line.unit||'case',
+      multiplier:multiplier,
+      totalCost:line.total,
+      unit:ing.unit,
+      vendor:vName,
+      invoiceNo:inv.invoiceNum||inv.id,
+      apInvoiceId:inv.id
+    };
+    await saveFIFOLayerToSB(layer);
+  }
+}
+
+async function postInvoiceGL(inv){
+  const era=inv.era||ERA.DC;const entries=[];
+  const byAcct={};inv.lines.forEach(l=>{byAcct[l.acct]=(byAcct[l.acct]||0)+l.total});
+  if(era===ERA.DC){
+    Object.entries(byAcct).forEach(([acct,amt])=>{const a=COA.find(x=>x.acct===acct);entries.push({acct,name:a?.name||acct,dr:amt,cr:0})});
+    entries.push({acct:'2000',name:'Accounts Payable',dr:0,cr:inv.total});
+  }else{
+    entries.push({acct:'1300',name:'Receivable — Prior Owner (Troy)',dr:inv.total,cr:0});
+    entries.push({acct:'2000',name:'Accounts Payable',dr:0,cr:inv.total});
+  }
+  const je={id:nextGLId(),date:inv.date,ref:inv.id,era,memo:'A/P accrual'+(era==='troy'?' (Troy-era)':era==='dc-paid'?' (DC paid for Troy)':'')+' — '+vendorName(inv.vendorId)+' '+(inv.invoiceNum||inv.id),entries};
+  await saveGLToSB(je);
+}
+
+// ═══════════════════════════════════════════════
+// PAYMENT MODAL
+// ═══════════════════════════════════════════════
+function openPaymentModal(invoiceId){
+  const openInvs=[...DB.invoices.filter(i=>i.balance>0&&i.status!=='void')].sort((a,b)=>vendorName(a.vendorId).localeCompare(vendorName(b.vendorId)));
+  const pre=invoiceId?DB.invoices.find(i=>i.id===invoiceId):null;
+  const initEra=pre?.era||ERA.DC;
+  openModal(`<div class="modal" style="max-width:560px">
+    <div class="modal-header">
+      <div><div class="modal-title">Record Payment</div><div class="modal-sub">Post cash disbursement</div></div>
+      <button class="close-btn" onclick="closeModal()">×</button>
+    </div>
+    <div class="modal-body"><div class="form-grid">
+      <div class="form-group span-2"><label>Invoice *</label>
+        <select id="pmt-invoice" onchange="onPmtInvChange(this.value)"><option value="">Select open invoice…</option>
+          ${openInvs.map(i=>`<option value="${i.id}" ${i.id===invoiceId?'selected':''}>${i.id} — ${vendorName(i.vendorId)} (${fmt(i.balance)} due)</option>`).join('')}
+        </select>
+      </div>
+      <div class="form-group span-2">
+        <label>Era</label>
+        ${eraSelector(initEra,'-pmt','selectPmtEra')}
+        <input type="hidden" id="era-val-pmt" value="${initEra}">
+      </div>
+      <div class="form-group"><label>Date *</label><input type="date" id="pmt-date" value="${todayStr()}"></div>
+      <div class="form-group"><label>Amount *</label><input type="number" id="pmt-amount" min="0.01" step="0.01" placeholder="0.00" value="${pre?pre.balance.toFixed(2):''}"></div>
+      <div class="form-group"><label>Method</label><select id="pmt-method"><option>ACH</option><option>Check</option><option>Credit Card</option><option>Cash</option><option>Payroll Deduction</option><option>Other</option></select></div>
+      <div class="form-group"><label>Reference / Check #</label><input id="pmt-ref" placeholder="ACH trace, check #…"></div>
+      <div class="form-group"><label>Cash Account</label><select id="pmt-cash">${COA.filter(a=>a.acct.startsWith('1')&&a.acct!=='1300').map(a=>`<option value="${a.acct}" ${a.acct==='1010'?'selected':''}>${a.acct} · ${a.name}</option>`).join('')}</select></div>
+      <div class="form-group span-2"><label>Memo</label><input id="pmt-memo" placeholder="Payment notes…"></div>
+    </div>
+    <div id="pmt-preview" style="margin-top:8px"></div></div>
+    <div class="modal-footer">
+      <span id="pmt-err" style="color:var(--red);font-size:12px;margin-right:auto"></span>
+      <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="savePayment()">Post Payment</button>
+    </div>
+  </div>`);
+  if(invoiceId)onPmtInvChange(invoiceId);
+}
+
+function selectPmtEra(val,cls,el,sfx){
+  document.querySelectorAll('#era-sel-pmt .era-opt').forEach(o=>o.className='era-opt');
+  el.classList.add(cls);const h=$('era-val-pmt');if(h)h.value=val;
+}
+
+function onPmtInvChange(id){
+  const inv=DB.invoices.find(i=>i.id===id);if(!inv)return;
+  const amtEl=$('pmt-amount');if(amtEl&&!amtEl.value)amtEl.value=inv.balance.toFixed(2);
+  const era=inv.era||ERA.DC;const h=$('era-val-pmt');if(h)h.value=era;
+  document.querySelectorAll('#era-sel-pmt .era-opt').forEach(o=>{o.className='era-opt';if(o.dataset.era===era)o.classList.add(o.dataset.cls||'sel-dc')});
+  const clr=era==='troy'?'var(--troy)':era==='dc-paid'?'#8B4500':'var(--ink-mid)';
+  $('pmt-preview').innerHTML=`<div class="alert" style="background:var(--bg);border:1px solid var(--border);font-size:12px"><strong>${vendorName(inv.vendorId)}</strong> · ${inv.invoiceNum||inv.id} · ${eraPill(era)}<br>Total: <strong>${fmt(inv.total)}</strong> · Balance: <strong style="color:${clr}">${fmt(inv.balance)}</strong></div>`;
+}
+
+async function savePayment(){
+  const invoiceId=$('pmt-invoice').value,date=$('pmt-date').value;
+  const amount=parseFloat($('pmt-amount').value),method=$('pmt-method').value;
+  const ref=$('pmt-ref').value.trim(),memo=$('pmt-memo').value.trim();
+  const cashAcct=$('pmt-cash').value,era=$('era-val-pmt').value||ERA.DC;
+  const errEl=$('pmt-err');
+  if(!invoiceId){errEl.textContent='Select an invoice.';return}
+  if(!date){errEl.textContent='Date required.';return}
+  if(!amount||amount<=0){errEl.textContent='Enter a valid amount.';return}
+  const inv=DB.invoices.find(i=>i.id===invoiceId);
+  if(amount>inv.balance+0.005){errEl.textContent=`Exceeds balance of ${fmt(inv.balance)}.`;return}
+  const pmtId=nextSeq('PMT');
+  const pmt={id:pmtId,era,invoiceId,vendorId:inv.vendorId,date,amount,method,ref,memo,glPosted:true};
+  inv.amountPaid=(inv.amountPaid||0)+amount;inv.balance=Math.max(0,inv.total-inv.amountPaid);
+  if(inv.balance<0.005){inv.balance=0;inv.status='paid'}else inv.status='partial';
+  const cashName=COA.find(a=>a.acct===cashAcct)?.name||cashAcct;
+  const je={id:nextGLId(),date,ref:pmtId,era,
+    memo:'Payment'+(era==='dc-paid'?' (DC→Troy)':era==='troy'?' (Troy-era)':'')+' — '+vendorName(inv.vendorId)+' '+(ref||pmtId),
+    entries:[{acct:'2000',name:'Accounts Payable',dr:amount,cr:0},{acct:cashAcct,name:cashName,dr:0,cr:amount}]};
+  await savePaymentToSB(pmt);
+  await saveInvoiceToSB(inv);
+  await saveGLToSB(je);
+  closeModal();
+  const views={payments:renderPayments,dashboard:renderDashboard,invoices:renderInvoices,troy:renderTroy};if(views[currentView])views[currentView]();
+  updateSidebarStats();
+}
+
+// ═══════════════════════════════════════════════
+// JOURNAL ENTRY MODAL
+// ═══════════════════════════════════════════════
+let jeLines=[];
+function openJEModal(defaultAcct){
+  jeLines=[{acct:defaultAcct||'',memo:'',dr:0,cr:0},{acct:defaultAcct==='1300'?'1010':'1300',memo:'',dr:0,cr:0}];
+  openModal(`<div class="modal" style="max-width:700px">
+    <div class="modal-header">
+      <div><div class="modal-title">Journal Entry</div><div class="modal-sub">Manual GL posting — debits must equal credits</div></div>
+      <button class="close-btn" onclick="closeModal()">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-grid" style="margin-bottom:16px">
+        <div class="form-group"><label>Date *</label><input type="date" id="je-date" value="${todayStr()}"></div>
+        <div class="form-group"><label>Reference</label><input id="je-ref" placeholder="e.g. Payroll-Jan"></div>
+        <div class="form-group span-2"><label>Era</label>
+          ${eraSelector(ERA.TROY,'-je','selectJEEra')}
+          <input type="hidden" id="era-val-je" value="${ERA.TROY}">
+        </div>
+        <div class="form-group span-2"><label>Entry Memo *</label><input id="je-memo" placeholder="e.g. Troy payroll deduction Jan — 1300 receivable reduction"></div>
+      </div>
+      <div class="je-hd"><span>Account</span><span>Line Memo</span><span style="text-align:right">Debit</span><span style="text-align:right">Credit</span><span></span></div>
+      <div id="je-lines-body"></div>
+      <button class="btn btn-ghost btn-sm" onclick="addJELine()" style="margin-top:6px">＋ Add line</button>
+      <div id="je-balance" style="margin-top:12px;text-align:right;font-size:13px"></div>
+    </div>
+    <div class="modal-footer">
+      <span id="je-err" style="color:var(--red);font-size:12px;margin-right:auto"></span>
+      <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveJE()">Post Entry</button>
+    </div>
+  </div>`);
+  renderJELines();
+}
+function selectJEEra(val,cls,el,sfx){document.querySelectorAll('#era-sel-je .era-opt').forEach(o=>o.className='era-opt');el.classList.add(cls);const h=$('era-val-je');if(h)h.value=val}
+function renderJELines(){
+  const body=$('je-lines-body');if(!body)return;
+  const acctOpts=COA.map(a=>`<option value="${a.acct}">${a.acct} · ${a.name}</option>`).join('');
+  body.innerHTML=jeLines.map((l,i)=>`<div class="je-row">
+    <select onchange="jeLines[${i}].acct=this.value"><option value="">Account…</option>${acctOpts.replace(`value="${l.acct}"`,`value="${l.acct}" selected`)}</select>
+    <input placeholder="Line memo" value="${l.memo||''}" oninput="jeLines[${i}].memo=this.value">
+    <input type="number" min="0" step="0.01" placeholder="0.00" value="${l.dr||''}" oninput="jeLines[${i}].dr=+this.value;jeLines[${i}].cr=0;updateJEBal()">
+    <input type="number" min="0" step="0.01" placeholder="0.00" value="${l.cr||''}" oninput="jeLines[${i}].cr=+this.value;jeLines[${i}].dr=0;updateJEBal()">
+    <button class="rm-btn" onclick="removeJELine(${i})">×</button>
+  </div>`).join('');
+  updateJEBal();
+}
+function updateJEBal(){const dr=jeLines.reduce((s,l)=>s+(l.dr||0),0);const cr=jeLines.reduce((s,l)=>s+(l.cr||0),0);const diff=Math.abs(dr-cr);const ok=diff<0.005;const b=$('je-balance');if(b)b.innerHTML=`<span style="color:var(--ink-mid)">Debits: <strong class="mono">${fmt(dr)}</strong></span><span style="margin:0 16px;color:var(--ink-mid)">Credits: <strong class="mono">${fmt(cr)}</strong></span><span style="color:${ok?'var(--green)':'var(--red)'}">${ok?'✓ Balanced':`Out of balance by ${fmt(diff)}`}</span>`}
+function addJELine(){jeLines.push({acct:'',memo:'',dr:0,cr:0});renderJELines()}
+function removeJELine(i){if(jeLines.length<=2)return;jeLines.splice(i,1);renderJELines()}
+async function saveJE(){
+  const date=$('je-date').value,memo=$('je-memo').value.trim(),era=$('era-val-je').value||ERA.TROY,jeRef=$('je-ref').value.trim()||nextSeq('JE');
+  const errEl=$('je-err');
+  if(!date){errEl.textContent='Date required.';return}
+  if(!memo){errEl.textContent='Memo required.';return}
+  if(jeLines.some(l=>!l.acct)){errEl.textContent='All lines need an account.';return}
+  const dr=jeLines.reduce((s,l)=>s+(l.dr||0),0);const cr=jeLines.reduce((s,l)=>s+(l.cr||0),0);
+  if(Math.abs(dr-cr)>0.005){errEl.textContent=`Out of balance by ${fmt(Math.abs(dr-cr))}.`;return}
+  const je={id:nextGLId(),date,ref:jeRef,era,memo,entries:jeLines.map(l=>({acct:l.acct,name:COA.find(a=>a.acct===l.acct)?.name||l.acct,dr:l.dr||0,cr:l.cr||0,...(l.memo?{memo:l.memo}:{})}))};
+  await saveGLToSB(je);
+  closeModal();showToast(`Journal entry posted — ${jeRef}`);
+  const views={gl:renderGL,troy:renderTroy,dashboard:renderDashboard};if(views[currentView])views[currentView]();
+  updateSidebarStats();
+}
+
+// ═══════════════════════════════════════════════
+// VENDOR MODAL
+// ═══════════════════════════════════════════════
+function openVendorModal(editId){
+  const editing=editId?DB.vendors.find(v=>v.id===editId):null;
+  openModal(`<div class="modal" style="max-width:520px">
+    <div class="modal-header">
+      <div><div class="modal-title">${editing?'Edit Vendor':'New Vendor'}</div><div class="modal-sub">${editing?editing.id:'Auto-assigned'}</div></div>
+      <button class="close-btn" onclick="closeModal()">×</button>
+    </div>
+    <div class="modal-body"><div class="form-grid">
+      <div class="form-group span-2"><label>Vendor Name *</label><input id="vnd-name" value="${editing?.name||''}" placeholder="e.g. Gold Seal Distributing"></div>
+      <div class="form-group"><label>Type</label><select id="vnd-type">${VENDOR_TYPES.map(t=>`<option value="${t}" ${editing?.type===t?'selected':''}>${t}</option>`).join('')}</select></div>
+      <div class="form-group"><label>Terms (days)</label><input type="number" id="vnd-terms" value="${editing?.terms??30}" min="0"></div>
+      <div class="form-group"><label>Email</label><input type="email" id="vnd-email" value="${editing?.email||''}"></div>
+      <div class="form-group"><label>Phone</label><input id="vnd-phone" value="${editing?.phone||''}"></div>
+      <div class="form-group span-2">
+        <label>Default GL Accounts (Ctrl/⌘-click for multiple)</label>
+        <select id="vnd-accts" multiple size="5">${COA.map(a=>`<option value="${a.acct}" ${editing?.defaultAccts?.includes(a.acct)?'selected':''}>${a.acct} · ${a.name}</option>`).join('')}</select>
+      </div>
+      <div class="form-group span-2"><label>Notes</label><textarea id="vnd-notes" rows="2">${editing?.notes||''}</textarea></div>
+    </div></div>
+    <div class="modal-footer">
+      <span id="vnd-err" style="color:var(--red);font-size:12px;margin-right:auto"></span>
+      ${editing?`<button class="btn btn-danger" onclick="deleteVendor('${editId}')">Delete</button>`:''}
+      <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveVendor('${editId||''}')">${editing?'Save':'Add Vendor'}</button>
+    </div>
+  </div>`);
+}
+async function saveVendor(editId){
+  const name=$('vnd-name').value.trim();if(!name){$('vnd-err').textContent='Name required.';return}
+  const data={name,type:$('vnd-type').value,terms:parseInt($('vnd-terms').value)||30,email:$('vnd-email').value.trim(),phone:$('vnd-phone').value.trim(),notes:$('vnd-notes').value.trim(),defaultAccts:Array.from($('vnd-accts').selectedOptions).map(o=>o.value),active:true};
+  const vendor = editId ? {...DB.vendors.find(v=>v.id===editId),...data} : {id:nextSeq('VND'),...data};
+  const ok = await saveVendorToSB(vendor);
+  if(!ok){$('vnd-err').textContent='Save failed. Check connection.';return}
+  closeModal();renderVendors();
+}
+async function deleteVendor(id){
+  const hasInv=DB.invoices.some(i=>i.vendorId===id);
+  if(hasInv){
+    if(!confirm('Has invoices. Mark inactive?'))return;
+    const vendor = DB.vendors.find(v=>v.id===id);
+    vendor.active = false;
+    await saveVendorToSB(vendor);
+  } else {
+    if(!confirm('Delete vendor?'))return;
+    await sbDelete('vendors', id);
+    DB.vendors = DB.vendors.filter(v=>v.id!==id);
+  }
+  closeModal();renderVendors();
+}
+
+// ═══════════════════════════════════════════════
+// RULE MODAL
+// ═══════════════════════════════════════════════
+function openRuleModal(editId){
+  const editing=editId?DB.rules.find(r=>r.id===editId):null;
+  openModal(`<div class="modal" style="max-width:520px">
+    <div class="modal-header">
+      <div><div class="modal-title">${editing?'Edit Rule':'New Matching Rule'}</div><div class="modal-sub">Maps vendor description text to an ingredient</div></div>
+      <button class="close-btn" onclick="closeModal()">×</button>
+    </div>
+    <div class="modal-body"><div class="form-grid">
+      <div class="form-group span-2"><label>Match Text *</label><input id="rule-match" value="${editing?.match||''}" placeholder="Text that appears in vendor description"><span class="form-hint">Case-insensitive substring match</span></div>
+      <div class="form-group span-2"><label>Ingredient *</label><select id="rule-ing"><option value="">Select ingredient…</option>${loadIngredients().sort((a,b)=>a.name.localeCompare(b.name)).map(i=>`<option value="${i.name}" ${editing?.ingredient===i.name?'selected':''}>${i.name} (${i.cat})</option>`).join('')}</select></div>
+      <div class="form-group"><label>Multiplier</label><input type="number" id="rule-mult" value="${editing?.multiplier||1}" min="0" step="any"><span class="form-hint">Purchase qty × multiplier = inventory units</span></div>
+      <div class="form-group"><label>Inventory Unit</label><input id="rule-unit" value="${editing?.unit||'ea'}" placeholder="oz, ea, g…"></div>
+      <div class="form-group span-2"><label>Notes</label><input id="rule-notes" value="${editing?.notes||''}" placeholder="e.g. 12/32oz case"></div>
+    </div></div>
+    <div class="modal-footer">
+      <span id="rule-err" style="color:var(--red);font-size:12px;margin-right:auto"></span>
+      ${editing?`<button class="btn btn-danger" onclick="deleteRule('${editId}')">Delete</button>`:''}
+      <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveRule('${editId||''}')">${editing?'Save':'Add Rule'}</button>
+    </div>
+  </div>`);
+}
+async function saveRule(editId){
+  const match=$('rule-match').value.trim(),ing=$('rule-ing').value;
+  if(!match){$('rule-err').textContent='Match text required.';return}
+  if(!ing){$('rule-err').textContent='Select an ingredient.';return}
+  const data={match,ingredient:ing,multiplier:parseFloat($('rule-mult').value)||1,unit:$('rule-unit').value.trim()||'ea',notes:$('rule-notes').value.trim()};
+  const rule = editId ? {id:editId,...data} : {id:'r'+Date.now(),...data};
+  await saveRuleToSB(rule);
+  closeModal();renderRules();showToast('Rule saved');
+}
+async function deleteRule(id){if(!confirm('Delete this rule?'))return;await deleteRuleFromSB(id);closeModal();renderRules()}
+
+
+
+// --------------------------------------------------
+// RECIPE MANAGER HELPERS
+// --------------------------------------------------
+function catBadge(cat){
+  var map={espresso:'badge-esp',Coffee:'badge-coffee',Chai:'badge-chai',food:'badge-food'};
+  return '<span class="badge '+(map[cat]||'badge-cat')+'">'+cat+'</span>';
+}
+
+function stockOnHand(ingName){
+  return DB.fifo.filter(function(d){return d.ingredient===ingName&&d.remainingQty>0})
+    .reduce(function(s,d){return s+d.remainingQty},0);
+}
+
+function stockPill(ingName,unit){
+  var qty=stockOnHand(ingName);
+  if(qty<=0)return '<span class="stock-zero">0 '+unit+'</span>';
+  if(qty<50)return '<span class="stock-low">'+qty.toFixed(1)+' '+unit+'</span>';
+  return '<span class="stock-ok">'+qty.toFixed(1)+' '+unit+'</span>';
+}
+
+function recipesUsingIngredient(ingName){
+  var seen={};var result=[];
+  DB.recipes.forEach(function(r){
+    if(r.ingredient_name===ingName&&!seen[r.menu_item]){seen[r.menu_item]=true;result.push(r.menu_item)}
+  });
+  return result;
+}
+
+// ==================================================
+// RECIPE MANAGER — Ingredients & Recipes
+// ==================================================
+const UNITS=['oz','g','ea','ml','tsp','tbsp','cup','fl_oz','lb','kg','pinch'];
+const CATEGORIES=['alt milk','dairy','whole beans','coffee','food','syrup','chai','base','kombucha','not coffee'];
+const RECIPE_CATS=['espresso','Chai','Coffee','Not Coffee','Kombucha','Burrito','Empanada','Pastry','Other'];
+// ingredient/recipe manager state vars
+var ingTab='active', ingSearch='', ingCatFilter='all';
+var recSearch='', recCatFilter='all';
+var _editingRecipeName=null;
+
+function setIngTab(tab){ingTab=tab;renderIngredients()}
+
+// stockOnHand defined above
+
+
+// stockPill defined above
+
+
+// recipesUsingIngredient defined above
+
+
+// ==================================================
+// NAV
+// ==================================================
+// showView defined above (AP version handles all views)
+
+
+// updateSidebarStats defined above (AP version)
+
+// ==================================================
+// INGREDIENTS
+// ==================================================
+var ingTab='active', ingSearch='', ingCatFilter='all';
+
+// setIngTab defined above
+
+
+function renderIngredients(){
+  $('topbar-actions').innerHTML='<button class="btn btn-primary" onclick="openIngModal(-1)">+ New Ingredient</button>';
+  var active=DB.ingredients.filter(function(i){return i.active!==false});
+  var inactive=DB.ingredients.filter(function(i){return i.active===false});
+  active.sort(function(a,b){return a.name.localeCompare(b.name)});
+  inactive.sort(function(a,b){return a.name.localeCompare(b.name)});
+  var list=ingTab==='active'?active:inactive;
+  if(ingSearch){var q=ingSearch.toLowerCase();list=list.filter(function(i){return i.name.toLowerCase().includes(q)||i.cat.toLowerCase().includes(q)})}
+  if(ingCatFilter!=='all')list=list.filter(function(i){return i.cat===ingCatFilter});
+
+  var rows=list.map(function(ing){
+    var idx=DB.ingredients.indexOf(ing);
+    var recipeCount=recipesUsingIngredient(ing.name).length;
+    return '<tr>'+
+      '<td><strong>'+ing.name+'</strong></td>'+
+      '<td>'+catBadge(ing.cat)+'</td>'+
+      '<td class="mono">'+ing.unit+'</td>'+
+      '<td>'+stockPill(ing.name,ing.unit)+'</td>'+
+      '<td>'+(recipeCount>0?'<span class="badge badge-cat">'+recipeCount+' recipe'+(recipeCount!==1?'s':'')+'</span>':'<span style="color:var(--ink-lo);font-size:12px">--</span>')+'</td>'+
+      '<td style="font-size:12px;color:var(--ink-mid)">'+(ing.notes||'--')+'</td>'+
+      '<td><div style="display:flex;gap:4px">'+
+        '<button class="btn btn-ghost btn-sm" onclick="openIngModal('+idx+')">Edit</button>'+
+        (ingTab==='active'
+          ?'<button class="btn btn-danger btn-sm" onclick="deactivateIngredient('+idx+')">Deactivate</button>'
+          :'<button class="btn btn-success btn-sm" onclick="reactivateIngredient('+idx+')">Reactivate</button>')+
+      '</div></td>'+
+    '</tr>';
+  }).join('');
+
+  var catOptions=CATEGORIES.map(function(c){return '<option value="'+c+'"'+(ingCatFilter===c?' selected':'')+'>'+c+'</option>'}).join('');
+
+  $('content').innerHTML=
+    '<div class="tiles">'+
+      '<div class="tile"><div class="tile-label">Active</div><div class="tile-val">'+active.length+'</div><div class="tile-sub">In use</div></div>'+
+      '<div class="tile"><div class="tile-label">Inactive</div><div class="tile-val">'+inactive.length+'</div><div class="tile-sub">Hidden from dropdowns</div></div>'+
+      '<div class="tile"><div class="tile-label">Categories</div><div class="tile-val">'+[...new Set(active.map(function(i){return i.cat}))].length+'</div></div>'+
+      '<div class="tile"><div class="tile-label">FIFO Layers</div><div class="tile-val">'+DB.fifo.filter(function(d){return d.remainingQty>0}).length+'</div><div class="tile-sub">With stock</div></div>'+
+    '</div>'+
+    '<div class="tabs">'+
+      '<button class="tab '+(ingTab==='active'?'active':'')+'" onclick="setIngTab(\'active\')">Active ('+active.length+')</button>'+
+      '<button class="tab '+(ingTab==='inactive'?'active':'')+'" onclick="setIngTab(\'inactive\')">Inactive ('+inactive.length+')</button>'+
+    '</div>'+
+    '<div class="filter-bar">'+
+      '<span class="filter-label">Filter:</span>'+
+      '<input placeholder="Search..." value="'+ingSearch+'" oninput="ingSearch=this.value;renderIngredients()">'+
+      '<select onchange="ingCatFilter=this.value;renderIngredients()"><option value="all">All categories</option>'+catOptions+'</select>'+
+    '</div>'+
+    '<div class="card"><div class="tbl-wrap"><table>'+
+      '<thead><tr><th>Name</th><th>Category</th><th>Unit</th><th>Stock On Hand</th><th>Recipes</th><th>Notes</th><th></th></tr></thead>'+
+      '<tbody>'+(rows||'<tr><td colspan="7" style="padding:32px;text-align:center;color:var(--ink-lo)">'+(ingTab==='active'?'No active ingredients':'No inactive ingredients')+'</td></tr>')+'</tbody>'+
+    '</table></div></div>';
+}
+
+function openIngModal(idx){
+  var editing=idx>=0?DB.ingredients[idx]:null;
+  var catOptions=CATEGORIES.map(function(c){return '<option value="'+c+'"'+(editing&&editing.cat===c?' selected':'')+'>'+c+'</option>'}).join('');
+  var unitOptions=UNITS.map(function(u){return '<option value="'+u+'"'+(editing&&editing.unit===u?' selected':'')+'>'+u+'</option>'}).join('');
+  openModal(
+    '<div class="modal">'+
+    '<div class="modal-header">'+
+      '<div><div class="modal-title">'+(editing?'Edit Ingredient':'New Ingredient')+'</div>'+
+      '<div class="modal-sub">'+(editing?editing.name:'Checks inactive list before adding')+'</div></div>'+
+      '<button class="close-btn" onclick="closeModal()">x</button>'+
+    '</div>'+
+    '<div class="modal-body">'+
+      '<div id="reactivate-alert"></div>'+
+      '<div class="form-grid">'+
+        '<div class="form-group span-2">'+
+          '<label>Ingredient Name *</label>'+
+          '<input id="ing-name" value="'+(editing?editing.name:'')+'" placeholder="e.g. Oat Milk"'+
+            (editing?' readonly style="background:var(--bg);color:var(--ink-mid)"':' oninput="checkInactiveDuplicate(this.value)"')+'>'+
+          (editing?'<span class="form-hint">Name cannot be changed -- deactivate and create new if needed</span>':'')+
+        '</div>'+
+        '<div class="form-group"><label>Category *</label><select id="ing-cat"><option value="">Select...</option>'+catOptions+'</select></div>'+
+        '<div class="form-group"><label>Unit *</label><select id="ing-unit">'+unitOptions+'</select></div>'+
+        '<div class="form-group span-2"><label>Notes</label><input id="ing-notes" value="'+(editing?editing.notes||'':'')+'" placeholder="Optional"></div>'+
+      '</div>'+
+    '</div>'+
+    '<div class="modal-footer">'+
+      '<span id="ing-err" style="color:var(--red);font-size:12px;margin-right:auto"></span>'+
+      '<button class="btn btn-ghost" onclick="closeModal()">Cancel</button>'+
+      '<button class="btn btn-primary" onclick="saveIngredient('+idx+')">'+(editing?'Save Changes':'Add Ingredient')+'</button>'+
+    '</div></div>'
+  );
+}
+
+function checkInactiveDuplicate(name){
+  if(!name||name.length<2)return;
+  var match=DB.ingredients.find(function(i){return i.active===false&&i.name.toLowerCase()===name.toLowerCase()});
+  var alert=$('reactivate-alert');if(!alert)return;
+  if(match){
+    var midx=DB.ingredients.indexOf(match);
+    alert.innerHTML='<div class="alert alert-reactivate">"'+match.name+'" exists as inactive. <button class="btn btn-sm btn-primary" onclick="reactivateIngredient('+midx+');closeModal()">Reactivate instead</button></div>';
+  } else {
+    alert.innerHTML='';
+  }
+}
+
+async function saveIngredient(idx){
+  var name=$('ing-name').value.trim();
+  var cat=$('ing-cat').value;
+  var unit=$('ing-unit').value;
+  var notes=$('ing-notes').value.trim();
+  var errEl=$('ing-err');
+  if(!name){errEl.textContent='Name required.';return}
+  if(!cat){errEl.textContent='Category required.';return}
+  var ing;
+  if(idx>=0){
+    ing = {...DB.ingredients[idx], cat:cat, unit:unit, notes:notes};
+  } else {
+    if(DB.ingredients.find(function(i){return i.name.toLowerCase()===name.toLowerCase()&&i.active!==false})){
+      errEl.textContent='An active ingredient with this name already exists.';return;
+    }
+    ing = {name:name,cat:cat,unit:unit,notes:notes,active:true};
+  }
+  const ok = await saveIngredientToSB(ing);
+  if(!ok){errEl.textContent='Save failed. Check connection.';return}
+  closeModal();renderIngredients();updateSidebarStats();
+  showToast(idx>=0?'Ingredient updated':'Ingredient added');
+}
+
+async function deactivateIngredient(idx){
+  var ing=DB.ingredients[idx];if(!ing)return;
+  var stock=stockOnHand(ing.name);
+  var recipes=recipesUsingIngredient(ing.name);
+  var msg='Deactivate "'+ing.name+'"?';
+  if(stock>0)msg+='\n\nStock remaining: '+stock.toFixed(1)+' '+ing.unit+'. Consider zeroing inventory first.';
+  if(recipes.length>0)msg+='\n\nUsed in '+recipes.length+' recipe(s): '+recipes.slice(0,3).join(', ')+(recipes.length>3?'...':'')+'.';
+  msg+='\n\nThe ingredient will be hidden from dropdowns but preserved in history.';
+  if(!confirm(msg))return;
+  const updated = {...ing, active:false};
+  await saveIngredientToSB(updated);
+  renderIngredients();updateSidebarStats();
+  showToast('"'+ing.name+'" deactivated','warn');
+}
+
+function reactivateIngredient(idx){
+  var ing=DB.ingredients[idx];if(!ing)return;
+  var ings=DB.ingredients;
+  ings[idx].active=true;
+  DB.ingredients=ings;
+  persist();renderIngredients();updateSidebarStats();
+  showToast('"'+ing.name+'" reactivated');
+}
+
+// ==================================================
+// RECIPES
+// ==================================================
+var recSearch='', recCatFilter='all';
+var _editingRecipeName=null;
+var recipeLines=[];
+
+function getMenuItems(){
+  var menuItems={};
+  DB.recipes.forEach(function(r){
+    if(!menuItems[r.menu_item])menuItems[r.menu_item]={category:r.category,sale_price:r.sale_price,lines:[]};
+    menuItems[r.menu_item].lines.push({ingredient_name:r.ingredient_name,quantity:r.quantity,unit:r.unit});
+  });
+  return menuItems;
+}
+
+function renderRecipes(){
+  $('topbar-actions').innerHTML='<button class="btn btn-primary" onclick="openRecipeModal(null)">+ New Menu Item</button>';
+  var menuItems=getMenuItems();
+  var items=Object.entries(menuItems);
+  if(recSearch){var q=recSearch.toLowerCase();items=items.filter(function(e){return e[0].toLowerCase().includes(q)})}
+  if(recCatFilter!=='all')items=items.filter(function(e){return e[1].category===recCatFilter});
+  items.sort(function(a,b){return a[0].localeCompare(b[0])});
+
+  // Store names for index-based onclick
+  window._recipeNames=items.map(function(e){return e[0]});
+
+  var rows=items.map(function(entry,i){
+    var name=entry[0];var data=entry[1];
+    var ingList=data.lines.map(function(l){return l.quantity+l.unit+' '+l.ingredient_name}).join(' / ');
+    return '<tr>'+
+      '<td><strong>'+name+'</strong></td>'+
+      '<td>'+catBadge(data.category)+'</td>'+
+      '<td class="mono" style="color:var(--green);font-weight:600">$'+data.sale_price.toFixed(2)+'</td>'+
+      '<td style="font-size:12px;color:var(--ink-mid);max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+ingList+'</td>'+
+      '<td class="text-right">'+data.lines.length+' ing.</td>'+
+      '<td><button class="btn btn-ghost btn-sm" onclick="openRecipeModal(window._recipeNames['+i+'])">Edit</button></td>'+
+    '</tr>';
+  }).join('');
+
+  var catOptions=RECIPE_CATS.map(function(c){return '<option value="'+c+'"'+(recCatFilter===c?' selected':'')+'>'+c+'</option>'}).join('');
+  var totalItems=Object.keys(menuItems).length;
+  var avgIng=totalItems>0?(DB.recipes.length/totalItems).toFixed(1):'0';
+
+  $('content').innerHTML=
+    '<div class="tiles">'+
+      '<div class="tile"><div class="tile-label">Menu Items</div><div class="tile-val">'+totalItems+'</div></div>'+
+      '<div class="tile"><div class="tile-label">Recipe Lines</div><div class="tile-val">'+DB.recipes.length+'</div></div>'+
+      '<div class="tile"><div class="tile-label">Categories</div><div class="tile-val">'+[...new Set(Object.values(menuItems).map(function(d){return d.category}))].length+'</div></div>'+
+      '<div class="tile"><div class="tile-label">Avg Ingredients</div><div class="tile-val">'+avgIng+'</div></div>'+
+    '</div>'+
+    '<div class="filter-bar">'+
+      '<span class="filter-label">Filter:</span>'+
+      '<input placeholder="Search menu items..." value="'+recSearch+'" oninput="recSearch=this.value;renderRecipes()">'+
+      '<select onchange="recCatFilter=this.value;renderRecipes()"><option value="all">All categories</option>'+catOptions+'</select>'+
+    '</div>'+
+    '<div class="card"><div class="tbl-wrap"><table>'+
+      '<thead><tr><th>Menu Item</th><th>Category</th><th>Sale Price</th><th>Ingredients</th><th class="text-right">Count</th><th></th></tr></thead>'+
+      '<tbody>'+(rows||'<tr><td colspan="6" style="padding:32px;text-align:center;color:var(--ink-lo)">No recipes found</td></tr>')+'</tbody>'+
+    '</table></div></div>';
+}
+
+function openRecipeModal(name){
+  _editingRecipeName=name;
+  var isNew=!name;
+  if(name){
+    recipeLines=DB.recipes.filter(function(r){return r.menu_item===name}).map(function(r){return{ingredient_name:r.ingredient_name,quantity:r.quantity,unit:r.unit}});
+  } else {
+    recipeLines=[{ingredient_name:'',quantity:0,unit:'g'}];
+  }
+  var firstRec=name?DB.recipes.find(function(r){return r.menu_item===name}):null;
+  var currentCat=firstRec?firstRec.category:'espresso';
+  var currentPrice=firstRec?firstRec.sale_price:0;
+  var catOptions=RECIPE_CATS.map(function(c){return '<option value="'+c+'"'+(currentCat===c?' selected':'')+'>'+c+'</option>'}).join('');
+
+  openModal(
+    '<div class="modal modal-lg">'+
+    '<div class="modal-header">'+
+      '<div><div class="modal-title">'+(isNew?'New Menu Item':name)+'</div>'+
+      '<div class="modal-sub">'+(isNew?'Define ingredients and quantities':'Edit all ingredient lines')+'</div></div>'+
+      '<button class="close-btn" onclick="closeModal()">x</button>'+
+    '</div>'+
+    '<div class="modal-body">'+
+      '<div class="form-grid" style="margin-bottom:16px">'+
+        '<div class="form-group">'+
+          '<label>Menu Item Name *</label>'+
+          '<input id="rec-name" value="'+(isNew?'':name)+'" placeholder="e.g. Latte - 16 oz"'+(isNew?'':' readonly style="background:var(--bg);color:var(--ink-mid)"')+'>'+
+          (isNew?'':'<span class="form-hint">To rename: delete and recreate</span>')+
+        '</div>'+
+        '<div class="form-group"><label>Category *</label><select id="rec-cat">'+catOptions+'</select></div>'+
+        '<div class="form-group">'+
+          '<label>Sale Price ($)</label>'+
+          '<input type="number" id="rec-price" min="0" step="0.01" value="'+currentPrice.toFixed(2)+'">'+
+          '<span class="form-hint">Stored once per menu item</span>'+
+        '</div>'+
+      '</div>'+
+      '<hr class="divider">'+
+      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">'+
+        '<div style="font-size:13px;font-weight:600">Ingredient Lines</div>'+
+        '<button class="btn btn-ghost btn-sm" onclick="addRecipeLine()">+ Add ingredient</button>'+
+      '</div>'+
+      '<div class="recipe-line-hd"><span>Ingredient</span><span>Quantity</span><span>Unit</span><span></span></div>'+
+      '<div id="recipe-lines-body"></div>'+
+    '</div>'+
+    '<div class="modal-footer">'+
+      '<span id="rec-err" style="color:var(--red);font-size:12px;margin-right:auto"></span>'+
+      (isNew?'':'<button class="btn btn-danger" onclick="deleteMenuItem()">Delete Menu Item</button>')+
+      '<button class="btn btn-ghost" onclick="closeModal()">Cancel</button>'+
+      '<button class="btn btn-primary" onclick="saveRecipe()">'+(isNew?'Save Menu Item':'Save Changes')+'</button>'+
+    '</div></div>'
+  );
+  renderRecipeLines();
+}
+
+function renderRecipeLines(){
+  var body=$('recipe-lines-body');if(!body)return;
+  var activeIngs=DB.ingredients.filter(function(i){return i.active!==false})
+    .sort(function(a,b){return a.name.localeCompare(b.name)});
+  var ingOpts='<option value="">Select ingredient...</option>'+activeIngs.map(function(i){return '<option value="'+i.name+'">'+i.name+' ('+i.cat+')</option>'}).join('');
+
+  body.innerHTML=recipeLines.map(function(line,i){
+    var ing=line.ingredient_name?DB.ingredients.find(function(x){return x.name===line.ingredient_name}):null;
+    var selIngOpts=ingOpts.replace('value="'+line.ingredient_name+'"','value="'+line.ingredient_name+'" selected');
+    var unitOpts=UNITS.map(function(u){return '<option value="'+u+'"'+((line.unit||ing&&ing.unit||'g')===u?' selected':'')+'>'+u+'</option>'}).join('');
+    return '<div class="recipe-line-row">'+
+      '<select onchange="recipeLines['+i+'].ingredient_name=this.value;onRecipeIngChange('+i+')">'+selIngOpts+'</select>'+
+      '<input type="number" min="0" step="any" value="'+(line.quantity||'')+'" placeholder="0" oninput="recipeLines['+i+'].quantity=+this.value">'+
+      '<select onchange="recipeLines['+i+'].unit=this.value">'+unitOpts+'</select>'+
+      '<button class="rm-btn" onclick="removeRecipeLine('+i+')">x</button>'+
+    '</div>';
+  }).join('');
+}
+
+function onRecipeIngChange(i){
+  var ing=DB.ingredients.find(function(x){return x.name===recipeLines[i].ingredient_name});
+  if(ing)recipeLines[i].unit=ing.unit;
+  renderRecipeLines();
+}
+
+function addRecipeLine(){recipeLines.push({ingredient_name:'',quantity:0,unit:'g'});renderRecipeLines()}
+
+function removeRecipeLine(i){if(recipeLines.length===1)return;recipeLines.splice(i,1);renderRecipeLines()}
+
+function saveRecipe(){
+  var name=_editingRecipeName||$('rec-name').value.trim();
+  var cat=$('rec-cat').value;
+  var price=parseFloat($('rec-price').value)||0;
+  var errEl=$('rec-err');
+  if(!name){errEl.textContent='Menu item name required.';return}
+  if(recipeLines.some(function(l){return !l.ingredient_name})){errEl.textContent='All lines need an ingredient.';return}
+  if(recipeLines.some(function(l){return !l.quantity||l.quantity<=0})){errEl.textContent='All lines need a quantity > 0.';return}
+  if(!_editingRecipeName&&DB.recipes.find(function(r){return r.menu_item.toLowerCase()===name.toLowerCase()})){
+    errEl.textContent='A menu item with this name already exists.';return;
+  }
+  var recs=DB.recipes.filter(function(r){return r.menu_item!==name});
+  recipeLines.forEach(function(line){
+    recs.push({menu_item:name,category:cat,sale_price:price,ingredient_name:line.ingredient_name,quantity:line.quantity,unit:line.unit});
+  });
+  DB.recipes=recs;
+  persist();closeModal();renderRecipes();updateSidebarStats();
+  showToast(_editingRecipeName?'"'+name+'" updated':'"'+name+'" added');
+}
+
+async function deleteMenuItem(){
+  if(!_editingRecipeName)return;
+  var name=_editingRecipeName;
+  if(!confirm('Delete "'+name+'" and all its ingredient lines?\n\nThis cannot be undone.'))return;
+  const ok = await deleteMenuItemFromSB(name);
+  if(!ok){showToast('Delete failed. Check connection.','warn');return}
+  closeModal();renderRecipes();updateSidebarStats();
+  showToast('"'+name+'" deleted','warn');
+}
+
+// ==================================================
+// EXPORT / IMPORT
+// ==================================================
+// ==================================================
+// PASTRY OPERATIONS MODULE
+// ==================================================
+
+// Helper: get active pastry SKUs sorted by name
+function getPastrySkus(){
+  var skus = DB.pastrySkus;
+  if(!skus || skus.length === 0){
+    // Auto-seed from ingredients tagged as food category that match Rebel Bread items
+    // User manages this list via Pastry SKUs view
+    return [];
+  }
+  return skus.slice().sort(function(a,b){return a.name.localeCompare(b.name)});
+}
+
+// Helper: get pastry log entries for a specific date
+function getPastryLogForDate(dateStr){
+  return DB.pastryLog.filter(function(e){return e.date === dateStr});
+}
+
+// Helper: get billed entries for a specific date (from invoice upload)
+function getBilledForDate(dateStr){
+  return DB.pastryLog.filter(function(e){return e.date === dateStr && e.billed !== undefined});
+}
+
+// Helper: get or create a log entry for date+sku
+function getPastryEntry(dateStr, skuName){
+  var log = DB.pastryLog;
+  return log.find(function(e){return e.date === dateStr && e.sku === skuName}) || null;
+}
+
+// Format date for display
+function fmtDateShort(s){
+  if(!s) return '--';
+  var d = new Date(s + 'T12:00:00');
+  return d.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'});
+}
+
+// ==================================================
+// PASTRY SKUS VIEW
+// ==================================================
+function renderPastrySkus(){
+  $('topbar-actions').innerHTML = '<button class="btn btn-primary" onclick="openPastrySkuModal(-1)">+ New SKU</button>';
+  var skus = getPastrySkus();
+
+  var rows = skus.map(function(sku, i){
+    var realIdx = DB.pastrySkus.indexOf(sku);
+    var weekTotal = DB.pastryLog.filter(function(e){return e.sku===sku.name && e.billed}).reduce(function(s,e){return s+(e.billed||0)},0);
+    return '<tr>' +
+      '<td><strong>' + sku.name + '</strong></td>' +
+      '<td class="mono">' + (sku.code||'--') + '</td>' +
+      '<td class="mono">$' + (sku.unitPrice||0).toFixed(2) + '</td>' +
+      '<td><span class="badge ' + (sku.active!==false?'badge-active':'badge-inactive') + '">' + (sku.active!==false?'Active':'Inactive') + '</span></td>' +
+      '<td><button class="btn btn-ghost btn-sm" onclick="openPastrySkuModal(' + realIdx + ')">Edit</button></td>' +
+    '</tr>';
+  }).join('');
+
+  $('content').innerHTML =
+    '<div class="alert alert-info" style="margin-bottom:16px">Manage the list of Rebel Bread pastry SKUs that appear in the daily close form. Add a SKU for each item Rebel Bread delivers. The code should match the item code on the Rebel Bread invoice.</div>' +
+    '<div class="card"><div class="tbl-wrap"><table>' +
+      '<thead><tr><th>SKU Name</th><th>Invoice Code</th><th>Unit Price</th><th>Status</th><th></th></tr></thead>' +
+      '<tbody>' + (rows || '<tr><td colspan="5" style="padding:32px;text-align:center;color:var(--ink-lo)">No SKUs yet -- add your Rebel Bread items above</td></tr>') + '</tbody>' +
+    '</table></div></div>';
+}
+
+function openPastrySkuModal(idx){
+  var sku = idx >= 0 ? DB.pastrySkus[idx] : null;
+  openModal(
+    '<div class="modal" style="max-width:480px">' +
+    '<div class="modal-header"><div><div class="modal-title">' + (sku?'Edit SKU':'New Pastry SKU') + '</div>' +
+    '<div class="modal-sub">Rebel Bread item</div></div>' +
+    '<button class="close-btn" onclick="closeModal()">x</button></div>' +
+    '<div class="modal-body"><div class="form-grid">' +
+      '<div class="form-group span-2"><label>SKU Name *</label>' +
+      '<input id="psku-name" value="' + (sku?sku.name:'') + '" placeholder="e.g. Lemon Poppyseed Scone"></div>' +
+      '<div class="form-group"><label>Invoice Code</label>' +
+      '<input id="psku-code" value="' + (sku?sku.code||'':'') + '" placeholder="e.g. 1023"></div>' +
+      '<div class="form-group"><label>Unit Price ($)</label>' +
+      '<input type="number" id="psku-price" min="0" step="0.01" value="' + (sku?sku.unitPrice||0:0).toFixed(2) + '"></div>' +
+      '<div class="form-group span-2"><label>Notes</label>' +
+      '<input id="psku-notes" value="' + (sku?sku.notes||'':'') + '" placeholder="Optional"></div>' +
+    '</div></div>' +
+    '<div class="modal-footer">' +
+      '<span id="psku-err" style="color:var(--red);font-size:12px;margin-right:auto"></span>' +
+      (sku && sku.active!==false ? '<button class="btn btn-danger" onclick="deactivatePastrySkuAt(' + idx + ')">Deactivate</button>' : '') +
+      (sku && sku.active===false ? '<button class="btn btn-success" onclick="reactivatePastrySkuAt(' + idx + ')">Reactivate</button>' : '') +
+      '<button class="btn btn-ghost" onclick="closeModal()">Cancel</button>' +
+      '<button class="btn btn-primary" onclick="savePastrySkuAt(' + idx + ')">' + (sku?'Save Changes':'Add SKU') + '</button>' +
+    '</div></div>'
+  );
+}
+
+async function savePastrySkuAt(idx){
+  var name = $('psku-name').value.trim();
+  var code = $('psku-code').value.trim();
+  var price = parseFloat($('psku-price').value) || 0;
+  var notes = $('psku-notes').value.trim();
+  if(!name){$('psku-err').textContent='Name required.';return}
+  if(idx < 0 && DB.pastrySkus.find(function(s){return s.name.toLowerCase()===name.toLowerCase() && s.active!==false})){
+    $('psku-err').textContent='A SKU with this name already exists.';return;
+  }
+  const existing = idx >= 0 ? DB.pastrySkus[idx] : null;
+  const sku = existing
+    ? {...existing, name:name, code:code, unitPrice:price, notes:notes}
+    : {name:name, code:code, unitPrice:price, notes:notes, active:true};
+  await savePastrySkuToSB(sku);
+  closeModal();renderPastrySkus();
+  showToast(idx>=0?'SKU updated':'SKU added');
+}
+
+async function deactivatePastrySkuAt(idx){
+  if(!confirm('Deactivate this SKU? It will be hidden from the daily close form.'))return;
+  const sku = {...DB.pastrySkus[idx], active:false};
+  await savePastrySkuToSB(sku);
+  closeModal();renderPastrySkus();
+  showToast('SKU deactivated','warn');
+}
+
+async function reactivatePastrySkuAt(idx){
+  const sku = {...DB.pastrySkus[idx], active:true};
+  await savePastrySkuToSB(sku);
+  closeModal();renderPastrySkus();
+  showToast('SKU reactivated');
+}
+
+// ==================================================
+// PASTRY DAILY CLOSE VIEW
+// ==================================================
+var pastryCloseDate = (function(){
+  var log = DB.pastryLog;
+  if(log && log.length > 0){
+    var dates = log.map(function(e){return e.date}).sort();
+    return dates[dates.length-1];
+  }
+  return todayStr();
+})();
+
+function renderPastryClose(){
+  $('topbar-actions').innerHTML =
+    '<input type="date" id="pastry-date-sel" value="' + pastryCloseDate + '" onchange="pastryCloseDate=this.value;renderPastryClose()" style="padding:6px 10px;border:1px solid var(--border);border-radius:var(--r);font-size:13px">' +
+    '<button class="btn btn-primary" onclick="savePastryClose()">Save Close</button>';
+
+  var skus = getPastrySkus().filter(function(s){return s.active!==false});
+  var dateStr = pastryCloseDate;
+  var dow = new Date(dateStr+'T12:00:00').toLocaleDateString('en-US',{weekday:'long'});
+
+  if(skus.length === 0){
+    $('content').innerHTML =
+      '<div class="alert alert-info">No active Rebel Bread SKUs found. Add your SKUs in <strong>Pastry SKUs</strong> first.</div>';
+    return;
+  }
+
+  // Build grid rows
+  var rows = skus.map(function(sku){
+    var entry = getPastryEntry(dateStr, sku.name);
+    var received = entry ? (entry.received !== undefined ? entry.received : '') : '';
+    var billed = entry ? (entry.billed !== undefined ? entry.billed : '') : '';
+    var variance = (received !== '' && billed !== '') ? (Number(received) - Number(billed)) : null;
+    var varHtml = variance === null ? '<span class="var-zero">--</span>' :
+      variance > 0 ? '<span class="var-pos">+' + variance + '</span>' :
+      variance < 0 ? '<span class="var-neg">' + variance + '</span>' :
+      '<span class="var-zero">0</span>';
+
+    return '<div class="pastry-row">' +
+      '<div>' + sku.name + '</div>' +
+      '<div><input type="number" min="0" step="1" id="pr-' + sku.name.replace(/[^a-zA-Z0-9]/g,'_') + '" value="' + received + '" placeholder="0"></div>' +
+      '<div style="background:var(--bg);color:var(--ink-mid);font-family:var(--font-mono);font-size:12px;justify-content:center">' + (billed !== '' ? billed : '--') + '</div>' +
+      '<div style="justify-content:center">' + varHtml + '</div>' +
+    '</div>';
+  }).join('');
+
+  // Summary totals
+  var totalReceived = 0, totalBilled = 0, billedCount = 0;
+  skus.forEach(function(sku){
+    var entry = getPastryEntry(dateStr, sku.name);
+    var id = 'pr-' + sku.name.replace(/[^a-zA-Z0-9]/g,'_');
+    if(entry){
+      if(entry.received !== undefined) totalReceived += Number(entry.received);
+      if(entry.billed !== undefined){ totalBilled += Number(entry.billed); billedCount++; }
+    }
+  });
+
+  var invoiceNote = billedCount > 0
+    ? '<span style="color:var(--green);font-size:12px">Invoice data loaded for ' + billedCount + ' of ' + skus.length + ' SKUs</span>'
+    : '<span style="color:var(--ink-lo);font-size:12px">No invoice data yet for this date -- upload Rebel Bread invoice in AP to populate</span>';
+
+  $('content').innerHTML =
+    '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">' +
+      '<div><div style="font-size:15px;font-weight:700">' + fmtDateShort(dateStr) + '</div>' +
+      '<div style="font-size:12px;color:var(--ink-mid);margin-top:2px">' + invoiceNote + '</div></div>' +
+    '</div>' +
+    '<div class="pastry-grid">' +
+      '<div class="pastry-hd"><span>Pastry Item</span><span style="text-align:center">Received</span><span style="text-align:center">Invoiced</span><span style="text-align:center">Variance</span></div>' +
+      rows +
+    '</div>';
+}
+
+async function savePastryClose(){
+  var skus = getPastrySkus().filter(function(s){return s.active!==false});
+  var dateStr = pastryCloseDate;
+  var log = DB.pastryLog;
+
+  // Remove existing received entries for this date (keep billed entries)
+  log = log.filter(function(e){
+    return !(e.date === dateStr && e.received !== undefined && e.billed === undefined);
+  });
+
+  // Write new received entries
+  var saved = 0;
+  skus.forEach(function(sku){
+    var id = 'pr-' + sku.name.replace(/[^a-zA-Z0-9]/g,'_');
+    var el = $(id);
+    if(!el || el.value === '') return;
+    var qty = parseInt(el.value);
+    if(isNaN(qty)) return;
+
+    // Check if a billed entry exists for this date+sku
+    var billedEntry = log.find(function(e){return e.date===dateStr && e.sku===sku.name && e.billed!==undefined});
+    if(billedEntry){
+      // Update the billed entry with received
+      billedEntry.received = qty;
+    } else {
+      // Create new entry with just received
+      log.push({date:dateStr, sku:sku.name, received:qty, invoiceId:null});
+    }
+    saved++;
+  });
+
+  await savePastryLogEntriesToSB(log.filter(function(e){return e.date===dateStr}));
+  // Reload pastry log from Supabase to get updated data
+  const fresh = await sbGet('pastry_log', {order:'log_date', asc:false});
+  DB.pastryLog = fresh.map(mapPastryLogFromDB);
+  showToast('Pastry close saved -- ' + saved + ' items recorded');
+  renderPastryClose();
+}
+
+// ==================================================
+// PASTRY VARIANCE TRACKER VIEW
+// ==================================================
+function renderPastryTracker(){
+  $('topbar-actions').innerHTML = '';
+  var log = DB.pastryLog;
+  var skus = getPastrySkus().filter(function(s){return s.active!==false});
+
+  if(log.length === 0){
+    $('content').innerHTML = '<div class="empty-state"><div class="empty-icon">&#9650;</div><div>No pastry data yet. Start by entering daily close entries and uploading Rebel Bread invoices.</div></div>';
+    return;
+  }
+
+  // Group by week (Monday-based)
+  function getWeekStart(dateStr){
+    var d = new Date(dateStr+'T12:00:00');
+    var day = d.getDay();
+    var diff = (day === 0) ? -6 : 1 - day;
+    d.setDate(d.getDate() + diff);
+    return d.toISOString().slice(0,10);
+  }
+
+  var weeks = {};
+  log.forEach(function(e){
+    var ws = getWeekStart(e.date);
+    if(!weeks[ws]) weeks[ws] = [];
+    weeks[ws].push(e);
+  });
+
+  var weekKeys = Object.keys(weeks).sort().reverse();
+
+  // Build summary tiles
+  var allEntries = log.filter(function(e){return e.received!==undefined && e.billed!==undefined});
+  var totalVar = allEntries.reduce(function(s,e){return s+(Number(e.received)-Number(e.billed))},0);
+  var flagged = allEntries.filter(function(e){return e.received !== e.billed}).length;
+
+  // Per-SKU variance summary
+  var skuStats = {};
+  skus.forEach(function(s){skuStats[s.name]={received:0,billed:0,days:0,varDays:0}});
+  allEntries.forEach(function(e){
+    if(!skuStats[e.sku]) skuStats[e.sku]={received:0,billed:0,days:0,varDays:0,dollarVar:0};
+    skuStats[e.sku].received += Number(e.received);
+    skuStats[e.sku].billed += Number(e.billed);
+    skuStats[e.sku].days++;
+    if(Number(e.received) !== Number(e.billed)){
+      skuStats[e.sku].varDays++;
+      // Dollar variance uses the invoiced unit price for that day
+      var price = e.unitPrice || 0;
+      skuStats[e.sku].dollarVar += (Number(e.received) - Number(e.billed)) * price;
+    }
+  });
+
+  var skuRows = Object.entries(skuStats).sort(function(a,b){return b[1].varDays-a[1].varDays}).map(function(entry){
+    var name=entry[0]; var s=entry[1];
+    var net = s.received - s.billed;
+    var varPct = s.days > 0 ? Math.round(s.varDays/s.days*100) : 0;
+    var dollarStr = s.dollarVar === 0 ? '<span class="var-zero">$0.00</span>' :
+      s.dollarVar > 0 ? '<span class="var-pos">+' + fmt(s.dollarVar) + '</span>' :
+      '<span class="var-neg">(' + fmt(Math.abs(s.dollarVar)) + ')</span>';
+    return '<tr>' +
+      '<td>' + name + '</td>' +
+      '<td class="mono text-right">' + s.received + '</td>' +
+      '<td class="mono text-right">' + s.billed + '</td>' +
+      '<td class="mono text-right ' + (net>0?'var-pos':net<0?'var-neg':'var-zero') + '">' + (net>0?'+':'') + net + '</td>' +
+      '<td class="mono text-right">' + dollarStr + '</td>' +
+      '<td class="text-right"><span class="badge ' + (varPct>20?'badge-overdue':varPct>0?'badge-open':'badge-paid') + '">' + varPct + '% of days</span></td>' +
+    '</tr>';
+  }).join('');
+
+  // Weekly detail cards
+  var weekCards = weekKeys.slice(0,8).map(function(ws){
+    var entries = weeks[ws];
+    var weekEnd = new Date(ws+'T12:00:00');
+    weekEnd.setDate(weekEnd.getDate()+6);
+    var weStr = weekEnd.toISOString().slice(0,10);
+    var compared = entries.filter(function(e){return e.received!==undefined && e.billed!==undefined});
+    var varCount = compared.filter(function(e){return e.received!==e.billed}).length;
+    var totalRec = compared.reduce(function(s,e){return s+Number(e.received)},0);
+    var totalBil = compared.reduce(function(s,e){return s+Number(e.billed)},0);
+    var net = totalRec - totalBil;
+
+    var dayRows = entries.slice().sort(function(a,b){return a.date.localeCompare(b.date)}).map(function(e){
+      var variance = (e.received!==undefined && e.billed!==undefined) ? Number(e.received)-Number(e.billed) : null;
+      var varHtml = variance===null?'<span class="var-zero">--</span>':
+        variance>0?'<span class="var-pos">+'+variance+'</span>':
+        variance<0?'<span class="var-neg">'+variance+'</span>':
+        '<span class="var-zero">OK</span>';
+      return '<tr style="font-size:12px">' +
+        '<td>' + fmtDateShort(e.date) + '</td>' +
+        '<td>' + e.sku + '</td>' +
+        '<td class="mono text-right">' + (e.received!==undefined?e.received:'--') + '</td>' +
+        '<td class="mono text-right">' + (e.billed!==undefined?e.billed:'--') + '</td>' +
+        '<td class="text-right">' + varHtml + '</td>' +
+      '</tr>';
+    }).join('');
+
+    return '<div class="week-card">' +
+      '<div class="week-card-header" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display===\'none\'?\'block\':\'none\'">' +
+        '<div><span style="font-weight:700">Week of ' + fmtDateShort(ws) + '</span>' +
+        '<span style="font-size:12px;color:var(--ink-mid);margin-left:12px">' + compared.length + ' comparisons</span></div>' +
+        '<div style="display:flex;gap:16px;align-items:center">' +
+          (varCount>0?'<span class="badge badge-overdue">'+varCount+' variance'+(varCount!==1?'s':'')+'</span>':'<span class="badge badge-paid">Clean</span>') +
+          '<span class="mono" style="font-size:12px;color:'+(net===0?'var(--ink-lo)':net>0?'var(--green)':'var(--red)')+'">Net: '+(net>0?'+':'')+net+'</span>' +
+        '</div>' +
+      '</div>' +
+      '<div class="week-card-body" style="display:none"><div class="tbl-wrap"><table>' +
+        '<thead><tr><th>Date</th><th>Item</th><th class="text-right">Received</th><th class="text-right">Invoiced</th><th class="text-right">Unit Price</th><th class="text-right">Unit Var</th><th class="text-right">$ Var</th></tr></thead>' +
+        '<tbody>' + dayRows + '</tbody>' +
+      '</table></div></div>' +
+    '</div>';
+  }).join('');
+
+  var totalDollarVar = allEntries.reduce(function(s,e){
+    return s + (Number(e.received)-Number(e.billed))*(e.unitPrice||0);
+  },0);
+
+  $('content').innerHTML =
+    '<div class="tiles" style="grid-template-columns:repeat(4,1fr)">' +
+      '<div class="tile"><div class="tile-label">Entries Compared</div><div class="tile-val">' + allEntries.length + '</div></div>' +
+      '<div class="tile"><div class="tile-label">Days With Variance</div><div class="tile-val ' + (flagged>0?'red':'green') + '">' + flagged + '</div></div>' +
+      '<div class="tile"><div class="tile-label">Net Unit Variance</div><div class="tile-val ' + (totalVar!==0?'red':'green') + '">' + (totalVar>0?'+':'') + totalVar + '</div></div>' +
+      '<div class="tile"><div class="tile-label">Net Dollar Variance</div><div class="tile-val ' + (totalDollarVar!==0?'red':'green') + '">' + fmt(totalDollarVar) + '</div></div>' +
+    '</div>' +
+    '<div class="card" style="margin-bottom:20px">' +
+      '<div class="card-header"><span class="card-title">Variance by SKU</span></div>' +
+      '<div class="tbl-wrap"><table>' +
+        '<thead><tr><th>Item</th><th class="text-right">Received</th><th class="text-right">Invoiced</th><th class="text-right">Unit Variance</th><th class="text-right">Dollar Variance</th><th class="text-right">Variance Rate</th></tr></thead>' +
+        '<tbody>' + (skuRows || '<tr><td colspan="5" style="padding:24px;text-align:center;color:var(--ink-lo)">No comparison data yet</td></tr>') + '</tbody>' +
+      '</table></div>' +
+    '</div>' +
+    '<div style="font-size:13px;font-weight:600;margin-bottom:12px">Weekly Detail (click to expand)</div>' +
+    weekCards;
+}
+
+// ==================================================
+// PASTRY INVOICE INTEGRATION
+// Called from saveInvoice() when vendor is Rebel Bread
+// ==================================================
+async function writePastryBilledFromInvoice(inv, dailyDetail){
+  // dailyDetail: [{date, sku, qty, unitPrice}]
+  if(!dailyDetail || dailyDetail.length === 0) return 0;
+  var log = DB.pastryLog;
+  var written = 0;
+
+  dailyDetail.forEach(function(item){
+    // Find existing entry for this date+sku
+    var existing = log.find(function(e){return e.date===item.date && e.sku===item.sku});
+    if(existing){
+      existing.billed = item.qty;
+      existing.unitPrice = item.unitPrice;
+      existing.invoiceId = inv.id;
+    } else {
+      log.push({
+        date: item.date,
+        sku: item.sku,
+        billed: item.qty,
+        unitPrice: item.unitPrice,
+        invoiceId: inv.id,
+        received: undefined
+      });
+    }
+    written++;
+  });
+
+  // Save to Supabase
+  await savePastryLogEntriesToSB(dailyDetail.map(function(item){
+    return{date:item.date, sku:item.sku, billed:item.qty, unitPrice:item.unitPrice, invoiceId:inv.id};
+  }));
+  // Refresh cache
+  const fresh = await sbGet('pastry_log', {order:'log_date', asc:false});
+  DB.pastryLog = fresh.map(mapPastryLogFromDB);
+  return written;
+}
+
+
+
+// ==================================================
+// REBEL BREAD DAILY DETAIL EXTRACTOR
+// ==================================================
+var _lastRebelBreadFile = null; // store file ref for re-extraction
+
+function handleInvoiceFile(file){
+  if(!file)return;
+  const ext=file.name.split('.').pop().toLowerCase();
+  if(!['pdf','png','jpg','jpeg','webp'].includes(ext)){
+    showAutoloadErr('Unsupported file type. Please use PDF, PNG, JPG, or WebP.');return;
+  }
+  _lastRebelBreadFile = file; // store for potential pastry re-extraction
+  runInvoiceExtraction(file);
+}
+
+
+function triggerPastryExtraction(invId){
+  const inv = DB.invoices.find(i=>i.id===invId);
+  if(!inv){showToast('Invoice not found','warn');return}
+  if(!_lastRebelBreadFile){
+    showToast('Invoice file no longer in memory. Please re-upload the Rebel Bread invoice to extract daily detail.','warn');
+    return;
+  }
+  closeModal();
+  runRebelBreadPastryExtraction(_lastRebelBreadFile, inv);
+}
+
+async function runRebelBreadPastryExtraction(file, inv){
+  if(!file){showToast('No invoice file available for pastry extraction','warn');return}
+  showToast('Extracting daily pastry detail...');
+
+  const ext=file.name.split('.').pop().toLowerCase();
+  const isPdf=ext==='pdf';
+  const mediaType=isPdf?'application/pdf':(file.type||'image/jpeg');
+
+  let b64;
+  try{
+    b64=await new Promise((res,rej)=>{
+      const r=new FileReader();
+      r.onload=()=>res(r.result.split(',')[1]);
+      r.onerror=()=>rej(new Error('Could not read file'));
+      r.readAsDataURL(file);
+    });
+  }catch(e){showToast('Could not read file: '+e.message,'warn');return}
+
+  const content=isPdf
+    ?[{type:'document',source:{type:'base64',media_type:'application/pdf',data:b64}},{type:'text',text:'Extract daily delivery data.'}]
+    :[{type:'image',source:{type:'base64',media_type:mediaType,data:b64}},{type:'text',text:'Extract daily delivery data.'}];
+
+  const activePastrySkus = getPastrySkus().filter(s=>s.active!==false).map(s=>s.name);
+
+  const sysPrompt = 'You are parsing a Rebel Bread bakery invoice for a coffee shop. ' +
+    'The invoice has a table with item rows and date columns showing quantity delivered each day. ' +
+    'Extract the daily delivery quantities for each item. ' +
+    'Return ONLY valid JSON (no markdown, no backticks) in this exact format: ' +
+    '{"deliveries":[{"date":"YYYY-MM-DD","sku":"item name","qty":number,"unit_price":number}]} ' +
+    'Use ISO date format for dates. ' +
+    'Map item names to these known SKUs where possible: ' + activePastrySkus.join(', ') + '. ' +
+    'Skip the delivery charge line (code 9001, description containing Delivery). Do NOT include any delivery fee or shipping charge as a SKU. ' +
+    'Include one record per item per date that has a non-zero quantity. ' +
+    'Return ONLY the JSON object.';
+
+  try{
+    const resp=await fetch(ANTHROPIC_ENDPOINT,{
+      method:'POST',
+      headers:{
+        'Content-Type':'application/json',
+        'x-api-key':ANTHROPIC_API_KEY,
+        'anthropic-version':'2023-06-01',
+        'anthropic-dangerous-direct-browser-access':'true'
+      },
+      body:JSON.stringify({model:'claude-haiku-4-5-20251001',max_tokens:3000,system:sysPrompt,messages:[{role:'user',content}]})
+    });
+    const rawText=await resp.text();
+    if(!resp.ok){showToast('API error '+resp.status,'warn');return}
+    let data;
+    try{data=JSON.parse(rawText)}catch(e){showToast('Bad API response','warn');return}
+    if(data.error){showToast('API error: '+data.error.message,'warn');return}
+    const text=(data.content||[]).filter(c=>c.type==='text').map(c=>c.text).join('').trim();
+    if(!text){showToast('Empty response from API','warn');return}
+    let parsed;
+    try{parsed=JSON.parse(text.replace(/```json|```/g,'').trim())}catch(e){showToast('Could not parse pastry detail response','warn');return}
+
+    if(!parsed.deliveries||parsed.deliveries.length===0){
+      showToast('No daily delivery data found in invoice','warn');return;
+    }
+
+    // Write to pastry log
+    const written = writePastryBilledFromInvoice(inv, parsed.deliveries.map(d=>({
+      date: d.date,
+      sku: d.sku,
+      qty: d.qty,
+      unitPrice: d.unit_price||0
+    })));
+
+    showToast('Pastry detail extracted -- ' + written + ' daily records written to log');
+    if(currentView==='pastry-close')renderPastryClose();
+    if(currentView==='pastry-tracker')renderPastryTracker();
+
+  }catch(e){showToast('Extraction failed: '+e.message,'warn')}
+}
+
+
+// ==================================================
+// AUTHENTICATION
+// ==================================================
+async function doLogin(){
+  const email = document.getElementById('login-email').value.trim();
+  const password = document.getElementById('login-password').value;
+  const errEl = document.getElementById('login-err');
+  errEl.textContent = 'Signing in...';
+  const {data, error} = await _sb.auth.signInWithPassword({email, password});
+  if(error){errEl.textContent = error.message;return}
+  _session = data.session;
+  _userRole = data.user?.user_metadata?.role || 'admin';
+  // Load Anthropic API key from Supabase config table
+  try{
+    const {data:cfg} = await _sb.from('config').select('value').eq('key','anthropic_api_key').single();
+    if(cfg?.value){ ANTHROPIC_API_KEY = cfg.value; }
+  }catch(e){ console.warn('Could not load API key from config:', e.message); }
+  document.getElementById('login-screen').style.display = 'none';
+  document.getElementById('main-app').style.display = 'flex';
+  await loadAllData();
+  updateSidebarStats();
+  showView('dashboard');
+}
+
+async function doSignOut(){
+  if(!confirm('Sign out?'))return;
+  await _sb.auth.signOut();
+  _session = null;
+  ANTHROPIC_API_KEY = '';
+  DB = {vendors:[],invoices:[],payments:[],gl:[],fifo:[],rules:[],
+        ingredients:[],recipes:[],pastryLog:[],pastrySkus:[]};
+  document.getElementById('main-app').style.display = 'none';
+  document.getElementById('login-screen').style.display = 'flex';
+  document.getElementById('login-email').value = '';
+  document.getElementById('login-password').value = '';
+  document.getElementById('login-err').textContent = '';
+}
+
+// ==================================================
+// SUPABASE SAVE FUNCTIONS
+// Replace direct DB array mutations with Supabase writes
+// ==================================================
+
+async function saveVendorToSB(vendor){
+  const row = {
+    id:vendor.id, name:vendor.name, type:vendor.type||null,
+    email:vendor.email||null, phone:vendor.phone||null,
+    address:vendor.address||null, notes:vendor.notes||null,
+    active:vendor.active!==false, terms:vendor.terms||30,
+    default_accts:vendor.defaultAccts||null
+  };
+  const ok = await sbUpsert('vendors', row);
+  if(ok){
+    const idx = DB.vendors.findIndex(v=>v.id===vendor.id);
+    if(idx>=0) DB.vendors[idx]=vendor; else DB.vendors.push(vendor);
+    DB.vendors.sort((a,b)=>a.name.localeCompare(b.name));
+  }
+  return ok;
+}
+
+async function saveInvoiceToSB(inv){
+  const ok = await sbUpsert('invoices', mapInvoiceToDB(inv));
+  if(ok){
+    const idx = DB.invoices.findIndex(i=>i.id===inv.id);
+    if(idx>=0) DB.invoices[idx]=inv; else DB.invoices.unshift(inv);
+  }
+  return ok;
+}
+
+async function savePaymentToSB(pmt){
+  const ok = await sbUpsert('payments', mapPaymentToDB(pmt));
+  if(ok){
+    const idx = DB.payments.findIndex(p=>p.id===pmt.id);
+    if(idx>=0) DB.payments[idx]=pmt; else DB.payments.unshift(pmt);
+  }
+  return ok;
+}
+
+async function saveGLToSB(je){
+  const ok = await sbInsert('gl_entries', mapGLToDB(je));
+  if(ok) DB.gl.unshift(je);
+  return ok;
+}
+
+async function saveFIFOLayerToSB(layer){
+  const ok = await sbInsert('fifo_deliveries', mapFIFOToDB(layer));
+  if(ok) DB.fifo.unshift(layer);
+  return ok;
+}
+
+async function saveRuleToSB(rule){
+  const ok = await sbUpsert('fifo_rules', rule, {onConflict:'id'});
+  if(ok){
+    const idx = DB.rules.findIndex(r=>r.id===rule.id);
+    if(idx>=0) DB.rules[idx]=rule; else DB.rules.push(rule);
+  }
+  return ok;
+}
+
+async function deleteRuleFromSB(id){
+  const ok = await sbDelete('fifo_rules', id);
+  if(ok) DB.rules = DB.rules.filter(r=>r.id!==id);
+  return ok;
+}
+
+async function saveIngredientToSB(ing){
+  const ok = await sbUpsert('ingredients', ing, {onConflict:'name'});
+  if(ok){
+    const idx = DB.ingredients.findIndex(i=>i.name===ing.name);
+    if(idx>=0) DB.ingredients[idx]=ing; else DB.ingredients.push(ing);
+    DB.ingredients.sort((a,b)=>a.name.localeCompare(b.name));
+  }
+  return ok;
+}
+
+async function saveRecipesToSB(menuItem, lines){
+  // Delete old lines for this menu item then insert new ones
+  const {error:delErr} = await _sb.from('recipes').delete().eq('menu_item', menuItem);
+  if(delErr){console.error('Recipe delete error',delErr);return false}
+  if(lines.length > 0){
+    const ok = await sbInsert('recipes', lines.map(l=>({
+      menu_item:l.menu_item, category:l.category, sale_price:l.sale_price,
+      ingredient_name:l.ingredient_name, quantity:l.quantity, unit:l.unit
+    })));
+    if(!ok) return false;
+  }
+  DB.recipes = DB.recipes.filter(r=>r.menu_item!==menuItem);
+  lines.forEach(l=>DB.recipes.push(l));
+  return true;
+}
+
+async function deleteMenuItemFromSB(menuItem){
+  const {error} = await _sb.from('recipes').delete().eq('menu_item', menuItem);
+  if(error){console.error('Delete menu item error',error);return false}
+  DB.recipes = DB.recipes.filter(r=>r.menu_item!==menuItem);
+  return true;
+}
+
+async function savePastrySkuToSB(sku){
+  const dbSku = {name:sku.name, code:sku.code, unit_price:sku.unitPrice, notes:sku.notes, active:sku.active};
+  const ok = await sbUpsert('pastry_skus', dbSku, {onConflict:'name'});
+  if(ok){
+    const idx = DB.pastrySkus.findIndex(s=>s.name===sku.name);
+    if(idx>=0) DB.pastrySkus[idx]=sku; else DB.pastrySkus.push(sku);
+  }
+  return ok;
+}
+
+async function savePastryLogEntriesToSB(entries){
+  // entries is array of {date, sku, received?, billed?, unitPrice?, invoiceId?}
+  for(const e of entries){
+    const dbEntry = mapPastryLogToDB(e);
+    // Try update first, then insert
+    const {data:existing} = await _sb.from('pastry_log')
+      .select('id').eq('log_date', e.date).eq('sku', e.sku).maybeSingle();
+    if(existing){
+      await _sb.from('pastry_log').update(dbEntry).eq('id', existing.id);
+    } else {
+      await _sb.from('pastry_log').insert(dbEntry);
+    }
+    // Update cache
+    const idx = DB.pastryLog.findIndex(l=>l.date===e.date&&l.sku===e.sku);
+    if(idx>=0) DB.pastryLog[idx]=e; else DB.pastryLog.unshift(e);
+  }
+  return true;
+}
+
+// ==================================================
+// MIGRATION TOOL
+// One-time tool to load JSON backup into Supabase
+// ==================================================
+async function runMigration(jsonData){
+  showLoadingOverlay('Migrating data to Supabase...');
+  const results = [];
+
+  try{
+    // Vendors
+    if(jsonData.vendors?.length){
+      const rows = jsonData.vendors.map(v=>({
+        id:v.id, name:v.name, type:v.type||null, email:v.email||null,
+        phone:v.phone||null, address:v.address||null, notes:v.notes||null,
+        active:v.active!==false, terms:v.terms||30,
+        default_accts:v.defaultAccts||null
+      }));
+      const {error} = await _sb.from('vendors').upsert(rows);
+      results.push('Vendors: '+(error?'ERROR: '+error.message:rows.length+' records'));
+    }
+
+    // Invoices
+    if(jsonData.invoices?.length){
+      const rows = jsonData.invoices.map(inv=>({
+        id:inv.id, vendor_id:inv.vendor_id||inv.vendorId,
+        invoice_number:inv.invoice_number||inv.invoiceNum||null,
+        invoice_date:inv.invoice_date||inv.date,
+        due_date:inv.due_date||inv.dueDate||null,
+        era:inv.era, status:inv.status,
+        lines:inv.lines||[], total:inv.total||0,
+        amount_paid:inv.amount_paid||inv.amountPaid||0,
+        balance:inv.balance||0, memo:inv.memo||inv.notes||null,
+        gl_posted:inv.gl_posted||inv.glPosted||false,
+        subtotal:inv.subtotal||inv.total||0, tax:inv.tax||0
+      }));
+      const {error} = await _sb.from('invoices').upsert(rows);
+      results.push('Invoices: '+(error?'ERROR: '+error.message:rows.length+' records'));
+    }
+
+    // Payments
+    if(jsonData.payments?.length){
+      const rows = jsonData.payments.map(mapPaymentToDB);
+      const {error} = await _sb.from('payments').upsert(rows);
+      results.push('Payments: '+(error?'ERROR: '+error.message:rows.length+' records'));
+    }
+
+    // GL entries
+    if(jsonData.gl?.length){
+      const rows = jsonData.gl.map(je=>({
+        id:je.id,
+        entry_date:je.entry_date||je.date,
+        memo:je.memo||je.description||null,
+        entries:je.entries||je.lines||[],
+        ref:je.ref||je.source_id||null,
+        era:je.era||null
+      }));
+      const {error} = await _sb.from('gl_entries').upsert(rows, {onConflict:'id'});
+      results.push('GL Entries: '+(error?'ERROR: '+error.message:rows.length+' records'));
+    }
+
+    // FIFO deliveries
+    if(jsonData.fifo?.length){
+      const rows = jsonData.fifo.map(d=>({
+        id:String(d.id),
+        delivery_date:d.delivery_date||d.date,
+        ingredient:d.ingredient, category:d.category,
+        qty:d.qty, remaining_qty:d.remaining_qty||d.remainingQty||d.qty,
+        invoice_qty:d.invoice_qty||d.invoiceQty||null,
+        invoice_unit:d.invoice_unit||d.invoiceUnit||null,
+        multiplier:d.multiplier||1,
+        total_cost:d.total_cost||d.totalCost||0,
+        unit:d.unit, vendor:d.vendor||null,
+        invoice_no:d.invoice_no||d.invoiceNo||null,
+        ap_invoice_id:d.ap_invoice_id||d.apInvoiceId||null
+      }));
+      const {error} = await _sb.from('fifo_deliveries').upsert(rows, {onConflict:'id'});
+      results.push('FIFO Layers: '+(error?'ERROR: '+error.message:rows.length+' records'));
+    }
+
+    // Matching rules
+    if(jsonData.rules?.length){
+      const {error} = await _sb.from('fifo_rules').upsert(jsonData.rules, {onConflict:'id'});
+      results.push('Rules: '+(error?'ERROR: '+error.message:jsonData.rules.length+' records'));
+    }
+
+    // Ingredients
+    if(jsonData.ingredients?.length){
+      const {error} = await _sb.from('ingredients').upsert(jsonData.ingredients, {onConflict:'name'});
+      results.push('Ingredients: '+(error?'ERROR: '+error.message:jsonData.ingredients.length+' records'));
+    }
+
+    // Recipes
+    if(jsonData.recipes?.length){
+      const {error} = await _sb.from('recipes').upsert(jsonData.recipes.map(r=>({
+        menu_item:r.menu_item,category:r.category,sale_price:r.sale_price,
+        ingredient_name:r.ingredient_name,quantity:r.quantity,unit:r.unit
+      })));
+      results.push('Recipes: '+(error?'ERROR: '+error.message:jsonData.recipes.length+' records'));
+    }
+
+    // Pastry log
+    if(jsonData.pastryLog?.length){
+      const rows = jsonData.pastryLog.map(e=>({
+        log_date:e.log_date||e.date,
+        sku:e.sku,
+        received:e.received!==undefined?e.received:null,
+        billed:e.billed!==undefined?e.billed:null,
+        unit_price:e.unit_price||e.unitPrice||null,
+        invoice_id:e.invoice_id||e.invoiceId||null
+      }));
+      // Delete and reinsert to avoid conflicts
+      await _sb.from('pastry_log').delete().neq('sku','__placeholder__');
+      const {error} = await _sb.from('pastry_log').insert(rows);
+      results.push('Pastry Log: '+(error?'ERROR: '+error.message:rows.length+' records'));
+    }
+
+    // Pastry SKUs
+    if(jsonData.pastrySkus?.length){
+      const rows = jsonData.pastrySkus.map(s=>({
+        name:s.name, code:s.code||null, unit_price:s.unitPrice||0,
+        notes:s.notes||null, active:s.active!==false
+      }));
+      // Delete existing and reinsert to avoid constraint issues
+      await _sb.from('pastry_skus').delete().neq('name','__placeholder__');
+      const {error} = await _sb.from('pastry_skus').insert(rows);
+      results.push('Pastry SKUs: '+(error?'ERROR: '+error.message:rows.length+' records'));
+    }
+
+    // Save sequences to localStorage
+    if(jsonData.sequences) save('bc_seq', jsonData.sequences);
+
+    hideLoadingOverlay();
+    return results;
+  }catch(e){
+    hideLoadingOverlay();
+    return ['FATAL ERROR: '+e.message];
+  }
+}
+
+function openMigrationTool(){
+  openModal(`<div class="modal" style="max-width:600px">
+    <div class="modal-header">
+      <div><div class="modal-title">Data Migration Tool</div>
+      <div class="modal-sub">One-time import from localStorage JSON backup into Supabase</div></div>
+      <button class="close-btn" onclick="closeModal()">x</button>
+    </div>
+    <div class="modal-body">
+      <div class="alert alert-info" style="margin-bottom:16px">
+        Upload your JSON backup file exported from the localStorage version of the AP module.
+        This will migrate all vendors, invoices, payments, GL entries, FIFO layers, rules,
+        ingredients, recipes, and pastry data into Supabase. Run this once only.
+      </div>
+      <div style="border:2px dashed var(--border);border-radius:var(--r);padding:24px;text-align:center;cursor:pointer;background:var(--bg)"
+        onclick="document.getElementById('migration-file').click()">
+        <div style="font-size:22px;margin-bottom:8px">&#128196;</div>
+        <div style="font-weight:600;margin-bottom:4px">Click to select JSON backup file</div>
+        <div style="font-size:12px;color:var(--ink-lo)">brew-culture-backup-YYYY-MM-DD.json</div>
+      </div>
+      <input type="file" id="migration-file" accept=".json" style="display:none" onchange="handleMigrationFile(this)">
+      <div id="migration-results" style="margin-top:16px"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal()">Close</button>
+    </div>
+  </div>`);
+}
+
+async function handleMigrationFile(input){
+  const file = input.files[0];
+  if(!file) return;
+  const resultsEl = document.getElementById('migration-results');
+  resultsEl.innerHTML = '<div style="color:var(--ink-mid);font-size:13px">Reading file...</div>';
+  const reader = new FileReader();
+  reader.onload = async function(e){
+    try{
+      const data = JSON.parse(e.target.result);
+      resultsEl.innerHTML = '<div style="color:var(--ink-mid);font-size:13px">Migrating ' +
+        (data._meta?.counts?.invoices||'?') + ' invoices, ' +
+        (data._meta?.counts?.vendors||'?') + ' vendors...</div>';
+      const results = await runMigration(data);
+      const hasError = results.some(r=>r.includes('ERROR'));
+      resultsEl.innerHTML = '<div class="alert ' + (hasError?'alert-warn':'alert-success') + '">' +
+        '<strong>' + (hasError?'Migration completed with errors':'Migration complete') + '</strong><br>' +
+        results.map(r=>'&#x2022; '+r).join('<br>') +
+        '</div>' +
+        (hasError?'':'<div style="font-size:12px;color:var(--ink-mid);margin-top:8px">Reload the page to see your migrated data.</div>');
+      if(!hasError){
+        await loadAllData();
+        updateSidebarStats();
+        showView('dashboard');
+      }
+    }catch(err){
+      resultsEl.innerHTML = '<div class="alert" style="background:var(--red-lo);border:1px solid #EAB5B1;color:var(--red)">Could not read file: '+err.message+'</div>';
+    }
+  };
+  reader.readAsText(file);
+}
+
+
+async function exportData(){
+  showLoadingOverlay('Preparing backup...');
+  try{
+    // Fetch fresh data from Supabase for export
+    const [vendors,invoices,payments,gl,fifo,rules,ingredients,recipes,pastryLog,pastrySkus] = await Promise.all([
+      sbGet('vendors'),sbGet('invoices'),sbGet('payments'),sbGet('gl_entries'),
+      sbGet('fifo_deliveries'),sbGet('fifo_rules'),sbGet('ingredients'),
+      sbGet('recipes'),sbGet('pastry_log'),sbGet('pastry_skus')
+    ]);
+    hideLoadingOverlay();
+    const troy=troyReceivable();const s=apSummary();
+    const snap={
+      _meta:{
+        app:'Brew Culture Coffee -- Supabase v4.0',
+        version:'4.0',
+        exportedAt:new Date().toISOString(),
+        exportedDate:new Date().toLocaleDateString('en-US',{weekday:'long',year:'numeric',month:'long',day:'numeric'}),
+        acquisitionDate:ACQUISITION_DATE,
+        counts:{vendors:vendors.length,invoices:invoices.length,payments:payments.length,
+          glEntries:gl.length,fifoLayers:fifo.length,rules:rules.length,
+          ingredients:ingredients.length,recipes:recipes.length,
+          pastryLog:pastryLog.length,pastrySkus:pastrySkus.length},
+        troyReceivable:fmt(troy.balance),dcOpenAP:fmt(s.totalOpen)
+      },
+      sequences:load('bc_seq')||{},
+      vendors,invoices,payments,gl,fifo,rules,ingredients,recipes,pastryLog,pastrySkus
+    };
+    const blob=new Blob([JSON.stringify(snap,null,2)],{type:'application/json'});
+    const url=URL.createObjectURL(blob);const a=document.createElement('a');
+    a.href=url;a.download='brew-culture-backup-'+todayStr()+'.json';a.click();URL.revokeObjectURL(url);
+    showToast('Backup saved -- '+snap._meta.counts.invoices+' invoices, '+snap._meta.counts.vendors+' vendors');
+  }catch(e){hideLoadingOverlay();showToast('Export failed: '+e.message,'warn')}
+}
+
+function triggerImport(){
+  if(!confirm('Restoring will REPLACE all current data.\n\nExport a backup first if needed.\n\nContinue?'))return;
+  $('import-file-input').value='';$('import-file-input').click();
+}
+
+function importData(input){
+  const file=input.files[0];if(!file)return;
+  const reader=new FileReader();
+  reader.onload=e=>{
+    try{
+      const snap=JSON.parse(e.target.result);
+      const missing=['vendors','invoices','payments','gl'].filter(k=>!Array.isArray(snap[k]));
+      if(missing.length){alert('Invalid file -- missing: '+missing.join(', '));return}
+      DB.vendors=snap.vendors;DB.invoices=snap.invoices;
+      DB.payments=snap.payments;DB.gl=snap.gl;
+      DB.fifo=snap.fifo||[];DB.rules=snap.rules||[];
+      if(snap.ingredients)DB.ingredients=snap.ingredients;
+      if(snap.recipes)DB.recipes=snap.recipes;
+      if(snap.pastryLog)DB.pastryLog=snap.pastryLog;
+      if(snap.pastrySkus)DB.pastrySkus=snap.pastrySkus;
+      if(snap.sequences)save('seq',snap.sequences);
+      persist();
+      const c=snap._meta?.counts||{};
+      showToast('Restored: '+(c.invoices||'?')+' invoices, '+(c.vendors||'?')+' vendors, '+(c.ingredients||'?')+' ingredients');
+      updateSidebarStats();showView('dashboard');
+    }catch(err){alert('Could not read file: '+err.message)}
+  };
+  reader.readAsText(file);
+}
+
+// ═══════════════════════════════════════════════
+// EXPORT / IMPORT
+// ═══════════════════════════════════════════════
+// exportData defined above
+
+// triggerImport defined above
+
+// importData defined above
+
+
+function showToast(msg){
+  const t=document.getElementById('bc-toast');if(t)t.remove();
+  const toast=document.createElement('div');toast.id='bc-toast';toast.textContent=msg;
+  toast.style.cssText='position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:var(--accent);color:#F5EFE8;padding:10px 20px;border-radius:6px;font-size:13px;font-weight:500;box-shadow:0 4px 16px rgba(0,0,0,.25);z-index:999;white-space:nowrap;';
+  document.body.appendChild(toast);
+  setTimeout(()=>{toast.style.transition='opacity .3s';toast.style.opacity='0'},3200);
+  setTimeout(()=>toast.remove(),3600);
+}
+
+// ==================================================
+// INIT
+// ==================================================
+(async function(){
+  // Check for existing session
+  const {data:{session}} = await _sb.auth.getSession();
+  if(session){
+    _session = session;
+    _userRole = session.user?.user_metadata?.role || 'admin';
+    document.getElementById('login-screen').style.display = 'none';
+    document.getElementById('main-app').style.display = 'flex';
+    await loadAllData();
+    updateSidebarStats();
+    showView('dashboard');
+  } else {
+    document.getElementById('login-screen').style.display = 'flex';
+    document.getElementById('main-app').style.display = 'none';
+  }
+})();
+</script>
+</body>
+</html>
