@@ -250,18 +250,21 @@
     <div class="mod-sub">Choose a module to continue</div>
   </div>
   <div class="mod-grid">
-    <div class="mod-card" onclick="launchModule('ap')">
-      <div class="mod-icon">&#9632;</div>
-      <div class="mod-card-title">Accounts Payable</div>
-      <div class="mod-card-sub">Vendors, invoices, payments, GL entries, FIFO inventory, and recipes.</div>
-      <div class="mod-card-badge">AP Module</div>
-    </div>
     <div class="mod-card mod-card-revenue" onclick="launchModule('revenue')">
       <div class="mod-icon">&#9650;</div>
       <div class="mod-card-title">Revenue</div>
       <div class="mod-card-sub">Clover imports, daily settlement, DoorDash, gift cards, and P&amp;L reporting.</div>
       <div class="mod-card-badge green">Revenue Module</div>
     </div>
+    <div class="mod-card" onclick="launchModule('ap')">
+      <div class="mod-icon">&#9632;</div>
+      <div class="mod-card-title">Accounts Payable</div>
+      <div class="mod-card-sub">Vendors, invoices, payments, GL entries, FIFO inventory, and recipes.</div>
+      <div class="mod-card-badge">AP Module</div>
+    </div>
+  </div>
+  <div style="margin-top:28px">
+    <button onclick="doSignOut()" style="background:none;border:1px solid var(--border);border-radius:var(--r);padding:8px 20px;font-size:13px;color:var(--ink-mid);cursor:pointer;font-family:inherit;transition:border-color .15s,color .15s" onmouseover="this.style.color='var(--ink)';this.style.borderColor='var(--ink-mid)'" onmouseout="this.style.color='var(--ink-mid)';this.style.borderColor='var(--border)'">Sign out</button>
   </div>
 </div>
 
@@ -956,6 +959,8 @@ function parseCloverXLSX(ab){
         tips: 0,
         cash_net: 0,
         card_net: 0,
+        cash_collected: 0,
+        card_collected: 0,
         discounts: 0,
         refunds: 0,
         item_lines: []
@@ -970,8 +975,13 @@ function parseCloverXLSX(ab){
     day.discounts        += o.discount;
     day.refunds          += o.refund;
     var ch = classifyPayment(o.payment_type);
-    if(ch === 'cash') day.cash_net += o.order_net;
-    else              day.card_net += o.order_net;
+    if(ch === 'cash'){
+      day.cash_net       += o.order_net;
+      day.cash_collected += o.amount_collected;
+    } else {
+      day.card_net       += o.order_net;
+      day.card_collected += o.amount_collected;
+    }
     o.items.forEach(function(it){ day.item_lines.push(it); });
   });
 
@@ -984,6 +994,8 @@ function parseCloverXLSX(ab){
     day.tips             = Math.round(day.tips             * 100) / 100;
     day.cash_net         = Math.round(day.cash_net         * 100) / 100;
     day.card_net         = Math.round(day.card_net         * 100) / 100;
+    day.cash_collected   = Math.round(day.cash_collected   * 100) / 100;
+    day.card_collected   = Math.round(day.card_collected   * 100) / 100;
     day.discounts        = Math.round(day.discounts        * 100) / 100;
     day.refunds          = Math.round(day.refunds          * 100) / 100;
     day.order_count = day.orders.length;
@@ -1004,6 +1016,8 @@ function buildSettlement(dayData){
     tips: dayData.tips,
     cash_net: dayData.cash_net,
     card_net: dayData.card_net,
+    cash_collected: dayData.cash_collected,
+    card_collected: dayData.card_collected,
     discounts: dayData.discounts,
     refunds: dayData.refunds,
     order_count: dayData.order_count,
@@ -1027,6 +1041,8 @@ async function saveSettlementToSB(s){
     tips: s.tips,
     cash_net: s.cash_net,
     card_net: s.card_net,
+    cash_collected: s.cash_collected || 0,
+    card_collected: s.card_collected || 0,
     discounts: s.discounts,
     refunds: s.refunds || 0,
     order_count: s.order_count,
@@ -1053,6 +1069,8 @@ async function loadRevData(){
         gross_before_disc: r.gross_before_disc || r.gross_net,
         tax: r.tax, tips: r.tips,
         cash_net: r.cash_net, card_net: r.card_net,
+        cash_collected: r.cash_collected || 0,
+        card_collected: r.card_collected || 0,
         discounts: r.discounts || 0,
         refunds: r.refunds || 0,
         order_count: r.order_count, item_count: r.item_count,
@@ -1088,7 +1106,7 @@ function renderRevImport(){
   REV.settlements.forEach(function(s){ existing[s.date] = true; });
 
   $('content').innerHTML =
-    '<div class="card" style="max-width:680px">' +
+    '<div class="card">' +
       '<div class="card-header"><span class="card-title">Clover Import</span>' +
         '<span style="font-size:12px;color:var(--ink-lo)">Full Orders Detail export (.xlsx)</span>' +
       '</div>' +
@@ -1104,7 +1122,7 @@ function renderRevImport(){
         '<div id="clover-parse-result" style="margin-top:16px"></div>' +
       '</div>' +
     '</div>' +
-    '<div class="card" style="max-width:680px;margin-top:0">' +
+    '<div class="card" style="margin-top:0">' +
       '<div class="card-header"><span class="card-title">Already Imported</span></div>' +
       '<div class="card-body" style="padding:0">' +
         (REV.settlements.length === 0
@@ -1184,8 +1202,8 @@ function renderCloverPreview(dayMap){
       '<td class="text-right mono fw600">' + fmt(day.gross_net) + '</td>' +
       '<td class="text-right mono">' + fmt(day.tax) + '</td>' +
       '<td class="text-right mono">' + fmt(day.tips) + '</td>' +
-      '<td class="text-right mono">' + fmt(day.cash_net) + '</td>' +
-      '<td class="text-right mono">' + fmt(day.card_net) + '</td>' +
+      '<td class="text-right mono">' + fmt(day.cash_collected) + '</td>' +
+      '<td class="text-right mono">' + fmt(day.card_collected) + '</td>' +
       '<td class="text-right mono">' + day.order_count + '</td>' +
     '</tr>';
   }).join('');
@@ -1214,8 +1232,8 @@ function renderCloverPreview(dayMap){
         '<th class="text-right">Net Rev</th>' +
         '<th class="text-right">Tax</th>' +
         '<th class="text-right">Tips</th>' +
-        '<th class="text-right">Cash</th>' +
-        '<th class="text-right">Card</th>' +
+        '<th class="text-right">Cash Rcvd</th>' +
+        '<th class="text-right">Card Rcvd</th>' +
         '<th class="text-right">Orders</th>' +
       '</tr></thead><tbody>' + rows + '</tbody></table>' +
     '</div>' +
