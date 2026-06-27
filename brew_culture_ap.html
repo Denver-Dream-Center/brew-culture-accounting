@@ -191,8 +191,29 @@
   .mod-bar-user{color:rgba(255,255,255,.55);font-size:11px}
   .mod-bar-signout{color:rgba(255,255,255,.45);font-size:11px;cursor:pointer;padding:2px 0;background:none;border:none;transition:color .12s}
   .mod-bar-signout:hover{color:rgba(255,255,255,.85)}
+  /* Revenue module */
+  .upload-zone{border:2px dashed var(--border);border-radius:6px;padding:32px 24px;text-align:center;cursor:pointer;background:var(--bg);transition:border-color .15s,background .15s}
+  .upload-zone:hover{border-color:var(--amber);background:var(--amber-lo)}
+  .upload-zone.dragover{border-color:var(--amber);background:var(--amber-lo)}
+  .upload-icon{font-size:28px;margin-bottom:10px}
+  .upload-title{font-size:14px;font-weight:600;margin-bottom:4px}
+  .upload-sub{font-size:12px;color:var(--ink-lo)}
+  .settle-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:20px}
+  .parse-table-wrap{max-height:360px;overflow-y:auto;border:1px solid var(--border);border-radius:var(--r)}
+  .parse-row-match{background:var(--green-lo)}
+  .parse-row-warn{background:var(--yellow-lo)}
+  .parse-row-err{background:var(--red-lo)}
+  .settle-status-dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:6px}
+  .dot-pending{background:var(--yellow)}
+  .dot-deposited{background:var(--green)}
+  .channel-pill{display:inline-block;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:600}
+  .ch-clover{background:#E8F0FB;color:#2D5BA8}
+  .ch-cash{background:var(--green-lo);color:var(--green)}
+  .ch-doordash{color:#E8470A;background:#FEF0EA}
+  .rev-sidebar-stats{margin-top:auto;padding:14px 14px 16px;border-top:1px solid rgba(255,255,255,.10);font-size:11px}
 </style>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 </head>
 <body>
 <div id="login-screen" style="display:none;position:fixed;inset:0;background:var(--bg);z-index:200;display:flex;align-items:center;justify-content:center">
@@ -212,7 +233,7 @@
         <input type="password" id="login-password" placeholder="Password" style="padding:10px 12px;border:1px solid var(--border);border-radius:var(--r);font-size:14px;font-family:inherit" onkeydown="if(event.key==='Enter')doLogin()">
       </div>
       <div id="login-err" style="color:var(--red);font-size:12px;min-height:16px"></div>
- 
+
       <button onclick="doLogin()" style="padding:11px;background:var(--amber);color:#fff;border:none;border-radius:var(--r);font-size:14px;font-weight:600;cursor:pointer;margin-top:4px">Sign In</button>
     </div>
   </div>
@@ -243,7 +264,7 @@
     </div>
   </div>
 </div>
- 
+
 <div class="app" id="main-app" style="display:none;flex-direction:column">
   <!-- Module bar -->
   <div class="mod-bar" id="mod-bar">
@@ -257,43 +278,9 @@
     </div>
   </div>
   <div style="display:flex;flex:1;overflow:hidden">
-  <nav class="sidebar">
-    <div class="sidebar-header">
-      <div class="sidebar-logo">Brew Culture</div>
-      <div class="sidebar-title">Financial System</div>
-      <div class="sidebar-sub">Accrual basis · nonprofit · est. 11/1/25</div>
-    </div>
-    <div class="sidebar-section">Accounts Payable</div>
-    <button class="nav-item active" onclick="showView('dashboard')" id="nav-dashboard"><span class="nav-icon">◈</span> Dashboard</button>
-    <button class="nav-item" onclick="showView('invoices')" id="nav-invoices"><span class="nav-icon">≡</span> Invoices</button>
-    <button class="nav-item" onclick="showView('vendors')" id="nav-vendors"><span class="nav-icon">◉</span> Vendors</button>
-    <button class="nav-item" onclick="showView('payments')" id="nav-payments"><span class="nav-icon">⊡</span> Payments</button>
-    <div class="sidebar-section">Accounting</div>
-    <button class="nav-item" onclick="showView('gl')" id="nav-gl"><span class="nav-icon">⊞</span> GL Entries</button>
-    <button class="nav-item" onclick="showView('troy')" id="nav-troy"><span class="nav-icon">◇</span> 1300 · Troy Recv.</button>
-    <button class="nav-item" onclick="openJEModal()"><span class="nav-icon">✦</span> Journal Entry</button>
-    <div class="sidebar-section">Inventory</div>
-    <button class="nav-item" onclick="showView('fifo')" id="nav-fifo"><span class="nav-icon">&#9633;</span> FIFO Deliveries</button>
-    <button class="nav-item" onclick="showView('rules')" id="nav-rules"><span class="nav-icon">&#8644;</span> Matching Rules</button>
-    <div class="sidebar-section">Recipes</div>
-    <button class="nav-item" onclick="showView('ingredients')" id="nav-ingredients"><span class="nav-icon">&#9679;</span> Ingredients</button>
-    <button class="nav-item" onclick="showView('recipes')" id="nav-recipes"><span class="nav-icon">&#8801;</span> Recipes</button>
-    <div class="sidebar-section">Pastry Operations</div>
-    <button class="nav-item" onclick="showView('pastry-close')" id="nav-pastry-close"><span class="nav-icon">&#9633;</span> Daily Close</button>
-    <button class="nav-item" onclick="showView('pastry-tracker')" id="nav-pastry-tracker"><span class="nav-icon">&#9650;</span> Variance Tracker</button>
-    <button class="nav-item" onclick="showView('pastry-skus')" id="nav-pastry-skus"><span class="nav-icon">&#8801;</span> Pastry SKUs</button>
-    <div class="sidebar-section">Data</div>
-    <button class="nav-item" onclick="exportData()"><span class="nav-icon">↓</span> Export Backup</button>
-    <button class="nav-item" onclick="triggerImport()"><span class="nav-icon">&#8593;</span> Restore Backup</button>
-    <button class="nav-item" onclick="openMigrationTool()"><span class="nav-icon">&#8644;</span> Migrate to Supabase</button>
-    <input type="file" id="import-file-input" accept=".json" style="display:none" onchange="importData(this)">
-    <div style="padding:8px 8px 0">
-      <button class="nav-item" onclick="doSignOut()" style="color:rgba(255,255,255,.5);width:calc(100% - 0px);margin:0">
-        <span class="nav-icon">&#8594;</span> Sign Out
-      </button>
-    </div>
-    <div class="sidebar-stats" id="sidebar-stats"></div>
-  </nav>
+  <nav class="sidebar" id="sidebar-root"></nav>
+  <input type="file" id="import-file-input" accept=".json" style="display:none" onchange="importData(this)">
+  <input type="file" id="clover-file-input" accept=".xlsx,.xls" style="display:none" onchange="handleCloverFile(this)">
   <div class="main">
     <div class="topbar">
       <div>
@@ -392,7 +379,7 @@ const INGREDIENTS_FALLBACK=[
   {name:"Velo De Novia",unit:"ea",cat:"whole beans"},
   {name:"Whole Milk",unit:"oz",cat:"dairy"}
 ];
- 
+
 function loadIngredients(){
   // Read from in-memory DB cache (loaded from Supabase on login)
   if(DB.ingredients && DB.ingredients.length > 0){
@@ -400,14 +387,14 @@ function loadIngredients(){
   }
   return INGREDIENTS_FALLBACK.filter(i=>i.active!==false);
 }
- 
+
 // ═══════════════════════════════════════════════
 // CONSTANTS
 // ═══════════════════════════════════════════════
 const ACQUISITION_DATE='2025-11-01';
 const ERA={DC:'dc',TROY:'troy',DC_PAID:'dc-paid'};
 const ERA_LABELS={dc:'Dream Center',troy:'Troy (Pre-Acq.)','dc-paid':'DC Paid for Troy'};
- 
+
 const COA=[
   {acct:'1010',name:'Operating Checking',type:'Asset'},
   {acct:'1020',name:'Savings / Reserve',type:'Asset'},
@@ -441,17 +428,17 @@ const COA=[
   {acct:'6210',name:'Software & Subscriptions',type:'Expense'},
   {acct:'6220',name:'Repairs & Maintenance',type:'Expense'},
 ];
- 
+
 // GL account suggestions by ingredient category
 const CAT_GL={
   'whole beans':'1410','coffee':'1410','alt milk':'1450','dairy':'1450',
   'syrup':'1460','chai':'1460','base':'1440','food':'1420','kombucha':'1420',
   'not coffee':'1440'
 };
- 
+
 const VENDOR_TYPES=['Coffee Roaster','Food / Bakery','Dairy / Milk','Syrups / Supplies','Retail Goods','Rent / Lease','Utilities','Equipment Lease','Insurance','Software','Marketing','Other'];
 const VENDOR_DEFAULTS={'Coffee Roaster':['1410','5010'],'Food / Bakery':['1420','5020'],'Dairy / Milk':['1450','5040'],'Syrups / Supplies':['1460','5040'],'Retail Goods':['1430','5030'],'Rent / Lease':['6010'],'Utilities':['6020'],'Equipment Lease':['6030'],'Insurance':['6040'],'Software':['6210'],'Marketing':['6100'],'Other':['6200']};
- 
+
 // ═══════════════════════════════════════════════
 // DATA LAYER
 // ═══════════════════════════════════════════════
@@ -467,16 +454,16 @@ const _sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
     detectSessionInUrl: false
   }
 });
- 
+
 const PASTRY_KEY='bc_pastry_log';
 const PASTRY_SKUS_KEY='bc_pastry_skus';
 const REBEL_BREAD_VENDOR='Rebel Bread';
- 
- 
+
+
 // Current user session
 let _session = null;
 let _userRole = 'admin';
- 
+
 // In-memory DB cache -- loaded from Supabase on login
 // All writes go to Supabase immediately, then update cache
 let DB = {
@@ -491,7 +478,7 @@ let DB = {
   pastryLog: [],
   pastrySkus: []
 };
- 
+
 // Supabase helpers
 async function sbGet(table, opts) {
   opts = opts || {};
@@ -502,7 +489,7 @@ async function sbGet(table, opts) {
   if(error) { console.error('sbGet error', table, error); return []; }
   return data || [];
 }
- 
+
 async function sbUpsert(table, records, opts) {
   opts = opts || {};
   const arr = Array.isArray(records) ? records : [records];
@@ -510,21 +497,21 @@ async function sbUpsert(table, records, opts) {
   if(error) { console.error('sbUpsert error', table, error); return false; }
   return true;
 }
- 
+
 async function sbDelete(table, id, col) {
   col = col || 'id';
   const {error} = await _sb.from(table).delete().eq(col, id);
   if(error) { console.error('sbDelete error', table, error); return false; }
   return true;
 }
- 
+
 async function sbInsert(table, records) {
   const arr = Array.isArray(records) ? records : [records];
   const {data, error} = await _sb.from(table).insert(arr);
   if(error) { console.error('sbInsert error', table, error); return false; }
   return true;
 }
- 
+
 // Load all data from Supabase into memory
 async function loadAllData() {
   showLoadingOverlay('Loading your data...');
@@ -542,7 +529,7 @@ async function loadAllData() {
       sbGet('pastry_log', {order:'log_date', asc:false}),
       sbGet('pastry_skus', {order:'name'})
     ]);
- 
+
     // Map Supabase column names to app field names
     DB.vendors = vendors.map(v=>({...v, defaultAccts:v.default_accts||[]}));
     DB.invoices = invoices.map(mapInvoiceFromDB);
@@ -554,7 +541,10 @@ async function loadAllData() {
     DB.recipes = recipes.map(function(r){return{menu_item:r.menu_item,category:r.category,sale_price:r.sale_price,ingredient_name:r.ingredient_name,quantity:r.quantity,unit:r.unit}});
     DB.pastryLog = pastryLog.map(mapPastryLogFromDB);
     DB.pastrySkus = pastrySkus.map(function(s){return{name:s.name,code:s.code,unitPrice:s.unit_price,notes:s.notes,active:s.active}});
- 
+
+    // Load revenue data
+    await loadRevData();
+
     hideLoadingOverlay();
   } catch(e) {
     hideLoadingOverlay();
@@ -562,7 +552,7 @@ async function loadAllData() {
     alert('Error loading data: ' + e.message);
   }
 }
- 
+
 // Field mapping functions -- Supabase uses snake_case, app uses camelCase
 function mapInvoiceFromDB(r) {
   return {
@@ -572,7 +562,7 @@ function mapInvoiceFromDB(r) {
     balance: r.balance || 0, memo: r.memo, glPosted: r.gl_posted
   };
 }
- 
+
 function mapInvoiceToDB(inv) {
   return {
     id: inv.id, vendor_id: inv.vendorId, invoice_number: inv.invoiceNum,
@@ -581,7 +571,7 @@ function mapInvoiceToDB(inv) {
     balance: inv.balance || 0, memo: inv.memo, gl_posted: inv.glPosted || false
   };
 }
- 
+
 function mapPaymentFromDB(r) {
   return {
     id: r.id, era: r.era, invoiceId: r.invoice_id, vendorId: r.vendor_id,
@@ -589,7 +579,7 @@ function mapPaymentFromDB(r) {
     ref: r.reference, memo: r.memo, glPosted: r.gl_posted
   };
 }
- 
+
 function mapPaymentToDB(p) {
   return {
     id: p.id, era: p.era, invoice_id: p.invoiceId, vendor_id: p.vendorId,
@@ -597,21 +587,21 @@ function mapPaymentToDB(p) {
     reference: p.ref, memo: p.memo, gl_posted: p.glPosted || false
   };
 }
- 
+
 function mapGLFromDB(r) {
   return {
     id: r.id, date: r.entry_date, ref: r.ref, era: r.era,
     memo: r.memo, entries: r.entries || []
   };
 }
- 
+
 function mapGLToDB(je) {
   return {
     id: je.id, entry_date: je.date, ref: je.ref, era: je.era,
     memo: je.memo, entries: je.entries
   };
 }
- 
+
 function mapFIFOFromDB(r) {
   return {
     id: r.id, date: r.delivery_date, ingredient: r.ingredient,
@@ -621,7 +611,7 @@ function mapFIFOFromDB(r) {
     vendor: r.vendor, invoiceNo: r.invoice_no, apInvoiceId: r.ap_invoice_id
   };
 }
- 
+
 function mapFIFOToDB(d) {
   return {
     id: String(d.id), delivery_date: d.date, ingredient: d.ingredient,
@@ -631,35 +621,35 @@ function mapFIFOToDB(d) {
     vendor: d.vendor, invoice_no: d.invoiceNo, ap_invoice_id: d.apInvoiceId
   };
 }
- 
+
 function mapPastryLogFromDB(r) {
   return {
     date: r.log_date, sku: r.sku, received: r.received,
     billed: r.billed, unitPrice: r.unit_price, invoiceId: r.invoice_id
   };
 }
- 
+
 function mapPastryLogToDB(e) {
   return {
     log_date: e.date, sku: e.sku, received: e.received,
     billed: e.billed, unit_price: e.unitPrice, invoice_id: e.invoiceId
   };
 }
- 
+
 // Sequence counter -- stored in localStorage as fallback
 const load=k=>{try{return JSON.parse(localStorage.getItem(k)||'null')}catch{return null}};
 const save=(k,v)=>localStorage.setItem(k,JSON.stringify(v));
- 
+
 function nextSeq(p){const s=load('bc_seq')||{};s[p]=(s[p]||0)+1;save('bc_seq',s);return`${p}-${String(s[p]).padStart(4,'0')}`}
 const nextGLId=()=>`GL-${String(DB.gl.length+1).padStart(4,'0')}`;
- 
+
 // persist() -- now saves to Supabase (called after bulk operations)
 // Individual saves use sbUpsert directly
 const persist=()=>{
   // No-op for Supabase -- writes happen immediately via sbUpsert
   // Kept for compatibility with functions that call persist()
 };
- 
+
 // Loading overlay
 function showLoadingOverlay(msg){
   let ov=document.getElementById('loading-overlay');
@@ -670,12 +660,12 @@ function showLoadingOverlay(msg){
   ov.style.display='flex';
 }
 function hideLoadingOverlay(){const ov=document.getElementById('loading-overlay');if(ov)ov.style.display='none'}
- 
+
 // Add spin animation
 const _style=document.createElement('style');
 _style.textContent='@keyframes spin{to{transform:rotate(360deg)}}';
 document.head.appendChild(_style);
- 
+
 // ═══════════════════════════════════════════════
 // RULE MATCHING
 // ═══════════════════════════════════════════════
@@ -684,7 +674,7 @@ function findRule(description){
   const desc=description.toLowerCase();
   return DB.rules.find(r=>r.match&&desc.includes(r.match.toLowerCase()))||null;
 }
- 
+
 function ingredientForLine(line){
   // Returns {ingredient, category, unit, multiplier, qty} or null
   if(!line.ingredient)return null;
@@ -695,11 +685,12 @@ function ingredientForLine(line){
   const qty=(line.qty||1)*multiplier;
   return{ingredient:ing.name,category:ing.cat,unit:ing.unit,multiplier,qty};
 }
- 
+
 // ═══════════════════════════════════════════════
 // HELPERS
 // ═══════════════════════════════════════════════
 const $=id=>document.getElementById(id);
+const $$=id=>document.getElementById(id);
 const fmt=n=>{const abs=Math.abs(n||0).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g,',');return n<0?`($${abs})`:`$${abs}`};
 const fmtDate=s=>s?new Date(s+'T12:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}):'—';
 const todayStr=()=>new Date().toISOString().slice(0,10);
@@ -710,7 +701,7 @@ const acctLabel=c=>{const a=COA.find(x=>x.acct===c);return a?`${c} · ${a.name}`
 function inferStatus(inv){if(inv.status==='void')return'void';if(inv.amountPaid<=0)return isOverdue(inv)?'overdue':'open';if(inv.amountPaid>=inv.total)return'paid';return'partial'}
 function badgeHtml(s){const c={open:'badge-open',partial:'badge-partial',paid:'badge-paid',void:'badge-void',overdue:'badge-overdue'};return`<span class="badge ${c[s]||'badge-open'}">${s.charAt(0).toUpperCase()+s.slice(1)}</span>`}
 function eraPill(e){const cfg={dc:['era-dc','● DC'],troy:['era-troy','◇ Troy'],'dc-paid':['era-dc-paid','↑ DC→Troy']};const[cls,lbl]=cfg[e]||['era-dc','DC'];return`<span class="era-pill ${cls}">${lbl}</span>`}
- 
+
 function troyReceivable(){
   let balance=0;const lines=[];
   DB.gl.forEach(je=>je.entries.forEach(e=>{
@@ -720,7 +711,7 @@ function troyReceivable(){
   let r=0;lines.forEach(l=>{r+=l.net;l.running=r});
   return{balance,lines};
 }
- 
+
 function apSummary(){
   let totalOpen=0,totalOverdue=0,dueSoon=0,paidMTD=0;
   const now=new Date();
@@ -732,37 +723,92 @@ function apSummary(){
   });
   return{totalOpen,totalOverdue,dueSoon,paidMTD};
 }
- 
+
 // ═══════════════════════════════════════════════
 // MODULE NAVIGATION
 // ═══════════════════════════════════════════════
 let currentModule = 'ap';
 let _dataLoaded = false;
- 
+
+function renderSidebar(){
+  var el = document.getElementById('sidebar-root');
+  if(!el) return;
+  if(currentModule === 'revenue'){
+    var s = revSidebarStats();
+    el.innerHTML =
+      '<div class="sidebar-header">' +
+        '<div class="sidebar-logo">Brew Culture</div>' +
+        '<div class="sidebar-title">Revenue</div>' +
+        '<div class="sidebar-sub">Clover \xb7 DoorDash \xb7 Settlement</div>' +
+      '</div>' +
+      '<div class="sidebar-section">Daily Operations</div>' +
+      '<button class="nav-item" onclick="showView(\'rev-dashboard\')" id="nav-rev-dashboard"><span class="nav-icon">&#9650;</span> Dashboard</button>' +
+      '<button class="nav-item" onclick="showView(\'rev-import\')" id="nav-rev-import"><span class="nav-icon">&#8593;</span> Clover Import</button>' +
+      '<button class="nav-item" onclick="showView(\'rev-settlement\')" id="nav-rev-settlement"><span class="nav-icon">&#9632;</span> Settlement Log</button>' +
+      '<button class="nav-item" onclick="showView(\'rev-cash\')" id="nav-rev-cash"><span class="nav-icon">&#9679;</span> Cash Log</button>' +
+      '<div class="sidebar-section">Data</div>' +
+      '<button class="nav-item" onclick="exportData()"><span class="nav-icon">&#8595;</span> Export Backup</button>' +
+      '<div class="rev-sidebar-stats">' +
+        '<div class="stat-row"><span>Days logged</span><span class="stat-val">' + s.days + '</span></div>' +
+        '<div class="stat-row"><span>MTD revenue</span><span class="stat-val">' + fmt(s.mtd) + '</span></div>' +
+        '<div class="stat-row"><span>Pending deposit</span><span class="stat-val" style="color:var(--amber)">' + fmt(s.pending) + '</span></div>' +
+        '<div style="margin-top:10px;font-size:10px;color:rgba(255,255,255,.22)">' + new Date().toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}) + '</div>' +
+      '</div>';
+  } else {
+    var s2 = apSummary(); var troy = troyReceivable();
+    el.innerHTML =
+      '<div class="sidebar-header">' +
+        '<div class="sidebar-logo">Brew Culture</div>' +
+        '<div class="sidebar-title">Financial System</div>' +
+        '<div class="sidebar-sub">Accrual basis \xb7 nonprofit \xb7 est. 11/1/25</div>' +
+      '</div>' +
+      '<div class="sidebar-section">Accounts Payable</div>' +
+      '<button class="nav-item" onclick="showView(\'dashboard\')" id="nav-dashboard"><span class="nav-icon">&#9672;</span> Dashboard</button>' +
+      '<button class="nav-item" onclick="showView(\'invoices\')" id="nav-invoices"><span class="nav-icon">&#8801;</span> Invoices</button>' +
+      '<button class="nav-item" onclick="showView(\'vendors\')" id="nav-vendors"><span class="nav-icon">&#9677;</span> Vendors</button>' +
+      '<button class="nav-item" onclick="showView(\'payments\')" id="nav-payments"><span class="nav-icon">&#8861;</span> Payments</button>' +
+      '<div class="sidebar-section">Accounting</div>' +
+      '<button class="nav-item" onclick="showView(\'gl\')" id="nav-gl"><span class="nav-icon">&#8862;</span> GL Entries</button>' +
+      '<button class="nav-item" onclick="showView(\'troy\')" id="nav-troy"><span class="nav-icon">&#9671;</span> 1300 \xb7 Troy Recv.</button>' +
+      '<button class="nav-item" onclick="openJEModal()"><span class="nav-icon">&#10022;</span> Journal Entry</button>' +
+      '<div class="sidebar-section">Inventory</div>' +
+      '<button class="nav-item" onclick="showView(\'fifo\')" id="nav-fifo"><span class="nav-icon">&#9633;</span> FIFO Deliveries</button>' +
+      '<button class="nav-item" onclick="showView(\'rules\')" id="nav-rules"><span class="nav-icon">&#8644;</span> Matching Rules</button>' +
+      '<div class="sidebar-section">Recipes</div>' +
+      '<button class="nav-item" onclick="showView(\'ingredients\')" id="nav-ingredients"><span class="nav-icon">&#9679;</span> Ingredients</button>' +
+      '<button class="nav-item" onclick="showView(\'recipes\')" id="nav-recipes"><span class="nav-icon">&#8801;</span> Recipes</button>' +
+      '<div class="sidebar-section">Pastry Operations</div>' +
+      '<button class="nav-item" onclick="showView(\'pastry-close\')" id="nav-pastry-close"><span class="nav-icon">&#9633;</span> Daily Close</button>' +
+      '<button class="nav-item" onclick="showView(\'pastry-tracker\')" id="nav-pastry-tracker"><span class="nav-icon">&#9650;</span> Variance Tracker</button>' +
+      '<button class="nav-item" onclick="showView(\'pastry-skus\')" id="nav-pastry-skus"><span class="nav-icon">&#8801;</span> Pastry SKUs</button>' +
+      '<div class="sidebar-section">Data</div>' +
+      '<button class="nav-item" onclick="exportData()"><span class="nav-icon">&#8595;</span> Export Backup</button>' +
+      '<button class="nav-item" onclick="triggerImport()"><span class="nav-icon">&#8593;</span> Restore Backup</button>' +
+      '<button class="nav-item" onclick="openMigrationTool()"><span class="nav-icon">&#8644;</span> Migrate to Supabase</button>' +
+      '<div class="sidebar-stats" id="sidebar-stats"></div>';
+  }
+}
+
 function showModuleSwitcher(){
   document.getElementById('main-app').style.display = 'none';
   document.getElementById('module-switcher').style.display = 'flex';
-  const email = _session?.user?.email || '';
+  var email = _session && _session.user ? _session.user.email : '';
   document.getElementById('mod-user-name').textContent = email;
 }
- 
+
 async function launchModule(mod){
   currentModule = mod;
   document.getElementById('module-switcher').style.display = 'none';
   document.getElementById('main-app').style.display = 'flex';
- 
-  // Update module bar label
-  const labels = {ap:'Accounts Payable', revenue:'Revenue'};
+  var labels = {ap:'Accounts Payable', revenue:'Revenue'};
   document.getElementById('mod-bar-name').textContent = labels[mod] || mod;
-  const email = _session?.user?.email || '';
+  var email = _session && _session.user ? _session.user.email : '';
   document.getElementById('mod-bar-user').textContent = email;
- 
-  // Load data once per session
   if(!_dataLoaded){
     await loadAllData();
     _dataLoaded = true;
   }
- 
+  renderSidebar();
   if(mod === 'ap'){
     updateSidebarStats();
     showView('dashboard');
@@ -770,7 +816,628 @@ async function launchModule(mod){
     showView('rev-dashboard');
   }
 }
- 
+
+// ═══════════════════════════════════════════════
+// REVENUE MODULE DATA
+// ═══════════════════════════════════════════════
+// In-memory cache for revenue data (loaded alongside AP data)
+var REV = {
+  settlements: [],   // daily_settlement rows
+  cashLog: []        // cash_collection_events rows
+};
+
+// Modifier token -> ingredient mapping for COGS (costing only, not inventory deduction yet)
+var MODIFIER_MAP = {
+  'Oat': 'Oat Milk', 'Almond': 'Almond Milk', 'Soy': 'Soy Milk',
+  'Coconut': 'Coconut Milk', 'Pistachio': 'Pistachio Milk',
+  'Half and Half': 'Half and Half', 'Breve': 'Breve Milk',
+  'Vanilla': 'Vanilla Syrup', 'Caramel': 'Vanilla Syrup',
+  'Hazelnut': 'Vanilla Syrup', 'Mocha': 'Chocolate Syrup',
+  'Cardamom': 'Cardamon Syrup', 'Lavender': 'Vanilla Syrup',
+  'Honey': 'Honey', 'Peppermint': 'Vanilla Syrup',
+  'Decaf': null, 'Iced': null, 'Extra Shot': null
+};
+
+// Excel serial date -> YYYY-MM-DD
+function excelDateToStr(serial){
+  if(!serial && serial !== 0) return '';
+  if(serial instanceof Date) return serial.toISOString().slice(0,10);
+  // Excel serial: days since 1900-01-01 (with 1900 leap year bug)
+  var d = new Date(Math.round((serial - 25569) * 86400 * 1000));
+  return d.toISOString().slice(0,10);
+}
+
+// Normalise a Clover item_name to match recipe menu_item keys
+function normaliseItemName(raw){
+  if(!raw) return '';
+  return raw.trim()
+    .replace(/\u2019/g,"'")   // curly apostrophe -> straight
+    .replace(/\u2018/g,"'")
+    .replace(/\s+/g,' ');
+}
+
+// Classify payment_type string into channel
+function classifyPayment(pt){
+  if(!pt) return 'card';
+  var s = pt.toLowerCase();
+  if(s.indexOf('cash') !== -1) return 'cash';
+  return 'card';
+}
+
+// Parse Clover XLSX ArrayBuffer -> structured day object
+function parseCloverXLSX(ab){
+  var wb = XLSX.read(ab, {type:'array', cellDates:true});
+  var ws = wb.Sheets[wb.SheetNames[0]];
+  var rows = XLSX.utils.sheet_to_json(ws, {raw:false, defval:''});
+
+  // --- Build order-level map (for tip/tax/payment dedup) ---
+  var orderMap = {};
+  rows.forEach(function(r){
+    var oid = r['order'];
+    if(!oid) return;
+    if(!orderMap[oid]){
+      var dt = r['date'];
+      var dateStr = '';
+      if(dt instanceof Date){ dateStr = dt.toISOString().slice(0,10); }
+      else if(typeof dt === 'string' && dt.match(/\d{4}-\d{2}-\d{2}/)){
+        dateStr = dt.slice(0,10);
+      } else if(dt && !isNaN(Number(dt))){
+        dateStr = excelDateToStr(Number(dt));
+      } else { dateStr = String(dt||'').slice(0,10); }
+
+      orderMap[oid] = {
+        date: dateStr,
+        payment_type: r['payment_type'] || '',
+        card_type: r['card_type'] || '',
+        tip: parseFloat(r['Order_Tip_Amount']) || 0,
+        tax: parseFloat(r['Order_Tax']) || 0,
+        order_net: parseFloat(r['Order_Net']) || 0,
+        amount_collected: parseFloat(r['Order_Amount_collected']) || 0,
+        discount: parseFloat(r['Order_Total_Discount']) || 0,
+        discount_names: r['Order_discount_names'] || '',
+        items: []
+      };
+    }
+    var itemName = normaliseItemName(r['item_name']);
+    var isRevenue = String(r['is_revenue']).toLowerCase();
+    var refunded  = String(r['refunded']).toLowerCase();
+    orderMap[oid].items.push({
+      item_name:    itemName,
+      category:     r['category'] || '',
+      modifiers:    r['modifiers'] || '',
+      item_price:   parseFloat(r['item_price']) || 0,
+      item_gross:   parseFloat(r['item_gross_amount']) || 0,
+      item_net:     parseFloat(r['item_net_amount']) || 0,
+      item_tax:     parseFloat(r['item_tax_amount']) || 0,
+      item_disc:    parseFloat(r['item_total_discount']) || 0,
+      item_mod_amt: parseFloat(r['item_modifications_amount']) || 0,
+      is_revenue:   isRevenue === 'true' || isRevenue === '1',
+      refunded:     refunded  === 'true' || refunded  === '1'
+    });
+  });
+
+  // --- Aggregate to day ---
+  var dayMap = {};
+  Object.keys(orderMap).forEach(function(oid){
+    var o = orderMap[oid];
+    var d = o.date;
+    if(!d) return;
+    if(!dayMap[d]){
+      dayMap[d] = {
+        date: d,
+        orders: [],
+        gross_net: 0,   // sum of Order_Net (pre-tax revenue)
+        tax: 0,
+        tips: 0,
+        cash_net: 0,
+        card_net: 0,
+        discounts: 0,
+        item_lines: []
+      };
+    }
+    var day = dayMap[d];
+    day.orders.push(oid);
+    day.gross_net  += o.order_net;
+    day.tax        += o.tax;
+    day.tips       += o.tip;
+    day.discounts  += o.discount;
+    var ch = classifyPayment(o.payment_type);
+    if(ch === 'cash') day.cash_net += o.order_net;
+    else              day.card_net += o.order_net;
+    o.items.forEach(function(it){ day.item_lines.push(it); });
+  });
+
+  // Round aggregates
+  Object.keys(dayMap).forEach(function(d){
+    var day = dayMap[d];
+    day.gross_net = Math.round(day.gross_net * 100) / 100;
+    day.tax       = Math.round(day.tax       * 100) / 100;
+    day.tips      = Math.round(day.tips      * 100) / 100;
+    day.cash_net  = Math.round(day.cash_net  * 100) / 100;
+    day.card_net  = Math.round(day.card_net  * 100) / 100;
+    day.discounts = Math.round(day.discounts * 100) / 100;
+    day.order_count = day.orders.length;
+    day.item_count  = day.item_lines.length;
+  });
+
+  return dayMap;
+}
+
+// Build settlement record for a parsed day
+function buildSettlement(dayData){
+  return {
+    id: 'SETTLE-' + dayData.date,
+    date: dayData.date,
+    gross_net: dayData.gross_net,
+    tax: dayData.tax,
+    tips: dayData.tips,
+    cash_net: dayData.cash_net,
+    card_net: dayData.card_net,
+    discounts: dayData.discounts,
+    order_count: dayData.order_count,
+    item_count: dayData.item_count,
+    deposit_status: 'pending',
+    deposit_date: null,
+    deposit_amount: null,
+    notes: '',
+    imported_at: new Date().toISOString()
+  };
+}
+
+// Save settlement to Supabase daily_settlement table
+async function saveSettlementToSB(s){
+  var row = {
+    id: s.id,
+    settlement_date: s.date,
+    gross_net: s.gross_net,
+    tax: s.tax,
+    tips: s.tips,
+    cash_net: s.cash_net,
+    card_net: s.card_net,
+    discounts: s.discounts,
+    order_count: s.order_count,
+    item_count: s.item_count,
+    deposit_status: s.deposit_status,
+    deposit_date: s.deposit_date || null,
+    deposit_amount: s.deposit_amount || null,
+    notes: s.notes || '',
+    imported_at: s.imported_at
+  };
+  var res = await _sb.from('daily_settlement').upsert([row], {onConflict:'id'});
+  if(res.error){ console.error('saveSettlementToSB', res.error); return false; }
+  return true;
+}
+
+// Load revenue data from Supabase
+async function loadRevData(){
+  var res = await _sb.from('daily_settlement').select('*').order('settlement_date', {ascending:false});
+  if(!res.error && res.data){
+    REV.settlements = res.data.map(function(r){
+      return {
+        id: r.id, date: r.settlement_date,
+        gross_net: r.gross_net, tax: r.tax, tips: r.tips,
+        cash_net: r.cash_net, card_net: r.card_net,
+        discounts: r.discounts || 0,
+        order_count: r.order_count, item_count: r.item_count,
+        deposit_status: r.deposit_status || 'pending',
+        deposit_date: r.deposit_date, deposit_amount: r.deposit_amount,
+        notes: r.notes || '', imported_at: r.imported_at
+      };
+    });
+  }
+}
+
+// Revenue sidebar stats helper
+function revSidebarStats(){
+  var now = new Date();
+  var mo = now.getMonth(); var yr = now.getFullYear();
+  var mtd = 0; var pending = 0; var days = REV.settlements.length;
+  REV.settlements.forEach(function(s){
+    var d = new Date(s.date + 'T12:00:00');
+    if(d.getMonth() === mo && d.getFullYear() === yr) mtd += s.gross_net;
+    if(s.deposit_status === 'pending') pending += s.card_net;
+  });
+  return {days: days, mtd: Math.round(mtd*100)/100, pending: Math.round(pending*100)/100};
+}
+
+// ═══════════════════════════════════════════════
+// REVENUE MODULE — CLOVER IMPORT
+// ═══════════════════════════════════════════════
+var _cloverParsed = null;  // holds parsed dayMap between parse and confirm
+
+function renderRevImport(){
+  $('topbar-actions').innerHTML = '';
+  var existing = {};
+  REV.settlements.forEach(function(s){ existing[s.date] = true; });
+
+  $('content').innerHTML =
+    '<div class="card" style="max-width:680px">' +
+      '<div class="card-header"><span class="card-title">Clover Import</span>' +
+        '<span style="font-size:12px;color:var(--ink-lo)">Full Orders Detail export (.xlsx)</span>' +
+      '</div>' +
+      '<div class="card-body">' +
+        '<div class="upload-zone" id="clover-drop-zone" onclick="$$(\'clover-file-input\').click()"' +
+          ' ondragover="event.preventDefault();this.classList.add(\'dragover\')"' +
+          ' ondragleave="this.classList.remove(\'dragover\')"' +
+          ' ondrop="event.preventDefault();this.classList.remove(\'dragover\');handleCloverDrop(event.dataTransfer.files)">' +
+          '<div class="upload-icon">&#8679;</div>' +
+          '<div class="upload-title">Drop Clover export here or click to browse</div>' +
+          '<div class="upload-sub">FullOrdersDetails_for_period_*.xlsx</div>' +
+        '</div>' +
+        '<div id="clover-parse-result" style="margin-top:16px"></div>' +
+      '</div>' +
+    '</div>' +
+    '<div class="card" style="max-width:680px;margin-top:0">' +
+      '<div class="card-header"><span class="card-title">Already Imported</span></div>' +
+      '<div class="card-body" style="padding:0">' +
+        (REV.settlements.length === 0
+          ? '<div class="empty-state"><div class="empty-icon">&#9651;</div><div>No days imported yet</div></div>'
+          : '<div class="tbl-wrap"><table><thead><tr><th>Date</th><th class="text-right">Revenue</th><th class="text-right">Tax</th><th class="text-right">Tips</th><th class="text-right">Orders</th><th>Deposit</th></tr></thead><tbody>' +
+            REV.settlements.slice(0,20).map(function(s){
+              var badge = s.deposit_status === 'deposited'
+                ? '<span class="badge badge-paid">Deposited</span>'
+                : '<span class="badge badge-open">Pending</span>';
+              return '<tr><td>' + fmtDate(s.date) + '</td>' +
+                '<td class="text-right mono">' + fmt(s.gross_net) + '</td>' +
+                '<td class="text-right mono">' + fmt(s.tax) + '</td>' +
+                '<td class="text-right mono">' + fmt(s.tips) + '</td>' +
+                '<td class="text-right mono">' + s.order_count + '</td>' +
+                '<td>' + badge + '</td></tr>';
+            }).join('') +
+            '</tbody></table></div>'
+        ) +
+      '</div>' +
+    '</div>';
+}
+
+function handleCloverDrop(files){
+  if(files && files[0]) processCloverFile(files[0]);
+}
+
+function handleCloverFile(input){
+  if(input.files && input.files[0]) processCloverFile(input.files[0]);
+  input.value = '';
+}
+
+function processCloverFile(file){
+  var resultEl = $('clover-parse-result');
+  if(!resultEl) return;
+  resultEl.innerHTML = '<div style="color:var(--ink-mid);font-size:13px">Reading file...</div>';
+  var reader = new FileReader();
+  reader.onload = function(e){
+    try{
+      var ab = e.target.result;
+      var dayMap = parseCloverXLSX(ab);
+      _cloverParsed = dayMap;
+      renderCloverPreview(dayMap);
+    } catch(err){
+      resultEl.innerHTML = '<div class="alert" style="background:var(--red-lo);border:1px solid #EAB5B1;color:var(--red)">Parse error: ' + err.message + '</div>';
+      console.error(err);
+    }
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+function renderCloverPreview(dayMap){
+  var resultEl = $('clover-parse-result');
+  if(!resultEl) return;
+  var existing = {};
+  REV.settlements.forEach(function(s){ existing[s.date] = true; });
+  var dates = Object.keys(dayMap).sort();
+  if(dates.length === 0){
+    resultEl.innerHTML = '<div class="alert alert-info">No order data found in file.</div>';
+    return;
+  }
+  var rows = dates.map(function(d){
+    var day = dayMap[d];
+    var dup = existing[d];
+    var rowCls = dup ? 'parse-row-warn' : 'parse-row-match';
+    var dupNote = dup ? ' <span style="color:#9B6A10;font-size:11px">(already imported \u2014 will overwrite)</span>' : '';
+    return '<tr class="' + rowCls + '">' +
+      '<td>' + fmtDate(d) + dupNote + '</td>' +
+      '<td class="text-right mono">' + fmt(day.gross_net) + '</td>' +
+      '<td class="text-right mono">' + fmt(day.tax) + '</td>' +
+      '<td class="text-right mono">' + fmt(day.tips) + '</td>' +
+      '<td class="text-right mono">' + fmt(day.cash_net) + '</td>' +
+      '<td class="text-right mono">' + fmt(day.card_net) + '</td>' +
+      '<td class="text-right mono">' + day.order_count + '</td>' +
+      '<td class="text-right mono">' + day.item_count + '</td>' +
+    '</tr>';
+  }).join('');
+
+  var totalNet = dates.reduce(function(a,d){ return a + dayMap[d].gross_net; }, 0);
+  var totalTax = dates.reduce(function(a,d){ return a + dayMap[d].tax; }, 0);
+  var totalTips = dates.reduce(function(a,d){ return a + dayMap[d].tips; }, 0);
+
+  resultEl.innerHTML =
+    '<div class="alert alert-inv" style="margin-bottom:12px">Found ' + dates.length + ' day(s) \u2014 ' + fmt(totalNet) + ' net revenue, ' + fmt(totalTax) + ' tax, ' + fmt(totalTips) + ' tips. Review below then confirm import.</div>' +
+    '<div class="parse-table-wrap">' +
+      '<table><thead><tr>' +
+        '<th>Date</th><th class="text-right">Net Rev</th><th class="text-right">Tax</th>' +
+        '<th class="text-right">Tips</th><th class="text-right">Cash</th>' +
+        '<th class="text-right">Card</th><th class="text-right">Orders</th><th class="text-right">Items</th>' +
+      '</tr></thead><tbody>' + rows + '</tbody></table>' +
+    '</div>' +
+    '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px">' +
+      '<button class="btn btn-secondary" onclick="_cloverParsed=null;$$(\'clover-parse-result\').innerHTML=\'\'">Cancel</button>' +
+      '<button class="btn btn-primary" onclick="confirmCloverImport()">&#10003; Confirm Import</button>' +
+    '</div>';
+}
+
+async function confirmCloverImport(){
+  if(!_cloverParsed) return;
+  var dates = Object.keys(_cloverParsed);
+  showLoadingOverlay('Saving ' + dates.length + ' day(s)...');
+  var errors = [];
+  for(var i = 0; i < dates.length; i++){
+    var s = buildSettlement(_cloverParsed[dates[i]]);
+    // Check if already exists to preserve deposit_status
+    var existing = REV.settlements.find(function(x){ return x.date === s.date; });
+    if(existing){
+      s.deposit_status = existing.deposit_status;
+      s.deposit_date = existing.deposit_date;
+      s.deposit_amount = existing.deposit_amount;
+    }
+    var ok = await saveSettlementToSB(s);
+    if(!ok) errors.push(dates[i]);
+  }
+  hideLoadingOverlay();
+  if(errors.length){
+    showToast('Import failed for: ' + errors.join(', '), 'warn');
+  } else {
+    await loadRevData();
+    renderSidebar();
+    _cloverParsed = null;
+    showToast('Imported ' + dates.length + ' day(s)');
+    showView('rev-settlement');
+  }
+}
+
+// ═══════════════════════════════════════════════
+// REVENUE MODULE — DASHBOARD
+// ═══════════════════════════════════════════════
+function renderRevDashboard(){
+  $('topbar-actions').innerHTML = '<button class="btn btn-primary" onclick="showView(\'rev-import\')">&#8679; Import Clover</button>';
+  if(REV.settlements.length === 0){
+    $('content').innerHTML =
+      '<div style="text-align:center;padding:80px 24px;color:var(--ink-lo)">' +
+        '<div style="font-size:36px;margin-bottom:16px">&#9650;</div>' +
+        '<div style="font-size:18px;font-weight:700;color:var(--ink);margin-bottom:8px">No revenue data yet</div>' +
+        '<div style="font-size:14px;color:var(--ink-mid);margin-bottom:20px">Import your first Clover export to get started.</div>' +
+        '<button class="btn btn-primary" onclick="showView(\'rev-import\')">&#8679; Import Clover Export</button>' +
+      '</div>';
+    return;
+  }
+
+  var now = new Date();
+  var mo = now.getMonth(); var yr = now.getFullYear();
+  var mtdNet = 0; var mtdTax = 0; var mtdTips = 0; var mtdDays = 0;
+  var mtdCash = 0; var mtdCard = 0;
+  var pending = 0; var pendingCount = 0;
+  REV.settlements.forEach(function(s){
+    var d = new Date(s.date + 'T12:00:00');
+    if(d.getMonth() === mo && d.getFullYear() === yr){
+      mtdNet += s.gross_net; mtdTax += s.tax; mtdTips += s.tips;
+      mtdCash += s.cash_net; mtdCard += s.card_net; mtdDays++;
+    }
+    if(s.deposit_status === 'pending'){ pending += s.card_net; pendingCount++; }
+  });
+  var avgRev = mtdDays > 0 ? mtdNet / mtdDays : 0;
+  var recent = REV.settlements.slice(0, 10);
+
+  var recentRows = recent.map(function(s){
+    var vsTarget = s.gross_net - 1200;
+    var vsCol = vsTarget >= 0 ? 'var(--green)' : 'var(--red)';
+    var badge = s.deposit_status === 'deposited'
+      ? '<span class="badge badge-paid">Deposited</span>'
+      : '<span class="badge badge-open">Pending</span>';
+    return '<tr>' +
+      '<td>' + fmtDate(s.date) + '</td>' +
+      '<td class="text-right mono fw600">' + fmt(s.gross_net) + '</td>' +
+      '<td class="text-right mono" style="color:' + vsCol + '">' + (vsTarget >= 0 ? '+' : '') + fmt(vsTarget) + '</td>' +
+      '<td class="text-right mono">' + fmt(s.tips) + '</td>' +
+      '<td class="text-right mono">' + fmt(s.cash_net) + '</td>' +
+      '<td class="text-right mono">' + fmt(s.card_net) + '</td>' +
+      '<td class="text-right mono">' + s.order_count + '</td>' +
+      '<td>' + badge + '</td>' +
+      '<td><button class="btn btn-ghost btn-sm" onclick="openDepositModal(\'' + s.id + '\')">&#9998;</button></td>' +
+    '</tr>';
+  }).join('');
+
+  $('content').innerHTML =
+    '<div class="tiles" style="grid-template-columns:repeat(4,1fr)">' +
+      '<div class="tile green"><div class="tile-label">MTD Revenue</div><div class="tile-val">' + fmt(mtdNet) + '</div><div class="tile-sub">' + mtdDays + ' days logged</div></div>' +
+      '<div class="tile amber"><div class="tile-label">Daily Avg</div><div class="tile-val">' + fmt(avgRev) + '</div><div class="tile-sub">Target: $1,200</div></div>' +
+      '<div class="tile ' + (pendingCount > 0 ? 'amber' : 'green') + '"><div class="tile-label">Pending Deposit</div><div class="tile-val">' + fmt(pending) + '</div><div class="tile-sub">' + pendingCount + ' day(s) unconfirmed</div></div>' +
+      '<div class="tile"><div class="tile-label">MTD Tips</div><div class="tile-val">' + fmt(mtdTips) + '</div><div class="tile-sub">Avg ' + fmt(mtdDays > 0 ? mtdTips/mtdDays : 0) + '/day</div></div>' +
+    '</div>' +
+    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px">' +
+      '<div class="card">' +
+        '<div class="card-header"><span class="card-title">MTD Channel Mix</span></div>' +
+        '<div class="card-body">' +
+          '<div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border-lo)"><span>Cash</span><span class="mono fw600">' + fmt(mtdCash) + '</span></div>' +
+          '<div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border-lo)"><span>Card</span><span class="mono fw600">' + fmt(mtdCard) + '</span></div>' +
+          '<div style="display:flex;justify-content:space-between;padding:10px 0 0"><span style="font-weight:700">Total Net</span><span class="mono fw600" style="font-size:15px">' + fmt(mtdNet) + '</span></div>' +
+        '</div>' +
+      '</div>' +
+      '<div class="card">' +
+        '<div class="card-header"><span class="card-title">MTD Tax &amp; Tips</span></div>' +
+        '<div class="card-body">' +
+          '<div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border-lo)"><span>Sales Tax Collected</span><span class="mono fw600">' + fmt(mtdTax) + '</span></div>' +
+          '<div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border-lo)"><span>Tips</span><span class="mono fw600">' + fmt(mtdTips) + '</span></div>' +
+          '<div style="display:flex;justify-content:space-between;padding:10px 0 0"><span style="font-weight:700">Total Collected</span><span class="mono fw600" style="font-size:15px">' + fmt(mtdNet + mtdTax + mtdTips) + '</span></div>' +
+        '</div>' +
+      '</div>' +
+    '</div>' +
+    '<div class="card">' +
+      '<div class="card-header"><span class="card-title">Recent Days</span>' +
+        '<button class="btn btn-ghost btn-sm" onclick="showView(\'rev-settlement\')">View all &#8594;</button>' +
+      '</div>' +
+      '<div class="tbl-wrap"><table>' +
+        '<thead><tr><th>Date</th><th class="text-right">Net Rev</th><th class="text-right">vs $1,200</th>' +
+          '<th class="text-right">Tips</th><th class="text-right">Cash</th><th class="text-right">Card</th>' +
+          '<th class="text-right">Orders</th><th>Deposit</th><th></th></tr></thead>' +
+        '<tbody>' + recentRows + '</tbody>' +
+      '</table></div>' +
+    '</div>';
+}
+
+// ═══════════════════════════════════════════════
+// REVENUE MODULE — SETTLEMENT LOG
+// ═══════════════════════════════════════════════
+function renderRevSettlement(){
+  $('topbar-actions').innerHTML = '<button class="btn btn-primary" onclick="showView(\'rev-import\')">&#8679; Import Clover</button>';
+  if(REV.settlements.length === 0){
+    $('content').innerHTML = '<div class="empty-state"><div class="empty-icon">&#9632;</div><div>No settlements yet. Import a Clover export first.</div></div>';
+    return;
+  }
+  var rows = REV.settlements.map(function(s){
+    var vsTarget = s.gross_net - 1200;
+    var vsCol = vsTarget >= 0 ? 'var(--green)' : 'var(--red)';
+    var depBadge = s.deposit_status === 'deposited'
+      ? '<span class="badge badge-paid">Deposited</span>'
+      : '<span class="badge badge-open">Pending</span>';
+    var depAmt = s.deposit_amount ? fmt(s.deposit_amount) : '\u2014';
+    var depDate = s.deposit_date ? fmtDate(s.deposit_date) : '\u2014';
+    return '<tr>' +
+      '<td>' + fmtDate(s.date) + '</td>' +
+      '<td class="text-right mono fw600">' + fmt(s.gross_net) + '</td>' +
+      '<td class="text-right mono" style="color:' + vsCol + '">' + (vsTarget>=0?'+':'') + fmt(vsTarget) + '</td>' +
+      '<td class="text-right mono">' + fmt(s.tax) + '</td>' +
+      '<td class="text-right mono">' + fmt(s.tips) + '</td>' +
+      '<td class="text-right mono">' + fmt(s.cash_net) + '</td>' +
+      '<td class="text-right mono">' + fmt(s.card_net) + '</td>' +
+      '<td class="text-right mono">' + s.order_count + '</td>' +
+      '<td>' + depBadge + '</td>' +
+      '<td class="mono">' + depDate + '</td>' +
+      '<td class="mono">' + depAmt + '</td>' +
+      '<td><button class="btn btn-ghost btn-sm" onclick="openDepositModal(\'' + s.id + '\')">&#9998;</button></td>' +
+    '</tr>';
+  }).join('');
+
+  var totNet = REV.settlements.reduce(function(a,s){ return a+s.gross_net; },0);
+  var totTax = REV.settlements.reduce(function(a,s){ return a+s.tax; },0);
+  var totTips = REV.settlements.reduce(function(a,s){ return a+s.tips; },0);
+
+  $('content').innerHTML =
+    '<div class="card">' +
+      '<div class="card-header">' +
+        '<span class="card-title">All Settlement Days (' + REV.settlements.length + ')</span>' +
+        '<div style="font-size:12px;color:var(--ink-mid)">Total: ' + fmt(totNet) + ' net &middot; ' + fmt(totTax) + ' tax &middot; ' + fmt(totTips) + ' tips</div>' +
+      '</div>' +
+      '<div class="tbl-wrap"><table>' +
+        '<thead><tr><th>Date</th><th class="text-right">Net Rev</th><th class="text-right">vs $1,200</th>' +
+          '<th class="text-right">Tax</th><th class="text-right">Tips</th>' +
+          '<th class="text-right">Cash</th><th class="text-right">Card</th>' +
+          '<th class="text-right">Orders</th><th>Status</th>' +
+          '<th>Deposit Date</th><th class="text-right">Deposit Amt</th><th></th></tr></thead>' +
+        '<tbody>' + rows + '</tbody>' +
+      '</table></div>' +
+    '</div>';
+}
+
+// ═══════════════════════════════════════════════
+// REVENUE MODULE — CASH LOG
+// ═══════════════════════════════════════════════
+function renderRevCash(){
+  $('topbar-actions').innerHTML = '';
+  var cashDays = REV.settlements.filter(function(s){ return s.cash_net > 0; });
+  if(cashDays.length === 0){
+    $('content').innerHTML = '<div class="empty-state"><div class="empty-icon">&#9679;</div><div>No cash revenue recorded yet.</div></div>';
+    return;
+  }
+  var totalCash = cashDays.reduce(function(a,s){ return a+s.cash_net; },0);
+  var rows = cashDays.map(function(s){
+    return '<tr>' +
+      '<td>' + fmtDate(s.date) + '</td>' +
+      '<td class="text-right mono fw600">' + fmt(s.cash_net) + '</td>' +
+      '<td class="text-right mono">' + fmt(s.gross_net) + '</td>' +
+      '<td class="text-right mono">' + (s.gross_net > 0 ? (s.cash_net/s.gross_net*100).toFixed(1)+'%' : '\u2014') + '</td>' +
+    '</tr>';
+  }).join('');
+
+  $('content').innerHTML =
+    '<div class="tiles" style="grid-template-columns:repeat(3,1fr)">' +
+      '<div class="tile"><div class="tile-label">Total Cash Revenue</div><div class="tile-val">' + fmt(totalCash) + '</div><div class="tile-sub">' + cashDays.length + ' days with cash</div></div>' +
+      '<div class="tile"><div class="tile-label">Avg Cash / Day</div><div class="tile-val">' + fmt(totalCash / cashDays.length) + '</div></div>' +
+      '<div class="tile"><div class="tile-label">Cash Mix</div><div class="tile-val">' + (REV.settlements.reduce(function(a,s){return a+s.gross_net;},0) > 0 ? (totalCash / REV.settlements.reduce(function(a,s){return a+s.gross_net;},0)*100).toFixed(1) : '0') + '%</div><div class="tile-sub">of total revenue</div></div>' +
+    '</div>' +
+    '<div class="card">' +
+      '<div class="card-header"><span class="card-title">Daily Cash Log</span></div>' +
+      '<div class="tbl-wrap"><table>' +
+        '<thead><tr><th>Date</th><th class="text-right">Cash Net</th><th class="text-right">Total Net</th><th class="text-right">Cash %</th></tr></thead>' +
+        '<tbody>' + rows + '</tbody>' +
+      '</table></div>' +
+    '</div>';
+}
+
+// ═══════════════════════════════════════════════
+// REVENUE MODULE — DEPOSIT MODAL
+// ═══════════════════════════════════════════════
+function openDepositModal(settlementId){
+  var s = REV.settlements.find(function(x){ return x.id === settlementId; });
+  if(!s) return;
+  var checked = s.deposit_status === 'deposited' ? 'checked' : '';
+  openModal(
+    '<div class="modal" style="max-width:480px">' +
+      '<div class="modal-header">' +
+        '<div><div class="modal-title">Settlement \u2014 ' + fmtDate(s.date) + '</div>' +
+        '<div class="modal-sub">Card receivable: ' + fmt(s.card_net) + ' &middot; Cash: ' + fmt(s.cash_net) + '</div></div>' +
+        '<button class="close-btn" onclick="closeModal()">x</button>' +
+      '</div>' +
+      '<div class="modal-body">' +
+        '<div class="form-grid">' +
+          '<div class="form-group">' +
+            '<label>Deposit Status</label>' +
+            '<select id="dep-status">' +
+              '<option value="pending"' + (s.deposit_status==='pending'?' selected':'') + '>Pending</option>' +
+              '<option value="deposited"' + (s.deposit_status==='deposited'?' selected':'') + '>Deposited</option>' +
+            '</select>' +
+          '</div>' +
+          '<div class="form-group">' +
+            '<label>Deposit Date</label>' +
+            '<input type="date" id="dep-date" value="' + (s.deposit_date||'') + '">' +
+          '</div>' +
+          '<div class="form-group">' +
+            '<label>Deposit Amount</label>' +
+            '<input type="number" id="dep-amount" step="0.01" value="' + (s.deposit_amount||s.card_net||'') + '" placeholder="' + s.card_net + '">' +
+          '</div>' +
+          '<div class="form-group">' +
+            '<label>Notes</label>' +
+            '<input type="text" id="dep-notes" value="' + (s.notes||'') + '" placeholder="Optional">' +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+      '<div class="modal-footer">' +
+        '<button class="btn btn-ghost" onclick="closeModal()">Cancel</button>' +
+        '<button class="btn btn-primary" onclick="saveDeposit(\'' + settlementId + '\')">Save</button>' +
+      '</div>' +
+    '</div>'
+  );
+}
+
+async function saveDeposit(settlementId){
+  var s = REV.settlements.find(function(x){ return x.id === settlementId; });
+  if(!s) return;
+  s.deposit_status = $('dep-status').value;
+  s.deposit_date   = $('dep-date').value || null;
+  s.deposit_amount = parseFloat($('dep-amount').value) || null;
+  s.notes          = $('dep-notes').value || '';
+  showLoadingOverlay('Saving...');
+  var ok = await saveSettlementToSB(s);
+  hideLoadingOverlay();
+  closeModal();
+  if(ok){
+    showToast('Settlement updated');
+    renderSidebar();
+    if(currentView === 'rev-dashboard') renderRevDashboard();
+    else if(currentView === 'rev-settlement') renderRevSettlement();
+  } else {
+    showToast('Save failed', 'warn');
+  }
+}
+
+
 // ═══════════════════════════════════════════════
 // NAV
 // ═══════════════════════════════════════════════
@@ -780,38 +1447,73 @@ function showView(view){
   document.querySelectorAll('.nav-item').forEach(el=>el.classList.remove('active'));
   const el=$(`nav-${view}`);if(el)el.classList.add('active');
   updateSidebarStats();
-  const titles={dashboard:['AP Dashboard','Open payables · aging summary'],invoices:['Invoices','All vendor invoices'],vendors:['Vendors','Manage payees'],payments:['Payments','Payment history'],gl:['GL Entries','Journal entries — all eras'],troy:['1300 · Troy Receivable','Prior owner balance ledger'],fifo:['FIFO Deliveries','Inventory delivery log'],rules:['Matching Rules','Vendor product → ingredient mapping'],ingredients:['Ingredients','Active ingredient master list'],recipes:['Recipes','Menu item ingredient definitions'],'pastry-close':['Pastry Daily Close','Enter received quantities · compare vs invoiced'],'pastry-tracker':['Pastry Variance Tracker','Received vs billed by item and week'],'pastry-skus':['Pastry SKUs','Rebel Bread item management'],'rev-dashboard':['Revenue Dashboard','Daily settlement · channel summary']};
-  const[title,sub]=titles[view]||['—',''];
+  const titles={
+    dashboard:['AP Dashboard','Open payables · aging summary'],
+    invoices:['Invoices','All vendor invoices'],
+    vendors:['Vendors','Manage payees'],
+    payments:['Payments','Payment history'],
+    gl:['GL Entries','Journal entries — all eras'],
+    troy:['1300 · Troy Receivable','Prior owner balance ledger'],
+    fifo:['FIFO Deliveries','Inventory delivery log'],
+    rules:['Matching Rules','Vendor product \u2192 ingredient mapping'],
+    ingredients:['Ingredients','Active ingredient master list'],
+    recipes:['Recipes','Menu item ingredient definitions'],
+    'pastry-close':['Pastry Daily Close','Enter received quantities \xb7 compare vs invoiced'],
+    'pastry-tracker':['Pastry Variance Tracker','Received vs billed by item and week'],
+    'pastry-skus':['Pastry SKUs','Rebel Bread item management'],
+    'rev-dashboard':['Revenue Dashboard','Daily settlement \xb7 channel summary'],
+    'rev-import':['Clover Import','Upload and parse Clover export'],
+    'rev-settlement':['Settlement Log','All daily settlements'],
+    'rev-cash':['Cash Log','Daily cash revenue']
+  };
+  const[title,sub]=titles[view]||['--',''];
   $('page-title').textContent=title;$('page-sub').textContent=sub;
-  const renders={dashboard:renderDashboard,invoices:renderInvoices,vendors:renderVendors,payments:renderPayments,gl:renderGL,troy:renderTroy,fifo:renderFIFO,rules:renderRules,ingredients:renderIngredients,recipes:renderRecipes,'pastry-close':renderPastryClose,'pastry-tracker':renderPastryTracker,'pastry-skus':renderPastrySkus,'rev-dashboard':renderRevDashboard};
+  // Update active nav item
+  document.querySelectorAll('.nav-item').forEach(function(el){el.classList.remove('active')});
+  var navEl=$('nav-'+view);if(navEl)navEl.classList.add('active');
+  const renders={
+    dashboard:renderDashboard,invoices:renderInvoices,vendors:renderVendors,
+    payments:renderPayments,gl:renderGL,troy:renderTroy,fifo:renderFIFO,
+    rules:renderRules,ingredients:renderIngredients,recipes:renderRecipes,
+    'pastry-close':renderPastryClose,'pastry-tracker':renderPastryTracker,
+    'pastry-skus':renderPastrySkus,
+    'rev-dashboard':renderRevDashboard,'rev-import':renderRevImport,
+    'rev-settlement':renderRevSettlement,'rev-cash':renderRevCash
+  };
   if(renders[view])renders[view]();
 }
- 
+
 function updateSidebarStats(){
-  const s=apSummary();const troy=troyReceivable();
-  const invCount=DB.fifo.length;
-  const ings=loadIngredients();
-  const activeIngs=ings.length;
-  const inactiveIngs=(()=>{try{const v=localStorage.getItem('bc_ingredients');return v?JSON.parse(v):[]}catch{return[]}})().filter(i=>i.active===false).length;
-  const menuItemCount=Object.keys(getMenuItems()).length;
-  const recipeLineCount=(()=>{try{const v=localStorage.getItem('bc_recipes');return v?JSON.parse(v):[]}catch{return[]}})().length;
-  $('sidebar-stats').innerHTML=`
-    <div class="stat-row"><span>DC Open AP</span><span class="stat-val">${fmt(s.totalOpen)}</span></div>
-    <div class="stat-row"><span>Overdue</span><span class="stat-val" style="color:#E07060">${fmt(s.totalOverdue)}</span></div>
-    <div class="stat-row"><span>Due ≤7d</span><span class="stat-val" style="color:#D4943A">${fmt(s.dueSoon)}</span></div>
-    <div style="border-top:1px solid rgba(255,255,255,.10);margin:8px 0"></div>
-    <div class="stat-row"><span>Troy 1300</span><span class="stat-val stat-troy">${fmt(troy.balance)}</span></div>
-    <div style="border-top:1px solid rgba(255,255,255,.10);margin:8px 0"></div>
-    <div class="stat-row"><span>Invoices</span><span class="stat-val">${DB.invoices.length}</span></div>
-    <div class="stat-row"><span>FIFO layers</span><span class="stat-val">${invCount}</span></div>
-    <div class="stat-row"><span>Match rules</span><span class="stat-val">${DB.rules.length}</span></div>
-    <div style="border-top:1px solid rgba(255,255,255,.10);margin:8px 0"></div>
-    <div class="stat-row"><span>Ingredients</span><span class="stat-val">${activeIngs} / ${inactiveIngs} inactive</span></div>
-    <div class="stat-row"><span>Menu items</span><span class="stat-val">${menuItemCount}</span></div>
-    <div class="stat-row"><span>Recipe lines</span><span class="stat-val">${recipeLineCount}</span></div>
-    <div style="margin-top:10px;font-size:10px;color:rgba(255,255,255,.22)">${new Date().toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}</div>`;
+  if(currentModule !== 'ap') return;
+  renderSidebar();
+  // Re-apply active state after sidebar re-render
+  var navEl=$('nav-'+currentView);if(navEl)navEl.classList.add('active');
+  var s=apSummary();var troy=troyReceivable();
+  var invCount=DB.fifo.length;
+  var ings=loadIngredients();
+  var activeIngs=ings.length;
+  var inactiveIngs=(function(){try{var v=localStorage.getItem('bc_ingredients');return v?JSON.parse(v):[]}catch{return[]}})().filter(function(i){return i.active===false}).length;
+  var menuItemCount=Object.keys(getMenuItems()).length;
+  var recipeLineCount=(function(){try{var v=localStorage.getItem('bc_recipes');return v?JSON.parse(v):[]}catch{return[]}})().length;
+  var el=$('sidebar-stats');
+  if(!el) return;
+  el.innerHTML=
+    '<div class="stat-row"><span>DC Open AP</span><span class="stat-val">'+fmt(s.totalOpen)+'</span></div>'+
+    '<div class="stat-row"><span>Overdue</span><span class="stat-val" style="color:#E07060">'+fmt(s.totalOverdue)+'</span></div>'+
+    '<div class="stat-row"><span>Due \u22647d</span><span class="stat-val" style="color:#D4943A">'+fmt(s.dueSoon)+'</span></div>'+
+    '<div style="border-top:1px solid rgba(255,255,255,.10);margin:8px 0"></div>'+
+    '<div class="stat-row"><span>Troy 1300</span><span class="stat-val stat-troy">'+fmt(troy.balance)+'</span></div>'+
+    '<div style="border-top:1px solid rgba(255,255,255,.10);margin:8px 0"></div>'+
+    '<div class="stat-row"><span>Invoices</span><span class="stat-val">'+DB.invoices.length+'</span></div>'+
+    '<div class="stat-row"><span>FIFO layers</span><span class="stat-val">'+invCount+'</span></div>'+
+    '<div class="stat-row"><span>Match rules</span><span class="stat-val">'+DB.rules.length+'</span></div>'+
+    '<div style="border-top:1px solid rgba(255,255,255,.10);margin:8px 0"></div>'+
+    '<div class="stat-row"><span>Ingredients</span><span class="stat-val">'+activeIngs+' / '+inactiveIngs+' inactive</span></div>'+
+    '<div class="stat-row"><span>Menu items</span><span class="stat-val">'+menuItemCount+'</span></div>'+
+    '<div class="stat-row"><span>Recipe lines</span><span class="stat-val">'+recipeLineCount+'</span></div>'+
+    '<div style="margin-top:10px;font-size:10px;color:rgba(255,255,255,.22)">'+new Date().toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})+'</div>';
 }
- 
+
 // ═══════════════════════════════════════════════
 // DASHBOARD
 // ═══════════════════════════════════════════════
@@ -879,7 +1581,7 @@ function renderDashboard(){
       </table></div>
     </div>`;
 }
- 
+
 // ═══════════════════════════════════════════════
 // INVOICES VIEW
 // ═══════════════════════════════════════════════
@@ -934,7 +1636,7 @@ function renderInvoices(){
       <tbody>${rows||'<tr><td colspan="11" class="text-center" style="padding:32px;color:var(--ink-lo)">No invoices match</td></tr>'}</tbody>
     </table></div></div>`;
 }
- 
+
 // ═══════════════════════════════════════════════
 // VENDORS
 // ═══════════════════════════════════════════════
@@ -952,7 +1654,7 @@ function renderVendors(){
   }).join('');
   $('content').innerHTML=DB.vendors.length?`<div class="vendor-grid">${cards}</div>`:`<div class="empty-state"><div class="empty-icon">◉</div><div>No vendors yet</div></div>`;
 }
- 
+
 // ═══════════════════════════════════════════════
 // PAYMENTS
 // ═══════════════════════════════════════════════
@@ -975,7 +1677,7 @@ function renderPayments(){
     </table></div>
   </div>`;
 }
- 
+
 // ═══════════════════════════════════════════════
 // GL ENTRIES
 // ═══════════════════════════════════════════════
@@ -1005,7 +1707,7 @@ function renderGL(){
   }).join('');
   $('content').innerHTML=`<div class="alert alert-info" style="margin-bottom:16px">Auto-generated from invoices and payments. Use <strong>Journal Entry</strong> for adjustments and payroll deduction postings to 1300.</div>${html||'<div class="empty-state"><div class="empty-icon">⊞</div><div>No entries yet</div></div>'}`;
 }
- 
+
 // ═══════════════════════════════════════════════
 // TROY LEDGER
 // ═══════════════════════════════════════════════
@@ -1054,7 +1756,7 @@ function renderTroy(){
       </table></div>
     </div>`;
 }
- 
+
 // ═══════════════════════════════════════════════
 // FIFO DELIVERIES VIEW
 // ═══════════════════════════════════════════════
@@ -1097,7 +1799,7 @@ function renderFIFO(){
       </div>
     </div>`;
 }
- 
+
 // ═══════════════════════════════════════════════
 // MATCHING RULES VIEW
 // ═══════════════════════════════════════════════
@@ -1119,13 +1821,13 @@ function renderRules(){
       <tbody>${rows||'<tr><td colspan="6" class="text-center" style="padding:32px;color:var(--ink-lo)">No rules yet</td></tr>'}</tbody>
     </table></div></div>`;
 }
- 
+
 // ═══════════════════════════════════════════════
 // MODAL HELPERS
 // ═══════════════════════════════════════════════
 const closeModal=()=>$('modal-root').innerHTML='';
 function openModal(html){$('modal-root').innerHTML=`<div class="overlay" onclick="if(event.target===this)closeModal()">${html}</div>`}
- 
+
 function eraSelector(current,sfx,fn){
   const f=fn||'selectEra';
   const opts=[['dc','sel-dc','Dream Center','Normal DC'],['troy','sel-troy','Troy (Pre-Acq.)','Unpaid at 10/31/25'],['dc-paid','sel-dc-paid','DC Paid for Troy','DC cash paid Troy\'s bill']];
@@ -1135,7 +1837,7 @@ function selectEra(val,cls,el,sfx){
   document.querySelectorAll(`#era-sel${sfx||''} .era-opt`).forEach(o=>o.className='era-opt');
   el.classList.add(cls);const h=$(`era-val${sfx||''}`);if(h)h.value=val;
 }
- 
+
 // ═══════════════════════════════════════════════
 // VIEW INVOICE
 // ═══════════════════════════════════════════════
@@ -1195,7 +1897,7 @@ function viewInvoice(id){
     </div>
   </div>`);
 }
- 
+
 async function voidInvoice(id){
   if(!confirm('Void this invoice? GL posting and FIFO layers will be reversed.'))return;
   const inv=DB.invoices.find(i=>i.id===id);if(!inv)return;
@@ -1215,12 +1917,12 @@ async function voidInvoice(id){
   const views={invoices:renderInvoices,dashboard:renderDashboard,troy:renderTroy};if(views[currentView])views[currentView]();
   updateSidebarStats();
 }
- 
+
 // ═══════════════════════════════════════════════
 // INVOICE MODAL — with FIFO integration
 // ═══════════════════════════════════════════════
 let lineItems=[];
- 
+
 function openInvoiceModal(editId){
   if(!editId) _lastRebelBreadFile = null; // reset on new invoice
   const editing=editId?DB.invoices.find(i=>i.id===editId):null;
@@ -1283,18 +1985,18 @@ function openInvoiceModal(editId){
   renderLineItems();
   if(editing?.vendorId)onVendorChange(editing.vendorId,true);
 }
- 
+
 // ─── AUTOLOADER ───
 let ANTHROPIC_API_KEY = ''; // loaded from Supabase config on login
 const ANTHROPIC_ENDPOINT='https://api.anthropic.com/v1/messages';
- 
+
 function handleInvoiceDrop(e){
   const file=e.dataTransfer.files[0];
   if(file)handleInvoiceFile(file);
 }
- 
+
 // handleInvoiceFile replaced by Rebel Bread aware version below
- 
+
 function showAutoloadStatus(msg){
   const s=$('autoload-status'),m=$('autoload-msg'),e=$('autoload-err');
   if(s){s.style.display='block';if(m)m.textContent=msg}
@@ -1305,7 +2007,7 @@ function showAutoloadErr(msg){
   hideAutoloadStatus();
   const e=$('autoload-err');if(e){e.textContent=msg;e.style.display='block'}
 }
- 
+
 async function runInvoiceExtraction(file){
   showAutoloadStatus('Reading file…');
   const ext=file.name.split('.').pop().toLowerCase();
@@ -1320,15 +2022,15 @@ async function runInvoiceExtraction(file){
       r.readAsDataURL(file);
     });
   }catch(e){showAutoloadErr('Could not read file: '+e.message);return}
- 
+
   showAutoloadStatus('Extracting invoice data via AI…');
- 
+
   const content=isPdf
     ?[{type:'document',source:{type:'base64',media_type:'application/pdf',data:b64}},{type:'text',text:'Extract invoice data as JSON.'}]
     :[{type:'image',source:{type:'base64',media_type:mediaType,data:b64}},{type:'text',text:'Extract invoice data as JSON.'}];
- 
+
   const sysPrompt='You are an invoice parser for a coffee shop. Extract all line items and return ONLY valid JSON (no markdown, no backticks) with this structure: {"invoice_date":"YYYY-MM-DD","vendor":"string","invoice_number":"string","lines":[{"raw_description":"string","matched_ingredient":"string or null","match_confidence":"exact|fuzzy|none","quantity":number,"unit":"string","unit_price":number,"line_total":number,"notes":"string or null"}]}. Known ingredients: '+loadIngredients().map(i=>i.name).join(', ')+'. Match each line to the closest ingredient. exact=close name match, fuzzy=partial, none=no match. Return ONLY the JSON object.';
- 
+
   try{
     const resp=await fetch(ANTHROPIC_ENDPOINT,{
       method:'POST',
@@ -1349,7 +2051,7 @@ async function runInvoiceExtraction(file){
     if(!text){showAutoloadErr('Empty response from API.');return}
     let parsed;
     try{parsed=JSON.parse(text.replace(/```json|```/g,'').trim())}catch(e){showAutoloadErr('Could not parse response: '+text.slice(0,200));return}
- 
+
     hideAutoloadStatus();
     if(parsed.invoice_date){$('inv-date').value=parsed.invoice_date;autoEraFromDate(parsed.invoice_date)}
     if(parsed.invoice_number&&!$('inv-num').value)$('inv-num').value=parsed.invoice_number;
@@ -1372,24 +2074,24 @@ async function runInvoiceExtraction(file){
     if(dz)dz.innerHTML='<div style="padding:8px 12px;background:var(--green-lo);border:1px solid #A8D5B8;border-radius:var(--r);font-size:12px;color:var(--green)">✓ Extracted from <strong>'+file.name+'</strong> — '+lineItems.length+' lines loaded. Review below and confirm ingredients.</div>';
   }catch(e){showAutoloadErr('Extraction failed: '+e.message)}
 }
- 
- 
+
+
 function autoEraFromDate(v){
   if(v&&v<ACQUISITION_DATE){const h=$('era-val');if(h&&h.value===ERA.DC){h.value=ERA.TROY;document.querySelectorAll('#era-sel .era-opt').forEach(o=>{o.className='era-opt';if(o.dataset.era==='troy')o.classList.add('sel-troy')})}}
 }
- 
+
 function onVendorChange(vendorId,silent){
   const vendor=DB.vendors.find(v=>v.id===vendorId);if(!vendor)return;
   const de=$('inv-date'),du=$('inv-due');
   if(de?.value&&(!du.value||!silent)){const d=new Date(de.value+'T12:00:00');d.setDate(d.getDate()+(vendor.terms||30));du.value=d.toISOString().slice(0,10)}
   if(!silent&&lineItems.length===1&&!lineItems[0].acct&&vendor.defaultAccts?.length){lineItems[0].acct=vendor.defaultAccts[0];renderLineItems()}
 }
- 
+
 function buildIngOptions(selectedName){
   const ings=loadIngredients().sort((a,b)=>a.name.localeCompare(b.name));
   return '<option value="">— no ingredient —</option>'+ings.map(i=>`<option value="${i.name}" ${i.name===(selectedName||'')?'selected':''}>${i.name} (${i.cat})</option>`).join('');
 }
- 
+
 function renderLineItems(){
   const body=$('line-items-body');if(!body)return;
   body.innerHTML=lineItems.map((line,i)=>{
@@ -1427,12 +2129,12 @@ function renderLineItems(){
   }).join('');
   updateTotals();
 }
- 
+
 function applyAutoMatch(i, ingredient){
   lineItems[i].ingredient=ingredient;
   onIngredientChange(i);
 }
- 
+
 function updateConvQty(i){
   const rule=lineItems[i].ingredient?DB.rules.find(r=>r.ingredient===lineItems[i].ingredient):null;
   if(!rule)return;
@@ -1442,7 +2144,7 @@ function updateConvQty(i){
   const convQty=(lineItems[i].qty||1)*rule.multiplier;
   el.textContent=convQty+' '+(ing?.unit||rule.unit);
 }
- 
+
 function autoMatchIngredient(i,desc){
   // Auto-suggest ingredient from rule if description matches and no ingredient set
   if(lineItems[i].ingredient)return;
@@ -1454,7 +2156,7 @@ function autoMatchIngredient(i,desc){
   // Re-render just the hint area
   const body=$('line-items-body');if(body)renderLineItems();
 }
- 
+
 function onIngredientChange(i){
   const ing=loadIngredients().find(x=>x.name===lineItems[i].ingredient);
   if(!ing)return;
@@ -1465,17 +2167,17 @@ function onIngredientChange(i){
   }
   renderLineItems();
 }
- 
+
 function refreshRuleHint(i){
   // Conv qty cell is now handled by updateConvQty — kept for compatibility
   updateConvQty(i);
 }
- 
+
 function updateLineTotal(i){lineItems[i].total=(lineItems[i].qty||1)*(lineItems[i].unitCost||0);const el=$(`lt-${i}`);if(el)el.textContent=fmt(lineItems[i].total);updateTotals()}
 function updateTotals(){const sub=lineItems.reduce((s,l)=>s+((l.qty||1)*(l.unitCost||0)),0);const t=$('inv-totals');if(t)t.innerHTML=`<div class="totals-row"><span class="totals-label">Subtotal</span><span class="totals-val">${fmt(sub)}</span></div><div class="totals-row totals-grand"><span class="totals-label">Total</span><span class="totals-val">${fmt(sub)}</span></div>`}
 function addLine(){const v=$('inv-vendor')?.value;const vnd=DB.vendors.find(x=>x.id===v);lineItems.push({description:'',acct:vnd?.defaultAccts?.[0]||'',ingredient:'',qty:1,unitCost:0,total:0});renderLineItems()}
 function removeLine(i){if(lineItems.length===1)return;lineItems.splice(i,1);renderLineItems()}
- 
+
 async function saveInvoice(editId){
   const vendorId=$('inv-vendor').value,date=$('inv-date').value,dueDate=$('inv-due').value;
   const memo=$('inv-memo').value.trim(),invoiceNum=$('inv-num').value.trim(),era=$('era-val').value||ERA.DC;
@@ -1486,7 +2188,7 @@ async function saveInvoice(editId){
   const lines=lineItems.map(l=>({...l,total:(l.qty||1)*(l.unitCost||0)}));
   const subtotal=lines.reduce((s,l)=>s+l.total,0);
   const vName=vendorName(vendorId);
- 
+
   if(editId){
     const inv=DB.invoices.find(i=>i.id===editId);const paid=inv.amountPaid||0;
     // Remove old FIFO layers for this invoice from Supabase
@@ -1509,7 +2211,7 @@ async function saveInvoice(editId){
   closeModal();
   const views={invoices:renderInvoices,dashboard:renderDashboard,troy:renderTroy,fifo:renderFIFO};if(views[currentView])views[currentView]();
   updateSidebarStats();
- 
+
   // Auto-run pastry extraction if this is a Rebel Bread invoice
   const savedInvId = editId || DB.invoices[DB.invoices.length-1]?.id;
   const savedInv = DB.invoices.find(i=>i.id===savedInvId);
@@ -1528,9 +2230,9 @@ async function saveInvoice(editId){
     showToast(`Invoice saved${countFIFOLines(lineItems)>0?' · '+countFIFOLines(lineItems)+' inventory layer(s) written':''}`);
   }
 }
- 
+
 function countFIFOLines(lines){return lines.filter(l=>l.ingredient).length}
- 
+
 async function writeFIFOLayers(inv){
   const vName=vendorName(inv.vendorId);
   for(const line of inv.lines){
@@ -1559,7 +2261,7 @@ async function writeFIFOLayers(inv){
     await saveFIFOLayerToSB(layer);
   }
 }
- 
+
 async function postInvoiceGL(inv){
   const era=inv.era||ERA.DC;const entries=[];
   const byAcct={};inv.lines.forEach(l=>{byAcct[l.acct]=(byAcct[l.acct]||0)+l.total});
@@ -1573,7 +2275,7 @@ async function postInvoiceGL(inv){
   const je={id:nextGLId(),date:inv.date,ref:inv.id,era,memo:'A/P accrual'+(era==='troy'?' (Troy-era)':era==='dc-paid'?' (DC paid for Troy)':'')+' — '+vendorName(inv.vendorId)+' '+(inv.invoiceNum||inv.id),entries};
   await saveGLToSB(je);
 }
- 
+
 // ═══════════════════════════════════════════════
 // PAYMENT MODAL
 // ═══════════════════════════════════════════════
@@ -1613,12 +2315,12 @@ function openPaymentModal(invoiceId){
   </div>`);
   if(invoiceId)onPmtInvChange(invoiceId);
 }
- 
+
 function selectPmtEra(val,cls,el,sfx){
   document.querySelectorAll('#era-sel-pmt .era-opt').forEach(o=>o.className='era-opt');
   el.classList.add(cls);const h=$('era-val-pmt');if(h)h.value=val;
 }
- 
+
 function onPmtInvChange(id){
   const inv=DB.invoices.find(i=>i.id===id);if(!inv)return;
   const amtEl=$('pmt-amount');if(amtEl&&!amtEl.value)amtEl.value=inv.balance.toFixed(2);
@@ -1627,7 +2329,7 @@ function onPmtInvChange(id){
   const clr=era==='troy'?'var(--troy)':era==='dc-paid'?'#8B4500':'var(--ink-mid)';
   $('pmt-preview').innerHTML=`<div class="alert" style="background:var(--bg);border:1px solid var(--border);font-size:12px"><strong>${vendorName(inv.vendorId)}</strong> · ${inv.invoiceNum||inv.id} · ${eraPill(era)}<br>Total: <strong>${fmt(inv.total)}</strong> · Balance: <strong style="color:${clr}">${fmt(inv.balance)}</strong></div>`;
 }
- 
+
 async function savePayment(){
   const invoiceId=$('pmt-invoice').value,date=$('pmt-date').value;
   const amount=parseFloat($('pmt-amount').value),method=$('pmt-method').value;
@@ -1654,7 +2356,7 @@ async function savePayment(){
   const views={payments:renderPayments,dashboard:renderDashboard,invoices:renderInvoices,troy:renderTroy};if(views[currentView])views[currentView]();
   updateSidebarStats();
 }
- 
+
 // ═══════════════════════════════════════════════
 // JOURNAL ENTRY MODAL
 // ═══════════════════════════════════════════════
@@ -1719,7 +2421,7 @@ async function saveJE(){
   const views={gl:renderGL,troy:renderTroy,dashboard:renderDashboard};if(views[currentView])views[currentView]();
   updateSidebarStats();
 }
- 
+
 // ═══════════════════════════════════════════════
 // VENDOR MODAL
 // ═══════════════════════════════════════════════
@@ -1772,7 +2474,7 @@ async function deleteVendor(id){
   }
   closeModal();renderVendors();
 }
- 
+
 // ═══════════════════════════════════════════════
 // RULE MODAL
 // ═══════════════════════════════════════════════
@@ -1808,9 +2510,9 @@ async function saveRule(editId){
   closeModal();renderRules();showToast('Rule saved');
 }
 async function deleteRule(id){if(!confirm('Delete this rule?'))return;await deleteRuleFromSB(id);closeModal();renderRules()}
- 
- 
- 
+
+
+
 // --------------------------------------------------
 // RECIPE MANAGER HELPERS
 // --------------------------------------------------
@@ -1818,19 +2520,19 @@ function catBadge(cat){
   var map={espresso:'badge-esp',Coffee:'badge-coffee',Chai:'badge-chai',food:'badge-food'};
   return '<span class="badge '+(map[cat]||'badge-cat')+'">'+cat+'</span>';
 }
- 
+
 function stockOnHand(ingName){
   return DB.fifo.filter(function(d){return d.ingredient===ingName&&d.remainingQty>0})
     .reduce(function(s,d){return s+d.remainingQty},0);
 }
- 
+
 function stockPill(ingName,unit){
   var qty=stockOnHand(ingName);
   if(qty<=0)return '<span class="stock-zero">0 '+unit+'</span>';
   if(qty<50)return '<span class="stock-low">'+qty.toFixed(1)+' '+unit+'</span>';
   return '<span class="stock-ok">'+qty.toFixed(1)+' '+unit+'</span>';
 }
- 
+
 function recipesUsingIngredient(ingName){
   var seen={};var result=[];
   DB.recipes.forEach(function(r){
@@ -1838,7 +2540,7 @@ function recipesUsingIngredient(ingName){
   });
   return result;
 }
- 
+
 // ==================================================
 // RECIPE MANAGER — Ingredients & Recipes
 // ==================================================
@@ -1849,34 +2551,34 @@ const RECIPE_CATS=['espresso','Chai','Coffee','Not Coffee','Kombucha','Burrito',
 var ingTab='active', ingSearch='', ingCatFilter='all';
 var recSearch='', recCatFilter='all';
 var _editingRecipeName=null;
- 
+
 function setIngTab(tab){ingTab=tab;renderIngredients()}
- 
+
 // stockOnHand defined above
- 
- 
+
+
 // stockPill defined above
- 
- 
+
+
 // recipesUsingIngredient defined above
- 
- 
+
+
 // ==================================================
 // NAV
 // ==================================================
 // showView defined above (AP version handles all views)
- 
- 
+
+
 // updateSidebarStats defined above (AP version)
- 
+
 // ==================================================
 // INGREDIENTS
 // ==================================================
 var ingTab='active', ingSearch='', ingCatFilter='all';
- 
+
 // setIngTab defined above
- 
- 
+
+
 function renderIngredients(){
   $('topbar-actions').innerHTML='<button class="btn btn-primary" onclick="openIngModal(-1)">+ New Ingredient</button>';
   var active=DB.ingredients.filter(function(i){return i.active!==false});
@@ -1886,7 +2588,7 @@ function renderIngredients(){
   var list=ingTab==='active'?active:inactive;
   if(ingSearch){var q=ingSearch.toLowerCase();list=list.filter(function(i){return i.name.toLowerCase().includes(q)||i.cat.toLowerCase().includes(q)})}
   if(ingCatFilter!=='all')list=list.filter(function(i){return i.cat===ingCatFilter});
- 
+
   var rows=list.map(function(ing){
     var idx=DB.ingredients.indexOf(ing);
     var recipeCount=recipesUsingIngredient(ing.name).length;
@@ -1905,9 +2607,9 @@ function renderIngredients(){
       '</div></td>'+
     '</tr>';
   }).join('');
- 
+
   var catOptions=CATEGORIES.map(function(c){return '<option value="'+c+'"'+(ingCatFilter===c?' selected':'')+'>'+c+'</option>'}).join('');
- 
+
   $('content').innerHTML=
     '<div class="tiles">'+
       '<div class="tile"><div class="tile-label">Active</div><div class="tile-val">'+active.length+'</div><div class="tile-sub">In use</div></div>'+
@@ -1929,7 +2631,7 @@ function renderIngredients(){
       '<tbody>'+(rows||'<tr><td colspan="7" style="padding:32px;text-align:center;color:var(--ink-lo)">'+(ingTab==='active'?'No active ingredients':'No inactive ingredients')+'</td></tr>')+'</tbody>'+
     '</table></div></div>';
 }
- 
+
 function openIngModal(idx){
   var editing=idx>=0?DB.ingredients[idx]:null;
   var catOptions=CATEGORIES.map(function(c){return '<option value="'+c+'"'+(editing&&editing.cat===c?' selected':'')+'>'+c+'</option>'}).join('');
@@ -1962,7 +2664,7 @@ function openIngModal(idx){
     '</div></div>'
   );
 }
- 
+
 function checkInactiveDuplicate(name){
   if(!name||name.length<2)return;
   var match=DB.ingredients.find(function(i){return i.active===false&&i.name.toLowerCase()===name.toLowerCase()});
@@ -1974,7 +2676,7 @@ function checkInactiveDuplicate(name){
     alert.innerHTML='';
   }
 }
- 
+
 async function saveIngredient(idx){
   var name=$('ing-name').value.trim();
   var cat=$('ing-cat').value;
@@ -1997,7 +2699,7 @@ async function saveIngredient(idx){
   closeModal();renderIngredients();updateSidebarStats();
   showToast(idx>=0?'Ingredient updated':'Ingredient added');
 }
- 
+
 async function deactivateIngredient(idx){
   var ing=DB.ingredients[idx];if(!ing)return;
   var stock=stockOnHand(ing.name);
@@ -2012,7 +2714,7 @@ async function deactivateIngredient(idx){
   renderIngredients();updateSidebarStats();
   showToast('"'+ing.name+'" deactivated','warn');
 }
- 
+
 function reactivateIngredient(idx){
   var ing=DB.ingredients[idx];if(!ing)return;
   var ings=DB.ingredients;
@@ -2021,14 +2723,14 @@ function reactivateIngredient(idx){
   persist();renderIngredients();updateSidebarStats();
   showToast('"'+ing.name+'" reactivated');
 }
- 
+
 // ==================================================
 // RECIPES
 // ==================================================
 var recSearch='', recCatFilter='all';
 var _editingRecipeName=null;
 var recipeLines=[];
- 
+
 function getMenuItems(){
   var menuItems={};
   DB.recipes.forEach(function(r){
@@ -2037,7 +2739,7 @@ function getMenuItems(){
   });
   return menuItems;
 }
- 
+
 function renderRecipes(){
   $('topbar-actions').innerHTML='<button class="btn btn-primary" onclick="openRecipeModal(null)">+ New Menu Item</button>';
   var menuItems=getMenuItems();
@@ -2045,10 +2747,10 @@ function renderRecipes(){
   if(recSearch){var q=recSearch.toLowerCase();items=items.filter(function(e){return e[0].toLowerCase().includes(q)})}
   if(recCatFilter!=='all')items=items.filter(function(e){return e[1].category===recCatFilter});
   items.sort(function(a,b){return a[0].localeCompare(b[0])});
- 
+
   // Store names for index-based onclick
   window._recipeNames=items.map(function(e){return e[0]});
- 
+
   var rows=items.map(function(entry,i){
     var name=entry[0];var data=entry[1];
     var ingList=data.lines.map(function(l){return l.quantity+l.unit+' '+l.ingredient_name}).join(' / ');
@@ -2061,11 +2763,11 @@ function renderRecipes(){
       '<td><button class="btn btn-ghost btn-sm" onclick="openRecipeModal(window._recipeNames['+i+'])">Edit</button></td>'+
     '</tr>';
   }).join('');
- 
+
   var catOptions=RECIPE_CATS.map(function(c){return '<option value="'+c+'"'+(recCatFilter===c?' selected':'')+'>'+c+'</option>'}).join('');
   var totalItems=Object.keys(menuItems).length;
   var avgIng=totalItems>0?(DB.recipes.length/totalItems).toFixed(1):'0';
- 
+
   $('content').innerHTML=
     '<div class="tiles">'+
       '<div class="tile"><div class="tile-label">Menu Items</div><div class="tile-val">'+totalItems+'</div></div>'+
@@ -2083,7 +2785,7 @@ function renderRecipes(){
       '<tbody>'+(rows||'<tr><td colspan="6" style="padding:32px;text-align:center;color:var(--ink-lo)">No recipes found</td></tr>')+'</tbody>'+
     '</table></div></div>';
 }
- 
+
 function openRecipeModal(name){
   _editingRecipeName=name;
   var isNew=!name;
@@ -2096,7 +2798,7 @@ function openRecipeModal(name){
   var currentCat=firstRec?firstRec.category:'espresso';
   var currentPrice=firstRec?firstRec.sale_price:0;
   var catOptions=RECIPE_CATS.map(function(c){return '<option value="'+c+'"'+(currentCat===c?' selected':'')+'>'+c+'</option>'}).join('');
- 
+
   openModal(
     '<div class="modal modal-lg">'+
     '<div class="modal-header">'+
@@ -2135,13 +2837,13 @@ function openRecipeModal(name){
   );
   renderRecipeLines();
 }
- 
+
 function renderRecipeLines(){
   var body=$('recipe-lines-body');if(!body)return;
   var activeIngs=DB.ingredients.filter(function(i){return i.active!==false})
     .sort(function(a,b){return a.name.localeCompare(b.name)});
   var ingOpts='<option value="">Select ingredient...</option>'+activeIngs.map(function(i){return '<option value="'+i.name+'">'+i.name+' ('+i.cat+')</option>'}).join('');
- 
+
   body.innerHTML=recipeLines.map(function(line,i){
     var ing=line.ingredient_name?DB.ingredients.find(function(x){return x.name===line.ingredient_name}):null;
     var selIngOpts=ingOpts.replace('value="'+line.ingredient_name+'"','value="'+line.ingredient_name+'" selected');
@@ -2154,17 +2856,17 @@ function renderRecipeLines(){
     '</div>';
   }).join('');
 }
- 
+
 function onRecipeIngChange(i){
   var ing=DB.ingredients.find(function(x){return x.name===recipeLines[i].ingredient_name});
   if(ing)recipeLines[i].unit=ing.unit;
   renderRecipeLines();
 }
- 
+
 function addRecipeLine(){recipeLines.push({ingredient_name:'',quantity:0,unit:'g'});renderRecipeLines()}
- 
+
 function removeRecipeLine(i){if(recipeLines.length===1)return;recipeLines.splice(i,1);renderRecipeLines()}
- 
+
 function saveRecipe(){
   var name=_editingRecipeName||$('rec-name').value.trim();
   var cat=$('rec-cat').value;
@@ -2184,7 +2886,7 @@ function saveRecipe(){
   persist();closeModal();renderRecipes();updateSidebarStats();
   showToast(_editingRecipeName?'"'+name+'" updated':'"'+name+'" added');
 }
- 
+
 async function deleteMenuItem(){
   if(!_editingRecipeName)return;
   var name=_editingRecipeName;
@@ -2194,14 +2896,14 @@ async function deleteMenuItem(){
   closeModal();renderRecipes();updateSidebarStats();
   showToast('"'+name+'" deleted','warn');
 }
- 
+
 // ==================================================
 // EXPORT / IMPORT
 // ==================================================
 // ==================================================
 // PASTRY OPERATIONS MODULE
 // ==================================================
- 
+
 // Helper: get active pastry SKUs sorted by name
 function getPastrySkus(){
   var skus = DB.pastrySkus;
@@ -2212,37 +2914,37 @@ function getPastrySkus(){
   }
   return skus.slice().sort(function(a,b){return a.name.localeCompare(b.name)});
 }
- 
+
 // Helper: get pastry log entries for a specific date
 function getPastryLogForDate(dateStr){
   return DB.pastryLog.filter(function(e){return e.date === dateStr});
 }
- 
+
 // Helper: get billed entries for a specific date (from invoice upload)
 function getBilledForDate(dateStr){
   return DB.pastryLog.filter(function(e){return e.date === dateStr && e.billed !== undefined});
 }
- 
+
 // Helper: get or create a log entry for date+sku
 function getPastryEntry(dateStr, skuName){
   var log = DB.pastryLog;
   return log.find(function(e){return e.date === dateStr && e.sku === skuName}) || null;
 }
- 
+
 // Format date for display
 function fmtDateShort(s){
   if(!s) return '--';
   var d = new Date(s + 'T12:00:00');
   return d.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'});
 }
- 
+
 // ==================================================
 // PASTRY SKUS VIEW
 // ==================================================
 function renderPastrySkus(){
   $('topbar-actions').innerHTML = '<button class="btn btn-primary" onclick="openPastrySkuModal(-1)">+ New SKU</button>';
   var skus = getPastrySkus();
- 
+
   var rows = skus.map(function(sku, i){
     var realIdx = DB.pastrySkus.indexOf(sku);
     var weekTotal = DB.pastryLog.filter(function(e){return e.sku===sku.name && e.billed}).reduce(function(s,e){return s+(e.billed||0)},0);
@@ -2254,7 +2956,7 @@ function renderPastrySkus(){
       '<td><button class="btn btn-ghost btn-sm" onclick="openPastrySkuModal(' + realIdx + ')">Edit</button></td>' +
     '</tr>';
   }).join('');
- 
+
   $('content').innerHTML =
     '<div class="alert alert-info" style="margin-bottom:16px">Manage the list of Rebel Bread pastry SKUs that appear in the daily close form. Add a SKU for each item Rebel Bread delivers. The code should match the item code on the Rebel Bread invoice.</div>' +
     '<div class="card"><div class="tbl-wrap"><table>' +
@@ -2262,7 +2964,7 @@ function renderPastrySkus(){
       '<tbody>' + (rows || '<tr><td colspan="5" style="padding:32px;text-align:center;color:var(--ink-lo)">No SKUs yet -- add your Rebel Bread items above</td></tr>') + '</tbody>' +
     '</table></div></div>';
 }
- 
+
 function openPastrySkuModal(idx){
   var sku = idx >= 0 ? DB.pastrySkus[idx] : null;
   openModal(
@@ -2289,7 +2991,7 @@ function openPastrySkuModal(idx){
     '</div></div>'
   );
 }
- 
+
 async function savePastrySkuAt(idx){
   var name = $('psku-name').value.trim();
   var code = $('psku-code').value.trim();
@@ -2307,7 +3009,7 @@ async function savePastrySkuAt(idx){
   closeModal();renderPastrySkus();
   showToast(idx>=0?'SKU updated':'SKU added');
 }
- 
+
 async function deactivatePastrySkuAt(idx){
   if(!confirm('Deactivate this SKU? It will be hidden from the daily close form.'))return;
   const sku = {...DB.pastrySkus[idx], active:false};
@@ -2315,14 +3017,14 @@ async function deactivatePastrySkuAt(idx){
   closeModal();renderPastrySkus();
   showToast('SKU deactivated','warn');
 }
- 
+
 async function reactivatePastrySkuAt(idx){
   const sku = {...DB.pastrySkus[idx], active:true};
   await savePastrySkuToSB(sku);
   closeModal();renderPastrySkus();
   showToast('SKU reactivated');
 }
- 
+
 // ==================================================
 // PASTRY DAILY CLOSE VIEW
 // ==================================================
@@ -2334,22 +3036,22 @@ var pastryCloseDate = (function(){
   }
   return todayStr();
 })();
- 
+
 function renderPastryClose(){
   $('topbar-actions').innerHTML =
     '<input type="date" id="pastry-date-sel" value="' + pastryCloseDate + '" onchange="pastryCloseDate=this.value;renderPastryClose()" style="padding:6px 10px;border:1px solid var(--border);border-radius:var(--r);font-size:13px">' +
     '<button class="btn btn-primary" onclick="savePastryClose()">Save Close</button>';
- 
+
   var skus = getPastrySkus().filter(function(s){return s.active!==false});
   var dateStr = pastryCloseDate;
   var dow = new Date(dateStr+'T12:00:00').toLocaleDateString('en-US',{weekday:'long'});
- 
+
   if(skus.length === 0){
     $('content').innerHTML =
       '<div class="alert alert-info">No active Rebel Bread SKUs found. Add your SKUs in <strong>Pastry SKUs</strong> first.</div>';
     return;
   }
- 
+
   // Build grid rows
   var rows = skus.map(function(sku){
     var entry = getPastryEntry(dateStr, sku.name);
@@ -2360,7 +3062,7 @@ function renderPastryClose(){
       variance > 0 ? '<span class="var-pos">+' + variance + '</span>' :
       variance < 0 ? '<span class="var-neg">' + variance + '</span>' :
       '<span class="var-zero">0</span>';
- 
+
     return '<div class="pastry-row">' +
       '<div>' + sku.name + '</div>' +
       '<div><input type="number" min="0" step="1" id="pr-' + sku.name.replace(/[^a-zA-Z0-9]/g,'_') + '" value="' + received + '" placeholder="0"></div>' +
@@ -2368,7 +3070,7 @@ function renderPastryClose(){
       '<div style="justify-content:center">' + varHtml + '</div>' +
     '</div>';
   }).join('');
- 
+
   // Summary totals
   var totalReceived = 0, totalBilled = 0, billedCount = 0;
   skus.forEach(function(sku){
@@ -2379,11 +3081,11 @@ function renderPastryClose(){
       if(entry.billed !== undefined){ totalBilled += Number(entry.billed); billedCount++; }
     }
   });
- 
+
   var invoiceNote = billedCount > 0
     ? '<span style="color:var(--green);font-size:12px">Invoice data loaded for ' + billedCount + ' of ' + skus.length + ' SKUs</span>'
     : '<span style="color:var(--ink-lo);font-size:12px">No invoice data yet for this date -- upload Rebel Bread invoice in AP to populate</span>';
- 
+
   $('content').innerHTML =
     '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">' +
       '<div><div style="font-size:15px;font-weight:700">' + fmtDateShort(dateStr) + '</div>' +
@@ -2394,17 +3096,17 @@ function renderPastryClose(){
       rows +
     '</div>';
 }
- 
+
 async function savePastryClose(){
   var skus = getPastrySkus().filter(function(s){return s.active!==false});
   var dateStr = pastryCloseDate;
   var log = DB.pastryLog;
- 
+
   // Remove existing received entries for this date (keep billed entries)
   log = log.filter(function(e){
     return !(e.date === dateStr && e.received !== undefined && e.billed === undefined);
   });
- 
+
   // Write new received entries
   var saved = 0;
   skus.forEach(function(sku){
@@ -2413,7 +3115,7 @@ async function savePastryClose(){
     if(!el || el.value === '') return;
     var qty = parseInt(el.value);
     if(isNaN(qty)) return;
- 
+
     // Check if a billed entry exists for this date+sku
     var billedEntry = log.find(function(e){return e.date===dateStr && e.sku===sku.name && e.billed!==undefined});
     if(billedEntry){
@@ -2425,7 +3127,7 @@ async function savePastryClose(){
     }
     saved++;
   });
- 
+
   await savePastryLogEntriesToSB(log.filter(function(e){return e.date===dateStr}));
   // Reload pastry log from Supabase to get updated data
   const fresh = await sbGet('pastry_log', {order:'log_date', asc:false});
@@ -2433,7 +3135,7 @@ async function savePastryClose(){
   showToast('Pastry close saved -- ' + saved + ' items recorded');
   renderPastryClose();
 }
- 
+
 // ==================================================
 // PASTRY VARIANCE TRACKER VIEW
 // ==================================================
@@ -2441,12 +3143,12 @@ function renderPastryTracker(){
   $('topbar-actions').innerHTML = '';
   var log = DB.pastryLog;
   var skus = getPastrySkus().filter(function(s){return s.active!==false});
- 
+
   if(log.length === 0){
     $('content').innerHTML = '<div class="empty-state"><div class="empty-icon">&#9650;</div><div>No pastry data yet. Start by entering daily close entries and uploading Rebel Bread invoices.</div></div>';
     return;
   }
- 
+
   // Group by week (Monday-based)
   function getWeekStart(dateStr){
     var d = new Date(dateStr+'T12:00:00');
@@ -2455,21 +3157,21 @@ function renderPastryTracker(){
     d.setDate(d.getDate() + diff);
     return d.toISOString().slice(0,10);
   }
- 
+
   var weeks = {};
   log.forEach(function(e){
     var ws = getWeekStart(e.date);
     if(!weeks[ws]) weeks[ws] = [];
     weeks[ws].push(e);
   });
- 
+
   var weekKeys = Object.keys(weeks).sort().reverse();
- 
+
   // Build summary tiles
   var allEntries = log.filter(function(e){return e.received!==undefined && e.billed!==undefined});
   var totalVar = allEntries.reduce(function(s,e){return s+(Number(e.received)-Number(e.billed))},0);
   var flagged = allEntries.filter(function(e){return e.received !== e.billed}).length;
- 
+
   // Per-SKU variance summary
   var skuStats = {};
   skus.forEach(function(s){skuStats[s.name]={received:0,billed:0,days:0,varDays:0}});
@@ -2485,7 +3187,7 @@ function renderPastryTracker(){
       skuStats[e.sku].dollarVar += (Number(e.received) - Number(e.billed)) * price;
     }
   });
- 
+
   var skuRows = Object.entries(skuStats).sort(function(a,b){return b[1].varDays-a[1].varDays}).map(function(entry){
     var name=entry[0]; var s=entry[1];
     var net = s.received - s.billed;
@@ -2502,7 +3204,7 @@ function renderPastryTracker(){
       '<td class="text-right"><span class="badge ' + (varPct>20?'badge-overdue':varPct>0?'badge-open':'badge-paid') + '">' + varPct + '% of days</span></td>' +
     '</tr>';
   }).join('');
- 
+
   // Weekly detail cards
   var weekCards = weekKeys.slice(0,8).map(function(ws){
     var entries = weeks[ws];
@@ -2514,7 +3216,7 @@ function renderPastryTracker(){
     var totalRec = compared.reduce(function(s,e){return s+Number(e.received)},0);
     var totalBil = compared.reduce(function(s,e){return s+Number(e.billed)},0);
     var net = totalRec - totalBil;
- 
+
     var dayRows = entries.slice().sort(function(a,b){return a.date.localeCompare(b.date)}).map(function(e){
       var variance = (e.received!==undefined && e.billed!==undefined) ? Number(e.received)-Number(e.billed) : null;
       var varHtml = variance===null?'<span class="var-zero">--</span>':
@@ -2529,7 +3231,7 @@ function renderPastryTracker(){
         '<td class="text-right">' + varHtml + '</td>' +
       '</tr>';
     }).join('');
- 
+
     return '<div class="week-card">' +
       '<div class="week-card-header" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display===\'none\'?\'block\':\'none\'">' +
         '<div><span style="font-weight:700">Week of ' + fmtDateShort(ws) + '</span>' +
@@ -2545,11 +3247,11 @@ function renderPastryTracker(){
       '</table></div></div>' +
     '</div>';
   }).join('');
- 
+
   var totalDollarVar = allEntries.reduce(function(s,e){
     return s + (Number(e.received)-Number(e.billed))*(e.unitPrice||0);
   },0);
- 
+
   $('content').innerHTML =
     '<div class="tiles" style="grid-template-columns:repeat(4,1fr)">' +
       '<div class="tile"><div class="tile-label">Entries Compared</div><div class="tile-val">' + allEntries.length + '</div></div>' +
@@ -2567,7 +3269,7 @@ function renderPastryTracker(){
     '<div style="font-size:13px;font-weight:600;margin-bottom:12px">Weekly Detail (click to expand)</div>' +
     weekCards;
 }
- 
+
 // ==================================================
 // PASTRY INVOICE INTEGRATION
 // Called from saveInvoice() when vendor is Rebel Bread
@@ -2577,7 +3279,7 @@ async function writePastryBilledFromInvoice(inv, dailyDetail){
   if(!dailyDetail || dailyDetail.length === 0) return 0;
   var log = DB.pastryLog;
   var written = 0;
- 
+
   dailyDetail.forEach(function(item){
     // Find existing entry for this date+sku
     var existing = log.find(function(e){return e.date===item.date && e.sku===item.sku});
@@ -2597,7 +3299,7 @@ async function writePastryBilledFromInvoice(inv, dailyDetail){
     }
     written++;
   });
- 
+
   // Save to Supabase
   await savePastryLogEntriesToSB(dailyDetail.map(function(item){
     return{date:item.date, sku:item.sku, billed:item.qty, unitPrice:item.unitPrice, invoiceId:inv.id};
@@ -2607,14 +3309,14 @@ async function writePastryBilledFromInvoice(inv, dailyDetail){
   DB.pastryLog = fresh.map(mapPastryLogFromDB);
   return written;
 }
- 
- 
- 
+
+
+
 // ==================================================
 // REBEL BREAD DAILY DETAIL EXTRACTOR
 // ==================================================
 var _lastRebelBreadFile = null; // store file ref for re-extraction
- 
+
 function handleInvoiceFile(file){
   if(!file)return;
   const ext=file.name.split('.').pop().toLowerCase();
@@ -2624,8 +3326,8 @@ function handleInvoiceFile(file){
   _lastRebelBreadFile = file; // store for potential pastry re-extraction
   runInvoiceExtraction(file);
 }
- 
- 
+
+
 function triggerPastryExtraction(invId){
   const inv = DB.invoices.find(i=>i.id===invId);
   if(!inv){showToast('Invoice not found','warn');return}
@@ -2636,15 +3338,15 @@ function triggerPastryExtraction(invId){
   closeModal();
   runRebelBreadPastryExtraction(_lastRebelBreadFile, inv);
 }
- 
+
 async function runRebelBreadPastryExtraction(file, inv){
   if(!file){showToast('No invoice file available for pastry extraction','warn');return}
   showToast('Extracting daily pastry detail...');
- 
+
   const ext=file.name.split('.').pop().toLowerCase();
   const isPdf=ext==='pdf';
   const mediaType=isPdf?'application/pdf':(file.type||'image/jpeg');
- 
+
   let b64;
   try{
     b64=await new Promise((res,rej)=>{
@@ -2654,13 +3356,13 @@ async function runRebelBreadPastryExtraction(file, inv){
       r.readAsDataURL(file);
     });
   }catch(e){showToast('Could not read file: '+e.message,'warn');return}
- 
+
   const content=isPdf
     ?[{type:'document',source:{type:'base64',media_type:'application/pdf',data:b64}},{type:'text',text:'Extract daily delivery data.'}]
     :[{type:'image',source:{type:'base64',media_type:mediaType,data:b64}},{type:'text',text:'Extract daily delivery data.'}];
- 
+
   const activePastrySkus = getPastrySkus().filter(s=>s.active!==false).map(s=>s.name);
- 
+
   const sysPrompt = 'You are parsing a Rebel Bread bakery invoice for a coffee shop. ' +
     'The invoice has a table with item rows and date columns showing quantity delivered each day. ' +
     'Extract the daily delivery quantities for each item. ' +
@@ -2671,7 +3373,7 @@ async function runRebelBreadPastryExtraction(file, inv){
     'Skip the delivery charge line (code 9001, description containing Delivery). Do NOT include any delivery fee or shipping charge as a SKU. ' +
     'Include one record per item per date that has a non-zero quantity. ' +
     'Return ONLY the JSON object.';
- 
+
   try{
     const resp=await fetch(ANTHROPIC_ENDPOINT,{
       method:'POST',
@@ -2692,11 +3394,11 @@ async function runRebelBreadPastryExtraction(file, inv){
     if(!text){showToast('Empty response from API','warn');return}
     let parsed;
     try{parsed=JSON.parse(text.replace(/```json|```/g,'').trim())}catch(e){showToast('Could not parse pastry detail response','warn');return}
- 
+
     if(!parsed.deliveries||parsed.deliveries.length===0){
       showToast('No daily delivery data found in invoice','warn');return;
     }
- 
+
     // Write to pastry log
     const written = writePastryBilledFromInvoice(inv, parsed.deliveries.map(d=>({
       date: d.date,
@@ -2704,33 +3406,18 @@ async function runRebelBreadPastryExtraction(file, inv){
       qty: d.qty,
       unitPrice: d.unit_price||0
     })));
- 
+
     showToast('Pastry detail extracted -- ' + written + ' daily records written to log');
     if(currentView==='pastry-close')renderPastryClose();
     if(currentView==='pastry-tracker')renderPastryTracker();
- 
+
   }catch(e){showToast('Extraction failed: '+e.message,'warn')}
 }
- 
- 
+
+
 // ==================================================
 // AUTHENTICATION
 // ==================================================
-// ═══════════════════════════════════════════════
-// REVENUE MODULE — VIEWS (stub, built next)
-// ═══════════════════════════════════════════════
-function renderRevDashboard(){
-  $('topbar-actions').innerHTML='';
-  $('content').innerHTML=`
-    <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:80px 24px;text-align:center;color:var(--ink-lo)">
-      <div style="font-size:36px;margin-bottom:16px">&#9650;</div>
-      <div style="font-size:18px;font-weight:700;color:var(--ink);margin-bottom:8px">Revenue Module</div>
-      <div style="font-size:14px;color:var(--ink-mid);max-width:380px;line-height:1.6">
-        Clover import pipeline, daily settlement, DoorDash, gift cards, and P&L reporting — coming next.
-      </div>
-    </div>`;
-}
- 
 async function doLogin(){
   const email = document.getElementById('login-email').value.trim();
   const password = document.getElementById('login-password').value;
@@ -2749,7 +3436,7 @@ async function doLogin(){
   document.getElementById('module-switcher').style.display = 'flex';
   document.getElementById('mod-user-name').textContent = data.user?.email || '';
 }
- 
+
 async function doSignOut(){
   if(!confirm('Sign out?'))return;
   await _sb.auth.signOut();
@@ -2765,12 +3452,12 @@ async function doSignOut(){
   document.getElementById('login-password').value = '';
   document.getElementById('login-err').textContent = '';
 }
- 
+
 // ==================================================
 // SUPABASE SAVE FUNCTIONS
 // Replace direct DB array mutations with Supabase writes
 // ==================================================
- 
+
 async function saveVendorToSB(vendor){
   const row = {
     id:vendor.id, name:vendor.name, type:vendor.type||null,
@@ -2787,7 +3474,7 @@ async function saveVendorToSB(vendor){
   }
   return ok;
 }
- 
+
 async function saveInvoiceToSB(inv){
   const ok = await sbUpsert('invoices', mapInvoiceToDB(inv));
   if(ok){
@@ -2796,7 +3483,7 @@ async function saveInvoiceToSB(inv){
   }
   return ok;
 }
- 
+
 async function savePaymentToSB(pmt){
   const ok = await sbUpsert('payments', mapPaymentToDB(pmt));
   if(ok){
@@ -2805,19 +3492,19 @@ async function savePaymentToSB(pmt){
   }
   return ok;
 }
- 
+
 async function saveGLToSB(je){
   const ok = await sbInsert('gl_entries', mapGLToDB(je));
   if(ok) DB.gl.unshift(je);
   return ok;
 }
- 
+
 async function saveFIFOLayerToSB(layer){
   const ok = await sbInsert('fifo_deliveries', mapFIFOToDB(layer));
   if(ok) DB.fifo.unshift(layer);
   return ok;
 }
- 
+
 async function saveRuleToSB(rule){
   const ok = await sbUpsert('fifo_rules', rule, {onConflict:'id'});
   if(ok){
@@ -2826,13 +3513,13 @@ async function saveRuleToSB(rule){
   }
   return ok;
 }
- 
+
 async function deleteRuleFromSB(id){
   const ok = await sbDelete('fifo_rules', id);
   if(ok) DB.rules = DB.rules.filter(r=>r.id!==id);
   return ok;
 }
- 
+
 async function saveIngredientToSB(ing){
   const ok = await sbUpsert('ingredients', ing, {onConflict:'name'});
   if(ok){
@@ -2842,7 +3529,7 @@ async function saveIngredientToSB(ing){
   }
   return ok;
 }
- 
+
 async function saveRecipesToSB(menuItem, lines){
   // Delete old lines for this menu item then insert new ones
   const {error:delErr} = await _sb.from('recipes').delete().eq('menu_item', menuItem);
@@ -2858,14 +3545,14 @@ async function saveRecipesToSB(menuItem, lines){
   lines.forEach(l=>DB.recipes.push(l));
   return true;
 }
- 
+
 async function deleteMenuItemFromSB(menuItem){
   const {error} = await _sb.from('recipes').delete().eq('menu_item', menuItem);
   if(error){console.error('Delete menu item error',error);return false}
   DB.recipes = DB.recipes.filter(r=>r.menu_item!==menuItem);
   return true;
 }
- 
+
 async function savePastrySkuToSB(sku){
   const dbSku = {name:sku.name, code:sku.code, unit_price:sku.unitPrice, notes:sku.notes, active:sku.active};
   const ok = await sbUpsert('pastry_skus', dbSku, {onConflict:'name'});
@@ -2875,7 +3562,7 @@ async function savePastrySkuToSB(sku){
   }
   return ok;
 }
- 
+
 async function savePastryLogEntriesToSB(entries){
   // entries is array of {date, sku, received?, billed?, unitPrice?, invoiceId?}
   for(const e of entries){
@@ -2894,7 +3581,7 @@ async function savePastryLogEntriesToSB(entries){
   }
   return true;
 }
- 
+
 // ==================================================
 // MIGRATION TOOL
 // One-time tool to load JSON backup into Supabase
@@ -2902,7 +3589,7 @@ async function savePastryLogEntriesToSB(entries){
 async function runMigration(jsonData){
   showLoadingOverlay('Migrating data to Supabase...');
   const results = [];
- 
+
   try{
     // Vendors
     if(jsonData.vendors?.length){
@@ -2915,7 +3602,7 @@ async function runMigration(jsonData){
       const {error} = await _sb.from('vendors').upsert(rows);
       results.push('Vendors: '+(error?'ERROR: '+error.message:rows.length+' records'));
     }
- 
+
     // Invoices
     if(jsonData.invoices?.length){
       const rows = jsonData.invoices.map(inv=>({
@@ -2933,14 +3620,14 @@ async function runMigration(jsonData){
       const {error} = await _sb.from('invoices').upsert(rows);
       results.push('Invoices: '+(error?'ERROR: '+error.message:rows.length+' records'));
     }
- 
+
     // Payments
     if(jsonData.payments?.length){
       const rows = jsonData.payments.map(mapPaymentToDB);
       const {error} = await _sb.from('payments').upsert(rows);
       results.push('Payments: '+(error?'ERROR: '+error.message:rows.length+' records'));
     }
- 
+
     // GL entries
     if(jsonData.gl?.length){
       const rows = jsonData.gl.map(je=>({
@@ -2954,7 +3641,7 @@ async function runMigration(jsonData){
       const {error} = await _sb.from('gl_entries').upsert(rows, {onConflict:'id'});
       results.push('GL Entries: '+(error?'ERROR: '+error.message:rows.length+' records'));
     }
- 
+
     // FIFO deliveries
     if(jsonData.fifo?.length){
       const rows = jsonData.fifo.map(d=>({
@@ -2973,19 +3660,19 @@ async function runMigration(jsonData){
       const {error} = await _sb.from('fifo_deliveries').upsert(rows, {onConflict:'id'});
       results.push('FIFO Layers: '+(error?'ERROR: '+error.message:rows.length+' records'));
     }
- 
+
     // Matching rules
     if(jsonData.rules?.length){
       const {error} = await _sb.from('fifo_rules').upsert(jsonData.rules, {onConflict:'id'});
       results.push('Rules: '+(error?'ERROR: '+error.message:jsonData.rules.length+' records'));
     }
- 
+
     // Ingredients
     if(jsonData.ingredients?.length){
       const {error} = await _sb.from('ingredients').upsert(jsonData.ingredients, {onConflict:'name'});
       results.push('Ingredients: '+(error?'ERROR: '+error.message:jsonData.ingredients.length+' records'));
     }
- 
+
     // Recipes
     if(jsonData.recipes?.length){
       const {error} = await _sb.from('recipes').upsert(jsonData.recipes.map(r=>({
@@ -2994,7 +3681,7 @@ async function runMigration(jsonData){
       })));
       results.push('Recipes: '+(error?'ERROR: '+error.message:jsonData.recipes.length+' records'));
     }
- 
+
     // Pastry log
     if(jsonData.pastryLog?.length){
       const rows = jsonData.pastryLog.map(e=>({
@@ -3010,7 +3697,7 @@ async function runMigration(jsonData){
       const {error} = await _sb.from('pastry_log').insert(rows);
       results.push('Pastry Log: '+(error?'ERROR: '+error.message:rows.length+' records'));
     }
- 
+
     // Pastry SKUs
     if(jsonData.pastrySkus?.length){
       const rows = jsonData.pastrySkus.map(s=>({
@@ -3022,10 +3709,10 @@ async function runMigration(jsonData){
       const {error} = await _sb.from('pastry_skus').insert(rows);
       results.push('Pastry SKUs: '+(error?'ERROR: '+error.message:rows.length+' records'));
     }
- 
+
     // Save sequences to localStorage
     if(jsonData.sequences) save('bc_seq', jsonData.sequences);
- 
+
     hideLoadingOverlay();
     return results;
   }catch(e){
@@ -3033,7 +3720,7 @@ async function runMigration(jsonData){
     return ['FATAL ERROR: '+e.message];
   }
 }
- 
+
 function openMigrationTool(){
   openModal(`<div class="modal" style="max-width:600px">
     <div class="modal-header">
@@ -3061,7 +3748,7 @@ function openMigrationTool(){
     </div>
   </div>`);
 }
- 
+
 async function handleMigrationFile(input){
   const file = input.files[0];
   if(!file) return;
@@ -3092,8 +3779,8 @@ async function handleMigrationFile(input){
   };
   reader.readAsText(file);
 }
- 
- 
+
+
 async function exportData(){
   showLoadingOverlay('Preparing backup...');
   try{
@@ -3127,12 +3814,12 @@ async function exportData(){
     showToast('Backup saved -- '+snap._meta.counts.invoices+' invoices, '+snap._meta.counts.vendors+' vendors');
   }catch(e){hideLoadingOverlay();showToast('Export failed: '+e.message,'warn')}
 }
- 
+
 function triggerImport(){
   if(!confirm('Restoring will REPLACE all current data.\n\nExport a backup first if needed.\n\nContinue?'))return;
   $('import-file-input').value='';$('import-file-input').click();
 }
- 
+
 function importData(input){
   const file=input.files[0];if(!file)return;
   const reader=new FileReader();
@@ -3157,17 +3844,17 @@ function importData(input){
   };
   reader.readAsText(file);
 }
- 
+
 // ═══════════════════════════════════════════════
 // EXPORT / IMPORT
 // ═══════════════════════════════════════════════
 // exportData defined above
- 
+
 // triggerImport defined above
- 
+
 // importData defined above
- 
- 
+
+
 function showToast(msg){
   const t=document.getElementById('bc-toast');if(t)t.remove();
   const toast=document.createElement('div');toast.id='bc-toast';toast.textContent=msg;
@@ -3176,7 +3863,7 @@ function showToast(msg){
   setTimeout(()=>{toast.style.transition='opacity .3s';toast.style.opacity='0'},3200);
   setTimeout(()=>toast.remove(),3600);
 }
- 
+
 // ==================================================
 // INIT
 // ==================================================
