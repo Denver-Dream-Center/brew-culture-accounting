@@ -211,6 +211,29 @@
   .ch-cash{background:var(--green-lo);color:var(--green)}
   .ch-doordash{color:#E8470A;background:#FEF0EA}
   .rev-sidebar-stats{margin-top:auto;padding:14px 14px 16px;border-top:1px solid rgba(255,255,255,.10);font-size:11px}
+  /* Bank ledger */
+  .ledger-bal-bar{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:20px}
+  .ledger-bal-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:16px 20px}
+  .ledger-bal-bank{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-lo);margin-bottom:4px}
+  .ledger-bal-amt{font-size:22px;font-weight:700;font-family:var(--font-mono)}
+  .ledger-bal-sub{font-size:11px;color:var(--ink-lo);margin-top:2px}
+  .ledger-cr{color:var(--green)}
+  .ledger-dr{color:var(--red)}
+  /* Bank matching */
+  .match-pill{display:inline-block;padding:2px 8px;border-radius:20px;font-size:10px;font-weight:700;letter-spacing:.03em;text-transform:uppercase}
+  .match-pill-open{background:var(--yellow-lo);color:#9B6A10}
+  .match-pill-matched{background:var(--green-lo);color:var(--green)}
+  .match-pill-direct{background:#EAE6F4;color:#6B5B95}
+  .match-row-list{max-height:340px;overflow-y:auto;border:1px solid var(--border);border-radius:var(--r);margin:12px 0}
+  .match-row-item{display:flex;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid var(--border-lo);cursor:pointer;transition:background .1s}
+  .match-row-item:last-child{border-bottom:none}
+  .match-row-item:hover{background:var(--amber-lo)}
+  .match-row-item.selected{background:var(--green-lo)}
+  .match-row-check{width:16px;height:16px;border:2px solid var(--border);border-radius:3px;flex-shrink:0;display:flex;align-items:center;justify-content:center}
+  .match-row-item.selected .match-row-check{background:var(--green);border-color:var(--green);color:#fff}
+  .match-summary-bar{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;background:var(--bg);border-radius:var(--r);margin-top:12px;font-size:13px}
+  .match-variance-ok{color:var(--green);font-weight:700}
+  .match-variance-bad{color:var(--red);font-weight:700}
 </style>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
@@ -400,6 +423,7 @@ const ERA_LABELS={dc:'Dream Center',troy:'Troy (Pre-Acq.)','dc-paid':'DC Paid fo
 
 const COA=[
   {acct:'1010',name:'Operating Checking',type:'Asset'},
+  {acct:'1011',name:'SouthState Bank',type:'Asset'},
   {acct:'1020',name:'Savings / Reserve',type:'Asset'},
   {acct:'1300',name:'Receivable — Prior Owner (Troy)',type:'Asset'},
   {acct:'1410',name:'Coffee Inventory',type:'Asset'},
@@ -749,6 +773,7 @@ function renderSidebar(){
       '<button class="nav-item" onclick="showView(\'rev-import\')" id="nav-rev-import"><span class="nav-icon">&#8593;</span> Clover Import</button>' +
       '<button class="nav-item" onclick="showView(\'rev-settlement\')" id="nav-rev-settlement"><span class="nav-icon">&#9632;</span> Settlement Log</button>' +
       '<button class="nav-item" onclick="showView(\'rev-cash\')" id="nav-rev-cash"><span class="nav-icon">&#9679;</span> Cash Log</button>' +
+      '<button class="nav-item" onclick="showView(\'bank-ledger\')" id="nav-bank-ledger"><span class="nav-icon">&#8942;</span> Bank Ledger</button>' +
       '<div class="sidebar-section">Data</div>' +
       '<button class="nav-item" onclick="exportData()"><span class="nav-icon">&#8595;</span> Export Backup</button>' +
       '<div class="rev-sidebar-stats">' +
@@ -825,8 +850,10 @@ async function launchModule(mod){
 // ═══════════════════════════════════════════════
 // In-memory cache for revenue data (loaded alongside AP data)
 var REV = {
-  settlements: [],   // daily_settlement rows
-  cashLog: []        // cash_collection_events rows
+  settlements: [],
+  cashLog: [],
+  bankLedger: [],
+  bankMatches: []   // bank_ledger_match rows: links bank_ledger.id -> payment.id OR settlement.id
 };
 
 // Modifier token -> ingredient mapping for COGS (costing only, not inventory deduction yet)
@@ -1079,6 +1106,14 @@ async function loadRevData(){
         notes: r.notes || '', imported_at: r.imported_at
       };
     });
+  }
+  var bl = await _sb.from('bank_ledger').select('*').order('pmnt_date', {ascending:true});
+  if(!bl.error && bl.data){
+    REV.bankLedger = bl.data;
+  }
+  var bm = await _sb.from('bank_ledger_match').select('*');
+  if(!bm.error && bm.data){
+    REV.bankMatches = bm.data;
   }
 }
 
@@ -1543,7 +1578,8 @@ function showView(view){
     'rev-dashboard':['Revenue Dashboard','Daily settlement \xb7 channel summary'],
     'rev-import':['Clover Import','Upload and parse Clover export'],
     'rev-settlement':['Settlement Log','All daily settlements'],
-    'rev-cash':['Cash Log','Daily cash revenue']
+    'rev-cash':['Cash Log','Daily cash revenue'],
+    'bank-ledger':['Bank Ledger','Transaction register \xb7 Glacier \xb7 SouthState']
   };
   const[title,sub]=titles[view]||['--',''];
   $('page-title').textContent=title;$('page-sub').textContent=sub;
@@ -1557,7 +1593,8 @@ function showView(view){
     'pastry-close':renderPastryClose,'pastry-tracker':renderPastryTracker,
     'pastry-skus':renderPastrySkus,
     'rev-dashboard':renderRevDashboard,'rev-import':renderRevImport,
-    'rev-settlement':renderRevSettlement,'rev-cash':renderRevCash
+    'rev-settlement':renderRevSettlement,'rev-cash':renderRevCash,
+    'bank-ledger':renderBankLedger
   };
   if(renders[view])renders[view]();
 }
@@ -3497,6 +3534,695 @@ async function runRebelBreadPastryExtraction(file, inv){
 // ==================================================
 // AUTHENTICATION
 // ==================================================
+// ═══════════════════════════════════════════════
+// BANK LEDGER MODULE
+// ═══════════════════════════════════════════════
+var BL_BANKS       = ['SouthState Bank','Glacier Bank'];
+var BL_TRANS_TYPES = ['Credit','Debit'];
+var BL_STMT_TYPES  = ['','P&L','Balance Sheet'];
+var BL_STMT_SEC    = ['','1 Revenue','2 Expense'];
+var BL_STMT_CAT    = [
+  '','In Store Revenue','Online Revenue','Event Revenue',
+  'Loan from DDC','Payroll','Payroll Fees / Taxes','401k Contribution',
+  'Coffee Exp','Food Exp','Milk Exp','Chai Exp','Syrup Exp',
+  'Matcha Exp','Tea Exp','Credit Card Pmnt','Other Fees','Daily Sales Sweep'
+];
+// "Account" drives matching eligibility — keep in sync with BL_AP_ACCOUNTS / BL_REV_ACCOUNTS below
+var BL_ACCOUNT_VALUES = [
+  '','In Store Revenue','Online Revenue','Event Revenue','Loan from DDC',
+  'Payroll','Payroll Fees / Taxes','Payroll Fees','Payroll Taxes','401k Contribution',
+  'Coffee Exp','Food Exp','Milk Exp','Chai Exp','Syrup Exp','Matcha Exp','Tea Exp',
+  'Kombucha Exp','Supply Exp','Credit Card Payment','Other Fees','Bank Fees',
+  'POS Fees','Sales Fees','Sales Tax','Rent','Utilities','Phone & Internet',
+  'Equipment','Maintenance','Cleaning','Signage','Pre Transfer'
+];
+
+// Compute running balances — returns array of rows with .glacier_bal and .southstate_bal
+function computeLedgerBalances(rows){
+  // sort ascending by date then id
+  var sorted = rows.slice().sort(function(a,b){
+    var d = (a.pmnt_date||'').localeCompare(b.pmnt_date||'');
+    return d !== 0 ? d : (a.row_id||0) - (b.row_id||0);
+  });
+  var glacierBal = 0, southBal = 0;
+  return sorted.map(function(r){
+    var amt = parseFloat(r.gross_amount) || 0;
+    var isCredit = r.trans_type === 'Credit';
+    if(r.bank === 'Glacier Bank'){
+      glacierBal = isCredit ? glacierBal + amt : glacierBal - Math.abs(amt);
+      r._glacier_bal = Math.round(glacierBal * 100) / 100;
+      r._south_bal   = Math.round(southBal  * 100) / 100;
+    } else {
+      southBal  = isCredit ? southBal  + amt : southBal  - Math.abs(amt);
+      r._south_bal   = Math.round(southBal  * 100) / 100;
+      r._glacier_bal = Math.round(glacierBal * 100) / 100;
+    }
+    return r;
+  });
+}
+
+async function saveBankLedgerRow(row){
+  var res = await _sb.from('bank_ledger').upsert([row], {onConflict:'id'});
+  if(res.error){ console.error('saveBankLedgerRow', res.error); return false; }
+  return true;
+}
+
+async function deleteBankLedgerRow(id){
+  var res = await _sb.from('bank_ledger').delete().eq('id', id);
+  if(res.error){ console.error('deleteBankLedgerRow', res.error); return false; }
+  return true;
+}
+
+function renderBankLedger(){
+  $('topbar-actions').innerHTML = '<button class="btn btn-primary" onclick="openBankLedgerModal(null)">+ Add Transaction</button>';
+
+  var rows = computeLedgerBalances(REV.bankLedger);
+
+  // Current balances — last known for each bank
+  var glacierBal = 0, southBal = 0, glacierDate = '', southDate = '';
+  rows.forEach(function(r){
+    if(r.bank === 'Glacier Bank'){ glacierBal = r._glacier_bal; glacierDate = r.pmnt_date; }
+    else { southBal = r._south_bal; southDate = r.pmnt_date; }
+  });
+  var glacierBalColor = glacierBal >= 0 ? 'var(--green)' : 'var(--red)';
+  var southBalColor   = southBal   >= 0 ? 'var(--green)' : 'var(--red)';
+
+  // Match progress stats
+  var matchable = rows.filter(function(r){ return blMatchType(r) !== null; });
+  var openCount = matchable.filter(function(r){ return blRowStatus(r.id) === 'open'; }).length;
+  var matchedCount = matchable.filter(function(r){ return blRowStatus(r.id) === 'matched'; }).length;
+  var directCount = matchable.filter(function(r){ return blRowStatus(r.id) === 'direct'; }).length;
+  var pct = matchable.length > 0 ? Math.round((matchedCount+directCount)/matchable.length*100) : 0;
+
+  // Filter controls
+  var filterBank = window._blFilterBank || '';
+  var filterType = window._blFilterType || '';
+  var filterStatus = window._blFilterStatus || '';
+  var filterEra = window._blFilterEra || '';
+
+  var filtered = rows.slice().reverse();
+  if(filterBank) filtered = filtered.filter(function(r){ return r.bank === filterBank; });
+  if(filterType) filtered = filtered.filter(function(r){ return r.trans_type === filterType; });
+  if(filterStatus) filtered = filtered.filter(function(r){ return blRowStatus(r.id) === filterStatus; });
+  if(filterEra) filtered = filtered.filter(function(r){ return (r.era||'dc') === filterEra; });
+
+  var tableRows = filtered.map(function(r){
+    var amtColor = r.trans_type === 'Credit' ? 'var(--green)' : 'var(--red)';
+    var amtSign  = r.trans_type === 'Credit' ? '+' : '-';
+    var amt = Math.abs(parseFloat(r.gross_amount)||0);
+    var isGlacier = r.bank === 'Glacier Bank';
+    var runBal = isGlacier ? r._glacier_bal : r._south_bal;
+    var runBalColor = runBal >= 0 ? 'var(--ink)' : 'var(--red)';
+    var mType = blMatchType(r);
+    var status = blRowStatus(r.id);
+    var era = r.era || 'dc';
+    var statusPill = status === 'matched'
+      ? '<span class="match-pill match-pill-matched">Matched</span>'
+      : status === 'direct'
+        ? '<span class="match-pill match-pill-direct">Direct Exp</span>'
+        : status === 'pre-transfer'
+          ? '<span class="match-pill" style="background:#EDE7DD;color:#8A7860">Pre-Transfer</span>'
+          : (mType ? '<span class="match-pill match-pill-open">Open</span>' : '');
+    var actionBtn = '';
+    if(status === 'pre-transfer'){
+      actionBtn = '<span style="font-size:11px;color:var(--ink-lo)" title="Pre-transfer transaction — no AP/Revenue record exists to match against">No match (pre-transfer)</span>';
+    } else if(status === 'open' && mType === 'ap'){
+      actionBtn = '<button class="btn btn-ghost btn-sm" style="color:var(--amber)" onclick="openAPMatchModal(\'' + r.id + '\')">Match</button>';
+    } else if(status === 'open' && mType === 'revenue'){
+      actionBtn = '<button class="btn btn-ghost btn-sm" style="color:var(--amber)" onclick="openRevMatchModal(\'' + r.id + '\')">Match</button>';
+    } else if(status === 'matched' || status === 'direct'){
+      actionBtn = '<button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="unmatchBankRow(\'' + r.id + '\')">Unmatch</button>';
+    }
+    return '<tr>' +
+      '<td class="mono" style="color:var(--ink-lo);font-size:11px">' + (r.row_id||'') + '</td>' +
+      '<td class="mono">' + fmtDate(r.pmnt_date) + '</td>' +
+      '<td>' + eraPill(era) + '</td>' +
+      '<td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (r.customer_vendor||'') + '</td>' +
+      '<td style="max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink-mid);font-size:12px">' + (r.description||'') + '</td>' +
+      '<td style="font-size:11px">' + (r.stmt_category||'') + '</td>' +
+      '<td style="font-size:11px;color:var(--ink-mid)">' + (r.bank==='Glacier Bank'?'Glacier':'SouthState') + '</td>' +
+      '<td class="text-right mono fw600" style="color:' + amtColor + '">' + amtSign + fmt(amt) + '</td>' +
+      '<td class="text-right mono" style="color:' + runBalColor + '">' + fmt(runBal) + '</td>' +
+      '<td>' + statusPill + '</td>' +
+      '<td style="white-space:nowrap">' + actionBtn +
+      '<button class="btn btn-ghost btn-sm" onclick="openBankLedgerModal(\'' + r.id + '\')">&#9998;</button>' +
+      '<button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="confirmDeleteLedgerRow(\'' + r.id + '\')">&#215;</button></td>' +
+    '</tr>';
+  }).join('');
+
+  $('content').innerHTML =
+    '<div class="ledger-bal-bar" style="grid-template-columns:1fr 1fr 1fr">' +
+      '<div class="ledger-bal-card">' +
+        '<div class="ledger-bal-bank">SouthState Bank</div>' +
+        '<div class="ledger-bal-amt" style="color:' + southBalColor + '">' + fmt(southBal) + '</div>' +
+        '<div class="ledger-bal-sub">' + (southDate ? 'As of ' + fmtDate(southDate) : 'No transactions') + '</div>' +
+      '</div>' +
+      '<div class="ledger-bal-card">' +
+        '<div class="ledger-bal-bank">Glacier Bank</div>' +
+        '<div class="ledger-bal-amt" style="color:' + glacierBalColor + '">' + fmt(glacierBal) + '</div>' +
+        '<div class="ledger-bal-sub">' + (glacierDate ? 'As of ' + fmtDate(glacierDate) : 'No transactions') + '</div>' +
+      '</div>' +
+      '<div class="ledger-bal-card">' +
+        '<div class="ledger-bal-bank">Match Progress</div>' +
+        '<div class="ledger-bal-amt" style="color:' + (pct===100?'var(--green)':'var(--amber)') + '">' + pct + '%</div>' +
+        '<div class="ledger-bal-sub">' + openCount + ' open \xb7 ' + matchedCount + ' matched \xb7 ' + directCount + ' direct</div>' +
+      '</div>' +
+    '</div>' +
+    '<div class="card">' +
+      '<div class="card-header">' +
+        '<span class="card-title">Transactions (' + filtered.length + ')</span>' +
+        '<div style="display:flex;gap:8px;align-items:center">' +
+          '<select style="font-size:12px;padding:4px 8px;border:1px solid var(--border);border-radius:var(--r)" onchange="window._blFilterEra=this.value;renderBankLedger()">' +
+            '<option value="">All Eras</option>' +
+            '<option value="dc"' + (filterEra==='dc'?' selected':'') + '>Dream Center</option>' +
+            '<option value="troy"' + (filterEra==='troy'?' selected':'') + '>Troy (Pre-Transfer)</option>' +
+            '<option value="dc-paid"' + (filterEra==='dc-paid'?' selected':'') + '>DC Paid for Troy</option>' +
+          '</select>' +
+          '<select style="font-size:12px;padding:4px 8px;border:1px solid var(--border);border-radius:var(--r)" onchange="window._blFilterBank=this.value;renderBankLedger()">' +
+            '<option value="">All Banks</option>' +
+            BL_BANKS.map(function(b){ return '<option value="' + b + '"' + (filterBank===b?' selected':'') + '>' + b + '</option>'; }).join('') +
+          '</select>' +
+          '<select style="font-size:12px;padding:4px 8px;border:1px solid var(--border);border-radius:var(--r)" onchange="window._blFilterType=this.value;renderBankLedger()">' +
+            '<option value="">All Types</option>' +
+            BL_TRANS_TYPES.map(function(t){ return '<option value="' + t + '"' + (filterType===t?' selected':'') + '>' + t + '</option>'; }).join('') +
+          '</select>' +
+          '<select style="font-size:12px;padding:4px 8px;border:1px solid var(--border);border-radius:var(--r)" onchange="window._blFilterStatus=this.value;renderBankLedger()">' +
+            '<option value="">All Status</option>' +
+            '<option value="open"' + (filterStatus==='open'?' selected':'') + '>Open</option>' +
+            '<option value="matched"' + (filterStatus==='matched'?' selected':'') + '>Matched</option>' +
+            '<option value="direct"' + (filterStatus==='direct'?' selected':'') + '>Direct Exp</option>' +
+            '<option value="pre-transfer"' + (filterStatus==='pre-transfer'?' selected':'') + '>Pre-Transfer (N/A)</option>' +
+          '</select>' +
+        '</div>' +
+      '</div>' +
+      (filtered.length === 0
+        ? '<div class="empty-state"><div class="empty-icon">&#8942;</div><div>No transactions yet. Add one to get started.</div></div>'
+        : '<div class="tbl-wrap"><table>' +
+          '<thead><tr>' +
+            '<th>#</th><th>Date</th><th>Era</th><th>Vendor / Customer</th><th>Description</th>' +
+            '<th>Category</th><th>Bank</th>' +
+            '<th class="text-right">Amount</th><th class="text-right">Balance</th><th>Status</th><th></th>' +
+          '</tr></thead>' +
+          '<tbody>' + tableRows + '</tbody>' +
+          '</table></div>'
+      ) +
+    '</div>';
+}
+
+function openBankLedgerModal(editId){
+  var row = editId ? REV.bankLedger.find(function(r){ return r.id === editId; }) : null;
+  var v = function(field, def){ return row ? (row[field]||def||'') : (def||''); };
+  var selOpts = function(arr, val){ return arr.map(function(a){ return '<option value="' + a + '"' + (val===a?' selected':'') + '>' + (a||'-- none --') + '</option>'; }).join(''); };
+
+  openModal(
+    '<div class="modal" style="max-width:600px">' +
+      '<div class="modal-header">' +
+        '<div><div class="modal-title">' + (row ? 'Edit Transaction' : 'New Transaction') + '</div>' +
+        (row ? '<div class="modal-sub">Row ' + (row.row_id||row.id) + '</div>' : '') + '</div>' +
+        '<button class="close-btn" onclick="closeModal()">&#215;</button>' +
+      '</div>' +
+      '<div class="modal-body">' +
+        '<div class="form-grid">' +
+          '<div class="form-group"><label>Payment Date *</label><input type="date" id="bl-pmnt-date" value="' + v('pmnt_date') + '"></div>' +
+          '<div class="form-group"><label>Bank *</label><select id="bl-bank">' + selOpts(BL_BANKS, v('bank','SouthState Bank')) + '</select></div>' +
+          '<div class="form-group span-2"><label>Customer / Vendor *</label><input id="bl-vendor" value="' + v('customer_vendor') + '" placeholder="e.g. Gold Seal Distributing"></div>' +
+          '<div class="form-group span-2"><label>Description</label><input id="bl-desc" value="' + v('description') + '" placeholder="Bank transaction description or memo"></div>' +
+          '<div class="form-group"><label>Trans Type *</label><select id="bl-trans-type">' + selOpts(BL_TRANS_TYPES, v('trans_type','Debit')) + '</select></div>' +
+          '<div class="form-group"><label>Gross Amount *</label><input type="number" id="bl-amount" step="0.01" min="0" value="' + (row ? Math.abs(parseFloat(row.gross_amount)||0) : '') + '" placeholder="0.00"></div>' +
+          '<div class="form-group"><label>Pre / Post Transfer *</label>' + eraSelector(v('era','dc'), '-bl') +
+            '<input type="hidden" id="era-val-bl" value="' + v('era','dc') + '"></div>' +
+          '<div class="form-group"><label>Ck#</label><input id="bl-ck" value="' + v('ck_num') + '" placeholder="Check number"></div>' +
+          '<div class="form-group"><label>Statement Type</label><select id="bl-stmt-type" onchange="syncBLStmtSec()">' + selOpts(BL_STMT_TYPES, v('stmt_type')) + '</select></div>' +
+          '<div class="form-group"><label>Statement Section</label><select id="bl-stmt-sec">' + selOpts(BL_STMT_SEC, v('stmt_sec')) + '</select></div>' +
+          '<div class="form-group span-2"><label>Statement Category</label><select id="bl-stmt-cat">' + selOpts(BL_STMT_CAT, v('stmt_category')) + '</select></div>' +
+          '<div class="form-group span-2"><label>Account <span style="font-weight:400;color:var(--ink-lo)">(drives AP/Revenue matching)</span></label><select id="bl-account">' + selOpts(BL_ACCOUNT_VALUES, v('account')) + '</select></div>' +
+          '<div class="form-group span-2"><label>Note</label><input id="bl-note" value="' + v('note') + '" placeholder="Optional free-text note"></div>' +
+        '</div>' +
+        '<div id="bl-err" style="color:var(--red);font-size:12px;margin-top:8px"></div>' +
+      '</div>' +
+      '<div class="modal-footer">' +
+        '<button class="btn btn-ghost" onclick="closeModal()">Cancel</button>' +
+        '<button class="btn btn-primary" onclick="saveBankLedgerModal(\'' + (editId||'') + '\')">Save</button>' +
+      '</div>' +
+    '</div>'
+  );
+}
+
+function syncBLStmtSec(){
+  var t = $('bl-stmt-type');
+  var s = $('bl-stmt-sec');
+  if(!t || !s) return;
+  if(t.value === 'P&L' && !s.value){
+    // auto-suggest based on trans type
+    var tt = $('bl-trans-type');
+    s.value = (tt && tt.value === 'Credit') ? '1 Revenue' : '2 Expense';
+  }
+}
+
+async function saveBankLedgerModal(editId){
+  var errEl = $('bl-err');
+  var pmntDate = $('bl-pmnt-date').value;
+  var bank     = $('bl-bank').value;
+  var vendor   = $('bl-vendor').value.trim();
+  var transType= $('bl-trans-type').value;
+  var amtRaw   = parseFloat($('bl-amount').value) || 0;
+
+  if(!pmntDate){ errEl.textContent='Payment date required.'; return; }
+  if(!vendor)  { errEl.textContent='Customer/Vendor required.'; return; }
+  if(!amtRaw)  { errEl.textContent='Amount required.'; return; }
+
+  // Store amount as signed: negative for debits
+  var grossAmt = transType === 'Debit' ? -Math.abs(amtRaw) : Math.abs(amtRaw);
+
+  var id = editId || ('BL-' + Date.now());
+  // Preserve row_id for existing rows
+  var existingRow = editId ? REV.bankLedger.find(function(r){ return r.id === editId; }) : null;
+
+  var row = {
+    id: id,
+    row_id: existingRow ? existingRow.row_id : (REV.bankLedger.length + 1),
+    pmnt_date: pmntDate,
+    bank: bank,
+    customer_vendor: vendor,
+    description: $('bl-desc').value.trim(),
+    era: $('era-val-bl').value || 'dc',
+    stmt_type: $('bl-stmt-type').value,
+    stmt_sec: $('bl-stmt-sec').value,
+    stmt_category: $('bl-stmt-cat').value,
+    account: $('bl-account').value,
+    note: $('bl-note').value.trim(),
+    ck_num: $('bl-ck').value.trim(),
+    trans_type: transType,
+    gross_amount: grossAmt
+  };
+
+  showLoadingOverlay('Saving...');
+  var ok = await saveBankLedgerRow(row);
+  hideLoadingOverlay();
+  if(!ok){ errEl.textContent = 'Save failed. Check console.'; return; }
+
+  // Update in-memory cache
+  var idx = REV.bankLedger.findIndex(function(r){ return r.id === id; });
+  if(idx >= 0) REV.bankLedger[idx] = row;
+  else REV.bankLedger.push(row);
+
+  closeModal();
+  showToast(editId ? 'Transaction updated' : 'Transaction added');
+  renderBankLedger();
+}
+
+async function confirmDeleteLedgerRow(id){
+  var row = REV.bankLedger.find(function(r){ return r.id === id; });
+  if(!row) return;
+  if(!confirm('Delete this transaction?\n\n' + fmtDate(row.pmnt_date) + ' \u2014 ' + (row.customer_vendor||'') + ' \u2014 ' + fmt(Math.abs(parseFloat(row.gross_amount)||0)))) return;
+  showLoadingOverlay('Deleting...');
+  var ok = await deleteBankLedgerRow(id);
+  hideLoadingOverlay();
+  if(!ok){ showToast('Delete failed','warn'); return; }
+  REV.bankLedger = REV.bankLedger.filter(function(r){ return r.id !== id; });
+  showToast('Transaction deleted');
+  renderBankLedger();
+}
+
+// ═══════════════════════════════════════════════
+// BANK LEDGER MATCHING — AP & CLOVER REVENUE
+// ═══════════════════════════════════════════════
+
+// Account values that route to AP matching
+var BL_AP_ACCOUNTS = ['Coffee Exp','Food Exp','Chai Exp','Milk Exp','Kombucha Exp','Supply Exp','Syrup Exp','Matcha Exp','Tea Exp'];
+// Account values that route to Clover revenue matching
+var BL_REV_ACCOUNTS = ['In Store Revenue'];
+
+function blMatchType(row){
+  // Pre-transfer (Troy era) transactions have no corresponding AP/Revenue
+  // records in the post-transfer system — never offer matching.
+  var era = row.era || 'dc';
+  if(era === 'troy') return null;
+  if(BL_AP_ACCOUNTS.indexOf(row.account) !== -1) return 'ap';
+  if(BL_REV_ACCOUNTS.indexOf(row.account) !== -1) return 'revenue';
+  return null;
+}
+
+// Status for a bank ledger row: 'open' | 'matched' | 'direct' | 'pre-transfer'
+function blRowStatus(rowId){
+  var row = REV.bankLedger.find(function(r){ return r.id === rowId; });
+  if(row && (row.era||'dc') === 'troy') return 'pre-transfer';
+  var matches = REV.bankMatches.filter(function(m){ return m.bank_ledger_id === rowId; });
+  if(matches.length === 0) return 'open';
+  if(matches.some(function(m){ return m.match_kind === 'direct'; })) return 'direct';
+  return 'matched';
+}
+
+function blRowMatches(rowId){
+  return REV.bankMatches.filter(function(m){ return m.bank_ledger_id === rowId; });
+}
+
+async function saveBankMatch(row){
+  var res = await _sb.from('bank_ledger_match').insert([row]);
+  if(res.error){ console.error('saveBankMatch', res.error); return false; }
+  return true;
+}
+
+async function deleteBankMatchesForRow(rowId){
+  var res = await _sb.from('bank_ledger_match').delete().eq('bank_ledger_id', rowId);
+  if(res.error){ console.error('deleteBankMatchesForRow', res.error); return false; }
+  return true;
+}
+
+// ── AP MATCHING ─────────────────────────────────────────────────────────
+var _apMatchState = { rowId:null, vendorId:null, selectedInvoices:{} };
+
+function openAPMatchModal(rowId){
+  var row = REV.bankLedger.find(function(r){ return r.id === rowId; });
+  if(!row) return;
+  _apMatchState = { rowId: rowId, vendorId:null, selectedInvoices:{} };
+
+  var amtAbs = Math.abs(parseFloat(row.gross_amount)||0);
+  openModal(
+    '<div class="modal" style="max-width:560px">' +
+      '<div class="modal-header">' +
+        '<div><div class="modal-title">Match to AP Invoice</div>' +
+        '<div class="modal-sub">' + fmtDate(row.pmnt_date) + ' \u2014 ' + fmt(amtAbs) + ' \u2014 ' + (row.customer_vendor||'') + '</div></div>' +
+        '<button class="close-btn" onclick="closeModal()">&#215;</button>' +
+      '</div>' +
+      '<div class="modal-body">' +
+        '<div class="form-group">' +
+          '<label>Step 1 \u2014 Select Vendor</label>' +
+          '<select id="ap-match-vendor" onchange="loadAPMatchInvoices()">' +
+            '<option value="">-- Select vendor --</option>' +
+            DB.vendors.slice().sort(function(a,b){return (a.name||'').localeCompare(b.name||'');}).map(function(v){
+              return '<option value="' + v.id + '">' + v.name + '</option>';
+            }).join('') +
+          '</select>' +
+        '</div>' +
+        '<div id="ap-match-invoices"></div>' +
+        '<div id="ap-match-summary"></div>' +
+        '<div id="ap-match-err" style="color:var(--red);font-size:12px;margin-top:8px"></div>' +
+      '</div>' +
+      '<div class="modal-footer">' +
+        '<button class="btn btn-ghost" onclick="markAsDirectExpense(\'' + rowId + '\')">Mark as Direct Expense (no invoice)</button>' +
+        '<button class="btn btn-ghost" onclick="closeModal()">Cancel</button>' +
+        '<button class="btn btn-primary" id="ap-match-confirm" onclick="confirmAPMatch()" disabled>Confirm Match</button>' +
+      '</div>' +
+    '</div>'
+  );
+}
+
+function loadAPMatchInvoices(){
+  var vendorId = $('ap-match-vendor').value;
+  _apMatchState.vendorId = vendorId;
+  _apMatchState.selectedInvoices = {};
+  var listEl = $('ap-match-invoices');
+  if(!vendorId){ listEl.innerHTML=''; updateAPMatchSummary(); return; }
+
+  var openInvoices = DB.invoices.filter(function(inv){
+    return inv.vendorId === vendorId && inv.balance > 0.005;
+  }).sort(function(a,b){ return (a.date||'').localeCompare(b.date||''); });
+
+  if(openInvoices.length === 0){
+    listEl.innerHTML = '<div class="empty-state" style="padding:24px"><div>No open invoices for this vendor.</div></div>';
+    updateAPMatchSummary();
+    return;
+  }
+
+  listEl.innerHTML =
+    '<label style="margin-top:10px;display:block">Step 2 \u2014 Select Invoice(s)</label>' +
+    '<div class="match-row-list">' +
+      openInvoices.map(function(inv){
+        return '<div class="match-row-item" id="ap-inv-' + inv.id + '" onclick="toggleAPInvoiceSelect(\'' + inv.id + '\')">' +
+          '<div class="match-row-check">&#10003;</div>' +
+          '<div style="flex:1">' +
+            '<div style="font-weight:600;font-size:13px">' + (inv.invoiceNum||inv.id) + '</div>' +
+            '<div style="font-size:11px;color:var(--ink-lo)">' + fmtDate(inv.date) + ' \u2014 Balance: ' + fmt(inv.balance) + '</div>' +
+          '</div>' +
+          '<div class="mono fw600">' + fmt(inv.balance) + '</div>' +
+        '</div>';
+      }).join('') +
+    '</div>';
+}
+
+function toggleAPInvoiceSelect(invId){
+  var el = $('ap-inv-' + invId);
+  if(_apMatchState.selectedInvoices[invId]){
+    delete _apMatchState.selectedInvoices[invId];
+    el.classList.remove('selected');
+  } else {
+    _apMatchState.selectedInvoices[invId] = true;
+    el.classList.add('selected');
+  }
+  updateAPMatchSummary();
+}
+
+function updateAPMatchSummary(){
+  var row = REV.bankLedger.find(function(r){ return r.id === _apMatchState.rowId; });
+  var amtAbs = Math.abs(parseFloat(row.gross_amount)||0);
+  var selectedIds = Object.keys(_apMatchState.selectedInvoices);
+  var sumEl = $('ap-match-summary');
+  var btnEl = $('ap-match-confirm');
+
+  if(selectedIds.length === 0){
+    sumEl.innerHTML = '';
+    btnEl.disabled = true;
+    return;
+  }
+
+  var total = selectedIds.reduce(function(sum, id){
+    var inv = DB.invoices.find(function(i){ return i.id === id; });
+    return sum + (inv ? inv.balance : 0);
+  }, 0);
+  var variance = Math.round((amtAbs - total) * 100) / 100;
+
+  sumEl.innerHTML =
+    '<div class="match-summary-bar">' +
+      '<span>Bank Payment: <strong class="mono">' + fmt(amtAbs) + '</strong></span>' +
+      '<span>Selected Invoices: <strong class="mono">' + fmt(total) + '</strong></span>' +
+      '<span>Variance: <strong class="mono ' + (Math.abs(variance)<0.01?'match-variance-ok':'match-variance-bad') + '">' + (variance>=0?'+':'') + fmt(variance) + '</strong></span>' +
+    '</div>' +
+    (Math.abs(variance) >= 0.01
+      ? '<div style="font-size:12px;color:var(--ink-mid);margin-top:8px">A variance of ' + fmt(Math.abs(variance)) + ' will be booked as an expense ' + (variance>0?'credit':'debit') + ' in ' + fmtDate(row.pmnt_date) + '.</div>'
+      : '');
+
+  btnEl.disabled = false;
+}
+
+async function confirmAPMatch(){
+  var row = REV.bankLedger.find(function(r){ return r.id === _apMatchState.rowId; });
+  if(!row) return;
+  var selectedIds = Object.keys(_apMatchState.selectedInvoices);
+  if(selectedIds.length === 0) return;
+
+  var amtAbs = Math.abs(parseFloat(row.gross_amount)||0);
+  var invoices = selectedIds.map(function(id){ return DB.invoices.find(function(i){ return i.id === id; }); }).filter(Boolean);
+  var totalBalance = invoices.reduce(function(s,inv){ return s + inv.balance; }, 0);
+  var variance = Math.round((amtAbs - totalBalance) * 100) / 100;
+
+  showLoadingOverlay('Recording payment(s)...');
+
+  // Pay each invoice its own balance first (standard payment flow), then apply variance to the LAST invoice
+  for(var i = 0; i < invoices.length; i++){
+    var inv = invoices[i];
+    var isLast = (i === invoices.length - 1);
+    var payAmt = inv.balance;
+    if(isLast) payAmt = Math.max(0, inv.balance + variance); // absorb variance on last invoice
+    if(payAmt <= 0) continue;
+
+    var pmtId = nextSeq('PMT');
+    var pmt = {id:pmtId, era:ERA.DC, invoiceId:inv.id, vendorId:inv.vendorId, date:row.pmnt_date,
+               amount:payAmt, method:'ACH/Bank', ref:row.ck_num||'', memo:'Matched from bank ledger \u2014 ' + (row.customer_vendor||''), glPosted:true};
+    inv.amountPaid = (inv.amountPaid||0) + payAmt;
+    inv.balance = Math.max(0, inv.total - inv.amountPaid);
+    if(inv.balance < 0.005){ inv.balance = 0; inv.status = 'paid'; } else inv.status = 'partial';
+
+    var cashAcct = row.bank === 'Glacier Bank' ? '1010' : '1011';
+    var cashName = row.bank === 'Glacier Bank' ? 'Glacier Bank' : 'SouthState Bank';
+    var je = {id:nextGLId(), date:row.pmnt_date, ref:pmtId, era:ERA.DC,
+      memo:'Bank-matched payment \u2014 ' + vendorName(inv.vendorId) + ' ' + (row.ck_num||pmtId),
+      entries:[{acct:'2000',name:'Accounts Payable',dr:payAmt,cr:0},{acct:cashAcct,name:cashName,dr:0,cr:payAmt}]};
+
+    await savePaymentToSB(pmt);
+    await saveInvoiceToSB(inv);
+    await saveGLToSB(je);
+    DB.payments.push(pmt);
+
+    // Record the match link
+    await saveBankMatch({
+      id: 'BLM-' + Date.now() + '-' + i,
+      bank_ledger_id: row.id,
+      match_kind: 'ap_payment',
+      payment_id: pmtId,
+      invoice_id: inv.id,
+      amount: payAmt,
+      created_at: new Date().toISOString()
+    });
+    REV.bankMatches.push({id:'BLM-'+Date.now()+'-'+i, bank_ledger_id:row.id, match_kind:'ap_payment', payment_id:pmtId, invoice_id:inv.id, amount:payAmt});
+  }
+
+  hideLoadingOverlay();
+  closeModal();
+  showToast('Matched ' + invoices.length + ' invoice(s)' + (Math.abs(variance)>=0.01 ? ' \u2014 variance ' + fmt(variance) + ' booked' : ''));
+  updateSidebarStats();
+  if(currentView === 'bank-ledger') renderBankLedger();
+}
+
+async function markAsDirectExpense(rowId){
+  var row = REV.bankLedger.find(function(r){ return r.id === rowId; });
+  if(!row) return;
+  if(!confirm('Mark this as a direct expense with no AP invoice?\n\n' + fmtDate(row.pmnt_date) + ' \u2014 ' + fmt(Math.abs(parseFloat(row.gross_amount)||0)) + ' \u2014 ' + (row.customer_vendor||''))) return;
+
+  showLoadingOverlay('Recording direct expense...');
+  var amtAbs = Math.abs(parseFloat(row.gross_amount)||0);
+  var cashAcct = row.bank === 'Glacier Bank' ? '1010' : '1011';
+  var cashName = row.bank === 'Glacier Bank' ? 'Glacier Bank' : 'SouthState Bank';
+  var expAcctMap = {'Coffee Exp':'5010','Food Exp':'5020','Chai Exp':'5040','Milk Exp':'5040','Kombucha Exp':'5040','Supply Exp':'5040','Syrup Exp':'5040','Matcha Exp':'5040','Tea Exp':'5040'};
+  var expAcct = expAcctMap[row.account] || '5040';
+
+  var je = {id:nextGLId(), date:row.pmnt_date, ref:'DIRECT-'+row.id, era:ERA.DC,
+    memo:'Direct expense (no invoice) \u2014 ' + (row.customer_vendor||'') + ' \u2014 ' + row.account,
+    entries:[{acct:expAcct,name:row.account,dr:amtAbs,cr:0},{acct:cashAcct,name:cashName,dr:0,cr:amtAbs}]};
+  await saveGLToSB(je);
+
+  await saveBankMatch({
+    id: 'BLM-' + Date.now(),
+    bank_ledger_id: row.id,
+    match_kind: 'direct',
+    payment_id: null,
+    invoice_id: null,
+    amount: amtAbs,
+    created_at: new Date().toISOString()
+  });
+  REV.bankMatches.push({id:'BLM-'+Date.now(), bank_ledger_id:row.id, match_kind:'direct', payment_id:null, invoice_id:null, amount:amtAbs});
+
+  hideLoadingOverlay();
+  closeModal();
+  showToast('Recorded as direct expense');
+  if(currentView === 'bank-ledger') renderBankLedger();
+}
+
+// ── CLOVER REVENUE MATCHING ─────────────────────────────────────────────
+var _revMatchState = { rowId:null, selectedDates:{} };
+
+function openRevMatchModal(rowId){
+  var row = REV.bankLedger.find(function(r){ return r.id === rowId; });
+  if(!row) return;
+  _revMatchState = { rowId: rowId, selectedDates:{} };
+
+  var amtAbs = Math.abs(parseFloat(row.gross_amount)||0);
+  // Unmatched settlement dates: not already matched to a different bank row
+  var matchedDates = {};
+  REV.bankMatches.filter(function(m){ return m.match_kind === 'clover_revenue'; }).forEach(function(m){ matchedDates[m.settlement_date] = true; });
+
+  var unmatched = REV.settlements.filter(function(s){ return !matchedDates[s.date]; })
+    .sort(function(a,b){ return b.date.localeCompare(a.date); });
+
+  openModal(
+    '<div class="modal" style="max-width:560px">' +
+      '<div class="modal-header">' +
+        '<div><div class="modal-title">Match to Clover Settlement</div>' +
+        '<div class="modal-sub">' + fmtDate(row.pmnt_date) + ' \u2014 ' + fmt(amtAbs) + ' \u2014 ' + (row.customer_vendor||'') + '</div></div>' +
+        '<button class="close-btn" onclick="closeModal()">&#215;</button>' +
+      '</div>' +
+      '<div class="modal-body">' +
+        '<label>Select Settlement Date(s)</label>' +
+        (unmatched.length === 0
+          ? '<div class="empty-state" style="padding:24px"><div>No unmatched settlement dates available.</div></div>'
+          : '<div class="match-row-list">' +
+            unmatched.map(function(s){
+              var collected = s.cash_collected + s.card_collected;
+              return '<div class="match-row-item" id="rev-set-' + s.id + '" onclick="toggleRevDateSelect(\'' + s.id + '\')">' +
+                '<div class="match-row-check">&#10003;</div>' +
+                '<div style="flex:1">' +
+                  '<div style="font-weight:600;font-size:13px">' + fmtDate(s.date) + '</div>' +
+                  '<div style="font-size:11px;color:var(--ink-lo)">Cash: ' + fmt(s.cash_collected) + ' \u2014 Card: ' + fmt(s.card_collected) + '</div>' +
+                '</div>' +
+                '<div class="mono fw600">' + fmt(collected) + '</div>' +
+              '</div>';
+            }).join('') +
+            '</div>'
+        ) +
+        '<div id="rev-match-summary"></div>' +
+      '</div>' +
+      '<div class="modal-footer">' +
+        '<button class="btn btn-ghost" onclick="closeModal()">Cancel</button>' +
+        '<button class="btn btn-primary" id="rev-match-confirm" onclick="confirmRevMatch()" disabled>Confirm Match</button>' +
+      '</div>' +
+    '</div>'
+  );
+}
+
+function toggleRevDateSelect(settleId){
+  var el = $('rev-set-' + settleId);
+  if(_revMatchState.selectedDates[settleId]){
+    delete _revMatchState.selectedDates[settleId];
+    el.classList.remove('selected');
+  } else {
+    _revMatchState.selectedDates[settleId] = true;
+    el.classList.add('selected');
+  }
+  updateRevMatchSummary();
+}
+
+function updateRevMatchSummary(){
+  var row = REV.bankLedger.find(function(r){ return r.id === _revMatchState.rowId; });
+  var amtAbs = Math.abs(parseFloat(row.gross_amount)||0);
+  var selectedIds = Object.keys(_revMatchState.selectedDates);
+  var sumEl = $('rev-match-summary');
+  var btnEl = $('rev-match-confirm');
+
+  if(selectedIds.length === 0){ sumEl.innerHTML=''; btnEl.disabled=true; return; }
+
+  var total = selectedIds.reduce(function(sum, id){
+    var s = REV.settlements.find(function(x){ return x.id === id; });
+    return sum + (s ? (s.cash_collected + s.card_collected) : 0);
+  }, 0);
+  var variance = Math.round((amtAbs - total) * 100) / 100;
+
+  sumEl.innerHTML =
+    '<div class="match-summary-bar">' +
+      '<span>Bank Deposit: <strong class="mono">' + fmt(amtAbs) + '</strong></span>' +
+      '<span>Selected Settlement(s): <strong class="mono">' + fmt(total) + '</strong></span>' +
+      '<span>Variance: <strong class="mono ' + (Math.abs(variance)<0.01?'match-variance-ok':'match-variance-bad') + '">' + (variance>=0?'+':'') + fmt(variance) + '</strong></span>' +
+    '</div>';
+
+  btnEl.disabled = false;
+}
+
+async function confirmRevMatch(){
+  var row = REV.bankLedger.find(function(r){ return r.id === _revMatchState.rowId; });
+  if(!row) return;
+  var selectedIds = Object.keys(_revMatchState.selectedDates);
+  if(selectedIds.length === 0) return;
+
+  showLoadingOverlay('Recording match...');
+  for(var i = 0; i < selectedIds.length; i++){
+    var s = REV.settlements.find(function(x){ return x.id === selectedIds[i]; });
+    if(!s) continue;
+    var matchId = 'BLM-' + Date.now() + '-' + i;
+    var matchRow = {
+      id: matchId, bank_ledger_id: row.id, match_kind: 'clover_revenue',
+      payment_id: null, invoice_id: null, settlement_date: s.date,
+      amount: s.cash_collected + s.card_collected, created_at: new Date().toISOString()
+    };
+    await saveBankMatch(matchRow);
+    REV.bankMatches.push(matchRow);
+  }
+
+  hideLoadingOverlay();
+  closeModal();
+  showToast('Matched ' + selectedIds.length + ' settlement date(s)');
+  if(currentView === 'bank-ledger') renderBankLedger();
+}
+
+async function unmatchBankRow(rowId){
+  if(!confirm('Remove match(es) for this transaction? This does not reverse AP payments already recorded.')) return;
+  showLoadingOverlay('Removing match...');
+  var ok = await deleteBankMatchesForRow(rowId);
+  hideLoadingOverlay();
+  if(!ok){ showToast('Failed to remove match','warn'); return; }
+  REV.bankMatches = REV.bankMatches.filter(function(m){ return m.bank_ledger_id !== rowId; });
+  showToast('Match removed');
+  if(currentView === 'bank-ledger') renderBankLedger();
+}
+
 async function doLogin(){
   const email = document.getElementById('login-email').value.trim();
   const password = document.getElementById('login-password').value;
@@ -3963,6 +4689,3 @@ function showToast(msg){
 </script>
 </body>
 </html>
- 
-
-
