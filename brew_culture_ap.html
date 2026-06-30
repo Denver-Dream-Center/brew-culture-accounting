@@ -3846,13 +3846,9 @@ function renderBankLedger(){
       ? '<span class="match-pill match-pill-matched">Matched</span>'
       : status === 'direct'
         ? '<span class="match-pill match-pill-direct">Direct Exp</span>'
-        : status === 'pre-transfer'
-          ? '<span class="match-pill" style="background:#EDE7DD;color:#8A7860">Pre-Transfer</span>'
-          : (mType ? '<span class="match-pill match-pill-open">Open</span>' : '');
+        : (mType ? '<span class="match-pill match-pill-open">Open</span>' : '');
     var actionBtn = '';
-    if(status === 'pre-transfer'){
-      actionBtn = '<span style="font-size:11px;color:var(--ink-lo)" title="Pre-transfer transaction — no AP/Revenue record exists to match against">No match (pre-transfer)</span>';
-    } else if(status === 'open' && mType === 'ap'){
+    if(status === 'open' && mType === 'ap'){
       actionBtn = '<button class="btn btn-ghost btn-sm" style="color:var(--amber)" onclick="openAPMatchModal(\'' + r.id + '\')">Match</button>';
     } else if(status === 'open' && mType === 'revenue'){
       actionBtn = '<button class="btn btn-ghost btn-sm" style="color:var(--amber)" onclick="openRevMatchModal(\'' + r.id + '\')">Match</button>';
@@ -3917,7 +3913,6 @@ function renderBankLedger(){
             '<option value="open"' + (filterStatus==='open'?' selected':'') + '>Open</option>' +
             '<option value="matched"' + (filterStatus==='matched'?' selected':'') + '>Matched</option>' +
             '<option value="direct"' + (filterStatus==='direct'?' selected':'') + '>Direct Exp</option>' +
-            '<option value="pre-transfer"' + (filterStatus==='pre-transfer'?' selected':'') + '>Pre-Transfer (N/A)</option>' +
           '</select>' +
         '</div>' +
       '</div>' +
@@ -4016,17 +4011,17 @@ async function saveBankLedgerModal(editId){
 
   var newEra = $('era-val-bl').value || 'dc';
 
-  // Guard: changing TO Troy (pre-transfer) era on a row that already has
-  // active AP/Revenue matches would leave those payments/settlements
-  // orphaned in an inconsistent state. Require unmatching first.
+  // Guard: era on a matched row is derived from its matched invoice(s) and
+  // should never be hand-edited — the modal hides the selector for matched
+  // rows, but this is a backstop in case of direct manipulation.
   if(editId){
     var existingMatches = blRowMatches(editId);
     var hadEra = REV.bankLedger.find(function(r){ return r.id === editId; });
     var oldEra = hadEra ? (hadEra.era||'dc') : 'dc';
-    if(newEra === 'troy' && oldEra !== 'troy' && existingMatches.length > 0){
-      errEl.innerHTML = 'This transaction is already matched to ' + existingMatches.length +
-        ' AP payment(s)/settlement(s). Click <strong>Unmatch</strong> on the ledger row first, ' +
-        'then re-edit to set it as Pre-Transfer.';
+    if(newEra !== oldEra && existingMatches.length > 0){
+      errEl.innerHTML = 'This transaction is matched to ' + existingMatches.length +
+        ' AP payment(s)/settlement(s) \u2014 era is derived from the match and can\'t be edited directly. ' +
+        'Click <strong>Unmatch</strong> on the ledger row to change it.';
       return;
     }
   }
@@ -4094,19 +4089,18 @@ var BL_AP_ACCOUNTS = ['Coffee Exp','Food Exp','Chai Exp','Milk Exp','Kombucha Ex
 var BL_REV_ACCOUNTS = ['In Store Revenue'];
 
 function blMatchType(row){
-  // Pre-transfer (Troy era) transactions have no corresponding AP/Revenue
-  // records in the post-transfer system — never offer matching.
-  var era = row.era || 'dc';
-  if(era === 'troy') return null;
+  // Era does NOT gate matching. Pre-transfer (Troy) bank transactions can
+  // be intentionally matched to Troy-era invoices loaded into AP — era is
+  // derived FROM the match, never a precondition for it.
   if(BL_AP_ACCOUNTS.indexOf(row.account) !== -1) return 'ap';
   if(BL_REV_ACCOUNTS.indexOf(row.account) !== -1) return 'revenue';
   return null;
 }
 
-// Status for a bank ledger row: 'open' | 'matched' | 'direct' | 'pre-transfer'
+// Status for a bank ledger row: 'open' | 'matched' | 'direct'
+// Note: era (dc/troy/dc-paid/mixed) is shown as a separate column/pill and
+// no longer participates in match status — a row can be both Troy-era and Matched.
 function blRowStatus(rowId){
-  var row = REV.bankLedger.find(function(r){ return r.id === rowId; });
-  if(row && (row.era||'dc') === 'troy') return 'pre-transfer';
   var matches = REV.bankMatches.filter(function(m){ return m.bank_ledger_id === rowId; });
   if(matches.length === 0) return 'open';
   if(matches.some(function(m){ return m.match_kind === 'direct'; })) return 'direct';
