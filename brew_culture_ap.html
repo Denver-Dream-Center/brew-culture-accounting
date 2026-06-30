@@ -84,6 +84,7 @@
   .era-dc{background:var(--green-lo);color:var(--green)}
   .era-troy{background:var(--troy-lo);color:var(--troy)}
   .era-dc-paid{background:#FFE8CC;color:#8B4500}
+  .era-mixed{background:#EAE3F4;color:#6B4FA0}
   .inv-pill{display:inline-flex;align-items:center;gap:3px;padding:2px 6px;border-radius:20px;font-size:10px;font-weight:600;background:var(--inv-lo);color:var(--inv)}
   .form-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
   .form-group{display:flex;flex-direction:column;gap:5px}
@@ -736,7 +737,7 @@ const vendorName=id=>{const v=DB.vendors.find(x=>x.id===id);return v?v.name:id};
 const acctLabel=c=>{const a=COA.find(x=>x.acct===c);return a?`${c} · ${a.name}`:c};
 function inferStatus(inv){if(inv.status==='void')return'void';if(inv.amountPaid<=0)return isOverdue(inv)?'overdue':'open';if(inv.amountPaid>=inv.total)return'paid';return'partial'}
 function badgeHtml(s){const c={open:'badge-open',partial:'badge-partial',paid:'badge-paid',void:'badge-void',overdue:'badge-overdue'};return`<span class="badge ${c[s]||'badge-open'}">${s.charAt(0).toUpperCase()+s.slice(1)}</span>`}
-function eraPill(e){const cfg={dc:['era-dc','● DC'],troy:['era-troy','◇ Troy'],'dc-paid':['era-dc-paid','↑ DC→Troy']};const[cls,lbl]=cfg[e]||['era-dc','DC'];return`<span class="era-pill ${cls}">${lbl}</span>`}
+function eraPill(e){const cfg={dc:['era-dc','● DC'],troy:['era-troy','◇ Troy'],'dc-paid':['era-dc-paid','↑ DC→Troy'],mixed:['era-mixed','◐ Mixed']};const[cls,lbl]=cfg[e]||['era-dc','DC'];return`<span class="era-pill ${cls}">${lbl}</span>`}
 
 function troyReceivable(){
   let balance=0;const lines=[];
@@ -3939,6 +3940,24 @@ function openBankLedgerModal(editId){
   var v = function(field, def){ return row ? (row[field]||def||'') : (def||''); };
   var selOpts = function(arr, val){ return arr.map(function(a){ return '<option value="' + a + '"' + (val===a?' selected':'') + '>' + (a||'-- none --') + '</option>'; }).join(''); };
 
+  var matches = editId ? blRowMatches(editId) : [];
+  var hasApMatches = matches.some(function(m){ return m.match_kind === 'ap_payment'; });
+  var eraField;
+  if(hasApMatches){
+    // Era is derived from matched invoices — show locked display, not an editable selector
+    var derivedEra = v('era','dc');
+    var eraLabel = derivedEra === 'mixed' ? 'Mixed (split-era match)' : (ERA_LABELS[derivedEra] || derivedEra);
+    eraField = '<div class="form-group"><label>Pre / Post Transfer</label>' +
+      '<div style="padding:9px 12px;background:var(--bg);border:1px solid var(--border);border-radius:var(--r);font-size:13px;display:flex;align-items:center;gap:8px">' +
+        eraPill(derivedEra === 'mixed' ? 'dc' : derivedEra) +
+        '<span style="color:var(--ink-mid)">' + eraLabel + ' \u2014 derived from matched invoice(s)</span>' +
+      '</div>' +
+      '<input type="hidden" id="era-val-bl" value="' + derivedEra + '"></div>';
+  } else {
+    eraField = '<div class="form-group"><label>Pre / Post Transfer *</label>' + eraSelector(v('era','dc'), '-bl') +
+      '<input type="hidden" id="era-val-bl" value="' + v('era','dc') + '"></div>';
+  }
+
   openModal(
     '<div class="modal" style="max-width:600px">' +
       '<div class="modal-header">' +
@@ -3954,8 +3973,7 @@ function openBankLedgerModal(editId){
           '<div class="form-group span-2"><label>Description</label><input id="bl-desc" value="' + v('description') + '" placeholder="Bank transaction description or memo"></div>' +
           '<div class="form-group"><label>Trans Type *</label><select id="bl-trans-type">' + selOpts(BL_TRANS_TYPES, v('trans_type','Debit')) + '</select></div>' +
           '<div class="form-group"><label>Gross Amount *</label><input type="number" id="bl-amount" step="0.01" min="0" value="' + (row ? Math.abs(parseFloat(row.gross_amount)||0) : '') + '" placeholder="0.00"></div>' +
-          '<div class="form-group"><label>Pre / Post Transfer *</label>' + eraSelector(v('era','dc'), '-bl') +
-            '<input type="hidden" id="era-val-bl" value="' + v('era','dc') + '"></div>' +
+          eraField +
           '<div class="form-group"><label>Ck#</label><input id="bl-ck" value="' + v('ck_num') + '" placeholder="Check number"></div>' +
           '<div class="form-group"><label>Statement Type</label><select id="bl-stmt-type" onchange="syncBLStmtSec()">' + selOpts(BL_STMT_TYPES, v('stmt_type')) + '</select></div>' +
           '<div class="form-group"><label>Statement Section</label><select id="bl-stmt-sec">' + selOpts(BL_STMT_SEC, v('stmt_sec')) + '</select></div>' +
@@ -3996,6 +4014,23 @@ async function saveBankLedgerModal(editId){
   if(!vendor)  { errEl.textContent='Customer/Vendor required.'; return; }
   if(!amtRaw)  { errEl.textContent='Amount required.'; return; }
 
+  var newEra = $('era-val-bl').value || 'dc';
+
+  // Guard: changing TO Troy (pre-transfer) era on a row that already has
+  // active AP/Revenue matches would leave those payments/settlements
+  // orphaned in an inconsistent state. Require unmatching first.
+  if(editId){
+    var existingMatches = blRowMatches(editId);
+    var hadEra = REV.bankLedger.find(function(r){ return r.id === editId; });
+    var oldEra = hadEra ? (hadEra.era||'dc') : 'dc';
+    if(newEra === 'troy' && oldEra !== 'troy' && existingMatches.length > 0){
+      errEl.innerHTML = 'This transaction is already matched to ' + existingMatches.length +
+        ' AP payment(s)/settlement(s). Click <strong>Unmatch</strong> on the ledger row first, ' +
+        'then re-edit to set it as Pre-Transfer.';
+      return;
+    }
+  }
+
   // Store amount as signed: negative for debits
   var grossAmt = transType === 'Debit' ? -Math.abs(amtRaw) : Math.abs(amtRaw);
 
@@ -4010,7 +4045,7 @@ async function saveBankLedgerModal(editId){
     bank: bank,
     customer_vendor: vendor,
     description: $('bl-desc').value.trim(),
-    era: $('era-val-bl').value || 'dc',
+    era: newEra,
     stmt_type: $('bl-stmt-type').value,
     stmt_sec: $('bl-stmt-sec').value,
     stmt_category: $('bl-stmt-cat').value,
@@ -4216,12 +4251,22 @@ async function confirmAPMatch(){
   var selectedIds = Object.keys(_apMatchState.selectedInvoices);
   if(selectedIds.length === 0) return;
 
+  var btnEl = $('ap-match-confirm');
+  if(btnEl){
+    if(btnEl.disabled && btnEl.dataset.submitting === '1') return; // already in flight
+    btnEl.disabled = true;
+    btnEl.dataset.submitting = '1';
+    btnEl.textContent = 'Recording...';
+  }
+
   var amtAbs = Math.abs(parseFloat(row.gross_amount)||0);
   var invoices = selectedIds.map(function(id){ return DB.invoices.find(function(i){ return i.id === id; }); }).filter(Boolean);
   var totalBalance = invoices.reduce(function(s,inv){ return s + inv.balance; }, 0);
   var variance = Math.round((amtAbs - totalBalance) * 100) / 100;
 
   showLoadingOverlay('Recording payment(s)...');
+
+  var erasUsed = {};
 
   // Pay each invoice its own balance first (standard payment flow), then apply variance to the LAST invoice
   for(var i = 0; i < invoices.length; i++){
@@ -4231,8 +4276,13 @@ async function confirmAPMatch(){
     if(isLast) payAmt = Math.max(0, inv.balance + variance); // absorb variance on last invoice
     if(payAmt <= 0) continue;
 
+    // Era is derived from the invoice being paid, not hardcoded — a bank
+    // payment that settles a Troy-era invoice produces a Troy-era payment.
+    var invEra = inv.era || ERA.DC;
+    erasUsed[invEra] = true;
+
     var pmtId = nextSeq('PMT');
-    var pmt = {id:pmtId, era:ERA.DC, invoiceId:inv.id, vendorId:inv.vendorId, date:row.pmnt_date,
+    var pmt = {id:pmtId, era:invEra, invoiceId:inv.id, vendorId:inv.vendorId, date:row.pmnt_date,
                amount:payAmt, method:'ACH/Bank', ref:row.ck_num||'', memo:'Matched from bank ledger \u2014 ' + (row.customer_vendor||''), glPosted:true};
     inv.amountPaid = (inv.amountPaid||0) + payAmt;
     inv.balance = Math.max(0, inv.total - inv.amountPaid);
@@ -4240,8 +4290,8 @@ async function confirmAPMatch(){
 
     var cashAcct = row.bank === 'Glacier Bank' ? '1010' : '1011';
     var cashName = row.bank === 'Glacier Bank' ? 'Glacier Bank' : 'SouthState Bank';
-    var je = {id:nextGLId(), date:row.pmnt_date, ref:pmtId, era:ERA.DC,
-      memo:'Bank-matched payment \u2014 ' + vendorName(inv.vendorId) + ' ' + (row.ck_num||pmtId),
+    var je = {id:nextGLId(), date:row.pmnt_date, ref:pmtId, era:invEra,
+      memo:'Bank-matched payment'+(invEra==='troy'?' (Troy-era)':invEra==='dc-paid'?' (DC paid for Troy)':'')+' \u2014 ' + vendorName(inv.vendorId) + ' ' + (row.ck_num||pmtId),
       entries:[{acct:'2000',name:'Accounts Payable',dr:payAmt,cr:0},{acct:cashAcct,name:cashName,dr:0,cr:payAmt}]};
 
     await savePaymentToSB(pmt);
@@ -4262,9 +4312,28 @@ async function confirmAPMatch(){
     REV.bankMatches.push({id:'BLM-'+Date.now()+'-'+i, bank_ledger_id:row.id, match_kind:'ap_payment', payment_id:pmtId, invoice_id:inv.id, amount:payAmt});
   }
 
+  // Derive the bank ledger row's own era from the era(s) of invoices it paid.
+  // All one era -> that era. More than one distinct era -> 'mixed'.
+  var distinctEras = Object.keys(erasUsed);
+  var derivedRowEra = distinctEras.length === 1 ? distinctEras[0] : (distinctEras.length > 1 ? 'mixed' : (row.era||'dc'));
+  if(derivedRowEra !== row.era){
+    row.era = derivedRowEra;
+    await saveBankLedgerRow({
+      id: row.id, row_id: row.row_id, pmnt_date: row.pmnt_date, bank: row.bank,
+      customer_vendor: row.customer_vendor, description: row.description,
+      era: derivedRowEra, note: row.note||'', stmt_type: row.stmt_type||'',
+      stmt_sec: row.stmt_sec||'', stmt_category: row.stmt_category||'',
+      account: row.account||'', ck_num: row.ck_num||'', trans_type: row.trans_type,
+      gross_amount: row.gross_amount
+    });
+    var idx = REV.bankLedger.findIndex(function(r){ return r.id === row.id; });
+    if(idx >= 0) REV.bankLedger[idx].era = derivedRowEra;
+  }
+
   hideLoadingOverlay();
   closeModal();
-  showToast('Matched ' + invoices.length + ' invoice(s)' + (Math.abs(variance)>=0.01 ? ' \u2014 variance ' + fmt(variance) + ' booked' : ''));
+  var eraNote = distinctEras.length > 1 ? ' \u2014 mixed era (split across ' + distinctEras.join('/') + ')' : '';
+  showToast('Matched ' + invoices.length + ' invoice(s)' + (Math.abs(variance)>=0.01 ? ' \u2014 variance ' + fmt(variance) + ' booked' : '') + eraNote);
   updateSidebarStats();
   if(currentView === 'bank-ledger') renderBankLedger();
 }
@@ -4397,6 +4466,14 @@ async function confirmRevMatch(){
   var selectedIds = Object.keys(_revMatchState.selectedDates);
   if(selectedIds.length === 0) return;
 
+  var btnEl = $('rev-match-confirm');
+  if(btnEl){
+    if(btnEl.disabled && btnEl.dataset.submitting === '1') return;
+    btnEl.disabled = true;
+    btnEl.dataset.submitting = '1';
+    btnEl.textContent = 'Recording...';
+  }
+
   showLoadingOverlay('Recording match...');
   for(var i = 0; i < selectedIds.length; i++){
     var s = REV.settlements.find(function(x){ return x.id === selectedIds[i]; });
@@ -4418,13 +4495,70 @@ async function confirmRevMatch(){
 }
 
 async function unmatchBankRow(rowId){
-  if(!confirm('Remove match(es) for this transaction? This does not reverse AP payments already recorded.')) return;
+  var matches = blRowMatches(rowId);
+  var apMatches = matches.filter(function(m){ return m.match_kind === 'ap_payment'; });
+
+  var reverseToo = false;
+  if(apMatches.length > 0){
+    reverseToo = confirm(
+      'This transaction is matched to ' + apMatches.length + ' AP payment(s).\n\n' +
+      'Click OK to remove the match AND reverse the payment(s) — this will restore ' +
+      'the invoice balance(s) and delete the associated GL entries.\n\n' +
+      'Click Cancel to remove only the match link and leave the payment(s) in place.'
+    );
+    if(!reverseToo){
+      if(!confirm('Remove match link only? The payment(s) will remain recorded in AP.')) return;
+    }
+  } else {
+    if(!confirm('Remove match(es) for this transaction?')) return;
+  }
+
   showLoadingOverlay('Removing match...');
+
+  if(reverseToo){
+    for(var i = 0; i < apMatches.length; i++){
+      var m = apMatches[i];
+      var inv = DB.invoices.find(function(x){ return x.id === m.invoice_id; });
+      var pmt = DB.payments.find(function(x){ return x.id === m.payment_id; });
+      if(inv && pmt){
+        inv.amountPaid = Math.max(0, (inv.amountPaid||0) - pmt.amount);
+        inv.balance = Math.max(0, inv.total - inv.amountPaid);
+        inv.status = inv.balance <= 0.005 ? 'paid' : (inv.amountPaid > 0 ? 'partial' : 'open');
+        await saveInvoiceToSB(inv);
+      }
+      if(pmt){
+        await _sb.from('payments').delete().eq('id', pmt.id);
+        DB.payments = DB.payments.filter(function(x){ return x.id !== pmt.id; });
+        await _sb.from('gl_entries').delete().eq('ref', pmt.id);
+        DB.gl = DB.gl.filter(function(x){ return x.ref !== pmt.id; });
+      }
+    }
+  }
+
   var ok = await deleteBankMatchesForRow(rowId);
   hideLoadingOverlay();
   if(!ok){ showToast('Failed to remove match','warn'); return; }
   REV.bankMatches = REV.bankMatches.filter(function(m){ return m.bank_ledger_id !== rowId; });
-  showToast('Match removed');
+
+  // If we fully reversed the payments, the row's era was only ever derived
+  // from those payments — reset it to dc so it goes back to manual control.
+  if(reverseToo){
+    var row = REV.bankLedger.find(function(r){ return r.id === rowId; });
+    if(row && row.era !== 'dc'){
+      row.era = 'dc';
+      await saveBankLedgerRow({
+        id: row.id, row_id: row.row_id, pmnt_date: row.pmnt_date, bank: row.bank,
+        customer_vendor: row.customer_vendor, description: row.description,
+        era: 'dc', note: row.note||'', stmt_type: row.stmt_type||'',
+        stmt_sec: row.stmt_sec||'', stmt_category: row.stmt_category||'',
+        account: row.account||'', ck_num: row.ck_num||'', trans_type: row.trans_type,
+        gross_amount: row.gross_amount
+      });
+    }
+  }
+
+  showToast(reverseToo ? 'Match removed and payment(s) reversed' : 'Match removed');
+  updateSidebarStats();
   if(currentView === 'bank-ledger') renderBankLedger();
 }
 
