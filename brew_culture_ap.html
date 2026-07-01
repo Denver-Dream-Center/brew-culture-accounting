@@ -712,6 +712,41 @@ function findRule(description){
   return DB.rules.find(r=>r.match&&desc.includes(r.match.toLowerCase()))||null;
 }
 
+// ═══════════════════════════════════════════════
+// DUPLICATE INVOICE DETECTION
+// ═══════════════════════════════════════════════
+function normalizeInvoiceNum(s){
+  return (s||'').toString().trim().toLowerCase().replace(/[^a-z0-9]/g,'').replace(/^0+(?=.)/,'');
+}
+
+function findDuplicateInvoice(vendorId,invoiceNum,excludeId,opts){
+  opts=opts||{};
+  if(!vendorId)return null;
+  const normNum=normalizeInvoiceNum(invoiceNum);
+  if(normNum){
+    const byNum=DB.invoices.find(inv=>
+      inv.id!==excludeId&&
+      inv.vendorId===vendorId&&
+      inv.status!=='void'&&
+      normalizeInvoiceNum(inv.invoiceNum)===normNum
+    );
+    if(byNum)return{invoice:byNum,reason:'number'};
+  }
+  // Fallback: no invoice number on this entry -- match on vendor+date+total
+  if(!normNum&&opts.date&&opts.total!==undefined&&opts.total!==null){
+    const byDateTotal=DB.invoices.find(inv=>
+      inv.id!==excludeId&&
+      inv.vendorId===vendorId&&
+      inv.status!=='void'&&
+      !normalizeInvoiceNum(inv.invoiceNum)&&
+      inv.date===opts.date&&
+      Math.abs((inv.total||0)-opts.total)<0.005
+    );
+    if(byDateTotal)return{invoice:byDateTotal,reason:'date-total'};
+  }
+  return null;
+}
+
 function ingredientForLine(line){
   // Returns {ingredient, category, unit, multiplier, qty} or null
   if(!line.ingredient)return null;
@@ -1027,7 +1062,7 @@ function parseCloverXLSX(ab){
     day.tax              += o.tax;
     day.tips             += o.tip;
     day.discounts        += o.discount;
-    day.refunds          += o.refund;
+    day.refunds           += o.refund;
     var ch = classifyPayment(o.payment_type);
     if(ch === 'cash'){
       day.cash_net       += o.order_net;
@@ -1051,7 +1086,7 @@ function parseCloverXLSX(ab){
     day.cash_collected   = Math.round(day.cash_collected   * 100) / 100;
     day.card_collected   = Math.round(day.card_collected   * 100) / 100;
     day.discounts        = Math.round(day.discounts        * 100) / 100;
-    day.refunds          = Math.round(day.refunds          * 100) / 100;
+    day.refunds           = Math.round(day.refunds          * 100) / 100;
     day.order_count = day.orders.length;
     day.item_count  = day.item_lines.length;
   });
@@ -2065,8 +2100,10 @@ async function voidInvoice(id){
 // INVOICE MODAL — with FIFO integration
 // ═══════════════════════════════════════════════
 let lineItems=[];
+let _currentEditInvoiceId='';
 
 function openInvoiceModal(editId){
+  _currentEditInvoiceId=editId||'';
   if(!editId) _lastRebelBreadFile = null; // reset on new invoice
   const editing=editId?DB.invoices.find(i=>i.id===editId):null;
   lineItems=editing?editing.lines.map(l=>({...l})):[{description:'',acct:'',ingredient:'',qty:1,unitCost:0,total:0}];
@@ -2214,7 +2251,15 @@ async function runInvoiceExtraction(file){
     renderLineItems();
     showToast('Extracted '+lineItems.length+' line item'+(lineItems.length!==1?'s':'')+' — review and save');
     const dz=$('autoload-zone');
-    if(dz)dz.innerHTML='<div style="padding:8px 12px;background:var(--green-lo);border:1px solid #A8D5B8;border-radius:var(--r);font-size:12px;color:var(--green)">✓ Extracted from <strong>'+file.name+'</strong> — '+lineItems.length+' lines loaded. Review below and confirm ingredients.</div>';
+    const extractedVendorId=$('inv-vendor')?.value||'';
+    const extractedTotal=lineItems.reduce((s,l)=>s+((l.qty||1)*(l.unitCost||0)),0);
+    const dup=findDuplicateInvoice(extractedVendorId,parsed.invoice_number,_currentEditInvoiceId,{date:parsed.invoice_date,total:extractedTotal});
+    if(dup){
+      const reasonTxt=dup.reason==='number'?'matching invoice number':'matching vendor, date, and total (no invoice number on this file)';
+      if(dz)dz.innerHTML='<div style="padding:8px 12px;background:var(--red-lo);border:1px solid #EAB5B1;border-radius:var(--r);font-size:12px;color:var(--red)">Possible duplicate - <strong>'+dup.invoice.id+'</strong> ('+(dup.invoice.invoiceNum||'no ref #')+', '+fmtDate(dup.invoice.date)+', '+fmt(dup.invoice.total)+') already exists for this vendor, based on '+reasonTxt+'. <button class="btn btn-ghost btn-sm" onclick="closeModal();viewInvoice(\''+dup.invoice.id+'\')" style="margin-left:6px">View existing invoice</button></div>';
+    }else if(dz){
+      dz.innerHTML='<div style="padding:8px 12px;background:var(--green-lo);border:1px solid #A8D5B8;border-radius:var(--r);font-size:12px;color:var(--green)">✓ Extracted from <strong>'+file.name+'</strong> — '+lineItems.length+' lines loaded. Review below and confirm ingredients.</div>';
+    }
   }catch(e){showAutoloadErr('Extraction failed: '+e.message)}
 }
 
@@ -2331,6 +2376,13 @@ async function saveInvoice(editId){
   const lines=lineItems.map(l=>({...l,total:(l.qty||1)*(l.unitCost||0)}));
   const subtotal=lines.reduce((s,l)=>s+l.total,0);
   const vName=vendorName(vendorId);
+
+  const dup=findDuplicateInvoice(vendorId,invoiceNum,editId,{date,total:subtotal});
+  if(dup){
+    const reasonTxt=dup.reason==='number'?'the same invoice number':'matching vendor, date, and total (no invoice number entered)';
+    const proceed=confirm('Possible duplicate: invoice '+dup.invoice.id+' for '+vName+' ('+(dup.invoice.invoiceNum||'no ref #')+', '+fmtDate(dup.invoice.date)+', '+fmt(dup.invoice.total)+') already exists, based on '+reasonTxt+'.\n\nSave this invoice anyway?');
+    if(!proceed)return;
+  }
 
   if(editId){
     const inv=DB.invoices.find(i=>i.id===editId);const paid=inv.amountPaid||0;
