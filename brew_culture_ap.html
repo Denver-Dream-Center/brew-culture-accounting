@@ -816,7 +816,13 @@ function apSummary(){
   const now=new Date();
   DB.invoices.forEach(inv=>{
     if(inv.status==='void'||inv.era===ERA.TROY)return;
-    if(inv.balance>0){totalOpen+=inv.balance;if(isOverdue(inv))totalOverdue+=inv.balance;const d=daysUntilDue(inv);if(d!==null&&d>=0&&d<=7)dueSoon+=inv.balance}
+    if(inv.balance!==0){
+      totalOpen+=inv.balance; // net all non-zero balances, including vendor credits (negative)
+      if(inv.balance>0){
+        if(isOverdue(inv))totalOverdue+=inv.balance;
+        const d=daysUntilDue(inv);if(d!==null&&d>=0&&d<=7)dueSoon+=inv.balance;
+      }
+    }
     const id=new Date(inv.date+'T12:00:00');
     if(id.getMonth()===now.getMonth()&&id.getFullYear()===now.getFullYear()&&inv.era===ERA.DC)paidMTD+=inv.amountPaid||0;
   });
@@ -1796,7 +1802,7 @@ function renderDashboard(){
   }).join('');
   $('content').innerHTML=`
     <div class="tiles">
-      <div class="tile red"><div class="tile-label">DC Open AP</div><div class="tile-val">${fmt(s.totalOpen)}</div><div class="tile-sub">${DB.invoices.filter(i=>i.era===ERA.DC&&i.balance>0&&i.status!=='void').length} open invoices</div></div>
+      <div class="tile red"><div class="tile-label">DC Open AP</div><div class="tile-val">${fmt(s.totalOpen)}</div><div class="tile-sub">${DB.invoices.filter(i=>i.era===ERA.DC&&i.balance!==0&&i.status!=='void').length} open invoices</div></div>
       <div class="tile ${s.totalOverdue>0?'red':'green'}"><div class="tile-label">Overdue</div><div class="tile-val">${fmt(s.totalOverdue)}</div><div class="tile-sub">${DB.invoices.filter(i=>isOverdue(i)&&i.era===ERA.DC).length} past due</div></div>
       <div class="tile amber"><div class="tile-label">Due in 7 Days</div><div class="tile-val">${fmt(s.dueSoon)}</div><div class="tile-sub">Action needed soon</div></div>
       <div class="tile troy"><div class="tile-label">1300 · Troy Receivable</div><div class="tile-val">${fmt(troy.balance)}</div><div class="tile-sub"><a href="#" onclick="showView('troy');return false" style="color:var(--troy)">View ledger →</a></div></div>
@@ -1895,13 +1901,18 @@ function renderInvoices(){
 function renderVendors(){
   $('topbar-actions').innerHTML=`<button class="btn btn-primary" onclick="openVendorModal()">＋ New Vendor</button>`;
   const cards=[...DB.vendors].sort((a,b)=>a.name.localeCompare(b.name)).map(v=>{
-    const bal=DB.invoices.filter(i=>i.vendorId===v.id&&i.balance>0&&i.status!=='void').reduce((s,i)=>s+i.balance,0);
+    const bal=DB.invoices.filter(i=>i.vendorId===v.id&&i.balance!==0&&i.status!=='void').reduce((s,i)=>s+i.balance,0);
     const cnt=DB.invoices.filter(i=>i.vendorId===v.id).length;
+    const balHtml=bal>0
+      ?`<div style="font-size:13px;font-weight:700;margin-top:8px;color:var(--red);font-family:var(--font-mono)">${fmt(bal)} open</div>`
+      :bal<0
+      ?`<div style="font-size:13px;font-weight:700;margin-top:8px;color:var(--troy);font-family:var(--font-mono)">${fmt(Math.abs(bal))} credit</div>`
+      :`<div style="font-size:12px;color:var(--green);margin-top:8px;font-weight:600">Cleared ✓</div>`;
     return`<div class="vendor-card" onclick="openVendorModal('${v.id}')">
       <div class="vendor-name">${v.name}</div>
       <div class="vendor-meta">${v.type} · Net ${v.terms||0}</div>
       <div class="vendor-meta">${cnt} invoice${cnt!==1?'s':''}</div>
-      ${bal>0?`<div style="font-size:13px;font-weight:700;margin-top:8px;color:var(--red);font-family:var(--font-mono)">${fmt(bal)} open</div>`:`<div style="font-size:12px;color:var(--green);margin-top:8px;font-weight:600">Cleared ✓</div>`}
+      ${balHtml}
     </div>`;
   }).join('');
   $('content').innerHTML=DB.vendors.length?`<div class="vendor-grid">${cards}</div>`:`<div class="empty-state"><div class="empty-icon">◉</div><div>No vendors yet</div></div>`;
@@ -2217,6 +2228,7 @@ function viewInvoice(id){
     <div class="modal-footer">
       ${vendorName(inv.vendorId).toLowerCase().includes('rebel bread')?`<button class="btn btn-inv" onclick="triggerPastryExtraction('${inv.id}')">Extract Pastry Detail</button>`:''}
       ${inv.status!=='void'&&inv.balance>0?`<button class="btn btn-primary" onclick="closeModal();openPaymentModal('${inv.id}')">Record Payment</button>`:''}
+      ${inv.status!=='void'&&inv.balance<0?`<button class="btn btn-troy" onclick="closeModal();openApplyCreditModal('${inv.id}')">Apply to Invoice</button>`:''}
       <button class="btn btn-secondary" onclick="closeModal();openInvoiceModal('${inv.id}')">Edit</button>
       ${inv.status!=='void'?`<button class="btn btn-danger" onclick="voidInvoice('${inv.id}')">Void</button>`:''}
       <button class="btn btn-ghost" onclick="closeModal()">Close</button>
@@ -2247,6 +2259,105 @@ async function voidInvoice(id){
     showToast('Invoice void may not have saved — check the invoice and try again if it still shows open.','warn');
   }else if(!glOk){
     showToast('Invoice voided, but the GL reversal entry failed to save — check Trial Balance and post a manual correcting Journal Entry.','warn');
+  }
+}
+
+// ═══════════════════════════════════════════════
+// APPLY VENDOR CREDIT TO AN INVOICE
+// A credit invoice (negative balance) can be applied against an open
+// invoice from the same vendor. This is purely a reallocation within the
+// AP subledger -- reducing the target invoice's balance and reducing
+// (toward zero) the credit invoice's balance by the same amount nets to
+// zero change in the total 2000 Accounts Payable balance, so no GL entry
+// is posted here (unlike payments, which move cash). A lightweight
+// payment-style record is still created for audit trail / visibility in
+// the Payments view, with method 'Credit Applied' so it's clearly
+// distinguishable from an actual cash disbursement.
+// ═══════════════════════════════════════════════
+function openApplyCreditModal(creditInvoiceId){
+  const credit=DB.invoices.find(i=>i.id===creditInvoiceId);
+  if(!credit)return;
+  const availableCredit=Math.abs(credit.balance);
+  const targets=DB.invoices.filter(i=>i.vendorId===credit.vendorId&&i.id!==credit.id&&i.balance>0&&i.status!=='void')
+    .sort((a,b)=>a.date.localeCompare(b.date));
+  openModal(`<div class="modal" style="max-width:520px">
+    <div class="modal-header">
+      <div><div class="modal-title">Apply Credit</div><div class="modal-sub">${credit.id} · ${vendorName(credit.vendorId)} · ${fmt(availableCredit)} available</div></div>
+      <button class="close-btn" onclick="closeModal()">×</button>
+    </div>
+    <div class="modal-body">
+      ${targets.length===0
+        ?`<div class="empty-state" style="padding:24px"><div>No open invoices for ${vendorName(credit.vendorId)} to apply this credit to.</div></div>`
+        :`<div class="form-group">
+            <label>Apply to Invoice *</label>
+            <select id="credit-target-invoice" onchange="onCreditTargetChange('${creditInvoiceId}')">
+              <option value="">Select open invoice…</option>
+              ${targets.map(t=>`<option value="${t.id}">${t.id} — ${t.invoiceNum||'no ref'} — ${fmt(t.balance)} due (${fmtDate(t.date)})</option>`).join('')}
+            </select>
+          </div>
+          <div class="form-group" style="margin-top:12px">
+            <label>Amount to Apply *</label>
+            <input type="number" id="credit-apply-amount" min="0.01" step="0.01" placeholder="0.00">
+            <span class="form-hint">Up to ${fmt(availableCredit)} available on this credit</span>
+          </div>`
+      }
+      <div id="credit-apply-err" style="color:var(--red);font-size:12px;margin-top:8px"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+      ${targets.length>0?`<button class="btn btn-primary" onclick="confirmApplyCredit('${creditInvoiceId}')">Apply Credit</button>`:''}
+    </div>
+  </div>`);
+}
+
+function onCreditTargetChange(creditInvoiceId){
+  const credit=DB.invoices.find(i=>i.id===creditInvoiceId);
+  const targetId=$('credit-target-invoice').value;
+  const target=DB.invoices.find(i=>i.id===targetId);
+  const amtEl=$('credit-apply-amount');
+  if(!credit||!target||!amtEl)return;
+  amtEl.value=Math.min(Math.abs(credit.balance),target.balance).toFixed(2);
+}
+
+async function confirmApplyCredit(creditInvoiceId){
+  const credit=DB.invoices.find(i=>i.id===creditInvoiceId);
+  const targetId=$('credit-target-invoice')?.value;
+  const target=DB.invoices.find(i=>i.id===targetId);
+  const amount=parseFloat($('credit-apply-amount')?.value);
+  const errEl=$('credit-apply-err');
+  if(!credit||!target){errEl.textContent='Select an invoice to apply the credit to.';return}
+  if(!amount||amount<=0){errEl.textContent='Enter a valid amount.';return}
+  const availableCredit=Math.abs(credit.balance);
+  if(amount>availableCredit+0.005){errEl.textContent=`Exceeds available credit of ${fmt(availableCredit)}.`;return}
+  if(amount>target.balance+0.005){errEl.textContent=`Exceeds ${target.id}'s balance of ${fmt(target.balance)}.`;return}
+
+  // Reduce the target invoice's balance, same mechanics as a payment
+  target.amountPaid=(target.amountPaid||0)+amount;
+  target.balance=Math.max(0,target.total-target.amountPaid);
+  if(target.balance<0.005){target.balance=0;target.status='paid'}else target.status='partial';
+
+  // Reduce the credit invoice's balance toward zero
+  credit.balance=Math.min(0,credit.balance+amount);
+  if(Math.abs(credit.balance)<0.005){credit.balance=0;credit.status='paid'}else credit.status='partial';
+
+  const recordId=nextSeq('PMT');
+  const record={id:recordId,era:target.era||ERA.DC,invoiceId:target.id,vendorId:target.vendorId,
+    date:todayStr(),amount:amount,method:'Credit Applied',ref:credit.id,
+    memo:'Credit applied from '+credit.id+' ('+(credit.invoiceNum||credit.id)+')',glPosted:false};
+
+  const targetOk=await saveInvoiceToSB(target);
+  const creditOk=await saveInvoiceToSB(credit);
+  const pmtOk=await savePaymentToSB(record);
+
+  closeModal();
+  const views={invoices:renderInvoices,dashboard:renderDashboard,vendors:renderVendors,payments:renderPayments};
+  if(views[currentView])views[currentView]();
+  updateSidebarStats();
+
+  if(!targetOk||!creditOk||!pmtOk){
+    showToast('Credit application may not have fully saved — check both invoices and try again if needed.','warn');
+  }else{
+    showToast(fmt(amount)+' credit applied from '+credit.id+' to '+target.id);
   }
 }
 
