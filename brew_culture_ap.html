@@ -684,7 +684,28 @@ const load=k=>{try{return JSON.parse(localStorage.getItem(k)||'null')}catch{retu
 const save=(k,v)=>localStorage.setItem(k,JSON.stringify(v));
 
 function nextSeq(p){const s=load('bc_seq')||{};s[p]=(s[p]||0)+1;save('bc_seq',s);return`${p}-${String(s[p]).padStart(4,'0')}`}
-const nextGLId=()=>`GL-${String(DB.gl.length+1).padStart(4,'0')}`;
+// Was: derived from DB.gl.length (client-side cache), which could hand out
+// an id that already exists in gl_entries if the local cache ever drifted
+// from the database (e.g. after unmatch reversals deleted rows elsewhere
+// in the same session). That caused a silent primary-key collision -- the
+// insert failed, and because saveGLToSB's return value wasn't checked
+// anywhere, nothing surfaced it. Now queries the actual max id in the
+// table each time, so it can't drift out of sync with local state.
+async function nextGLId(){
+  try{
+    const {data,error}=await _sb.from('gl_entries').select('id').order('id',{ascending:false}).limit(1);
+    let maxNum=0;
+    if(!error&&data&&data.length){
+      const m=String(data[0].id).match(/^GL-(\d+)/);
+      if(m)maxNum=parseInt(m[1],10);
+    }
+    if(error)maxNum=Math.max(maxNum,DB.gl.length); // fall back rather than hard-fail on a transient network issue
+    return`GL-${String(maxNum+1).padStart(4,'0')}`;
+  }catch(e){
+    console.error('nextGLId error',e);
+    return`GL-${String(DB.gl.length+1).padStart(4,'0')}`; // last-resort fallback, same old behavior
+  }
+}
 
 // persist() -- now saves to Supabase (called after bulk operations)
 // Individual saves use sbUpsert directly
@@ -1179,16 +1200,16 @@ async function postSettlementGL(s){
   DB.gl=DB.gl.filter(function(g){return g.ref!==s.id});
 
   var total=settlementGLTotal(s);
-  if(total<=0)return; // nothing to book for a zero/void day
+  if(total<=0)return true; // nothing to book for a zero/void day
 
   var entries=[{acct:'1015',name:'Undeposited Funds',dr:total,cr:0}];
   entries.push({acct:'4010',name:'In-Store Revenue',dr:0,cr:Math.round((s.gross_net||0)*100)/100});
   if(s.tax>0.004)entries.push({acct:'2050',name:'Sales Tax Payable',dr:0,cr:Math.round(s.tax*100)/100});
   if(s.tips>0.004)entries.push({acct:'2060',name:'Tips Payable',dr:0,cr:Math.round(s.tips*100)/100});
 
-  var je={id:nextGLId(),date:s.date,ref:s.id,era:ERA.DC,
+  var je={id:await nextGLId(),date:s.date,ref:s.id,era:ERA.DC,
     memo:'Daily settlement — '+fmtDate(s.date)+' ('+s.order_count+' orders)',entries:entries};
-  await saveGLToSB(je);
+  return await saveGLToSB(je);
 }
 
 
@@ -1389,6 +1410,7 @@ async function confirmCloverImport(){
   var dates = Object.keys(_cloverParsed);
   showLoadingOverlay('Saving ' + dates.length + ' day(s)...');
   var errors = [];
+  var glErrors = [];
   for(var i = 0; i < dates.length; i++){
     var s = buildSettlement(_cloverParsed[dates[i]]);
     // Check if already exists to preserve deposit_status
@@ -1400,7 +1422,8 @@ async function confirmCloverImport(){
     }
     var ok = await saveSettlementToSB(s);
     if(!ok){ errors.push(dates[i]); continue; }
-    await postSettlementGL(s);
+    var glOk = await postSettlementGL(s);
+    if(!glOk) glErrors.push(dates[i]);
   }
   hideLoadingOverlay();
   if(errors.length){
@@ -1409,7 +1432,11 @@ async function confirmCloverImport(){
     await loadRevData();
     renderSidebar();
     _cloverParsed = null;
-    showToast('Imported ' + dates.length + ' day(s)');
+    if(glErrors.length){
+      showToast('Settlement(s) saved, but the GL entry failed for: ' + glErrors.join(', ') + ' — check Trial Balance and re-post manually via Journal Entry.', 'warn');
+    } else {
+      showToast('Imported ' + dates.length + ' day(s)');
+    }
     showView('rev-settlement');
   }
 }
@@ -2206,15 +2233,21 @@ async function voidInvoice(id){
   DB.fifo=DB.fifo.filter(d=>d.apInvoiceId!==id);
   // Reverse GL
   const orig=DB.gl.find(g=>g.ref===inv.id);
+  let glOk=true;
   if(orig){
-    const reversal={id:nextGLId(),date:todayStr(),ref:`${inv.id}-VOID`,era:inv.era||ERA.DC,
+    const reversal={id:await nextGLId(),date:todayStr(),ref:`${inv.id}-VOID`,era:inv.era||ERA.DC,
       memo:`VOID reversal — ${inv.memo||inv.id}`,entries:orig.entries.map(e=>({...e,dr:e.cr,cr:e.dr}))};
-    await saveGLToSB(reversal);
+    glOk=await saveGLToSB(reversal);
   }
-  await saveInvoiceToSB(inv);
+  const invOk=await saveInvoiceToSB(inv);
   closeModal();
   const views={invoices:renderInvoices,dashboard:renderDashboard,troy:renderTroy};if(views[currentView])views[currentView]();
   updateSidebarStats();
+  if(!invOk){
+    showToast('Invoice void may not have saved — check the invoice and try again if it still shows open.','warn');
+  }else if(!glOk){
+    showToast('Invoice voided, but the GL reversal entry failed to save — check Trial Balance and post a manual correcting Journal Entry.','warn');
+  }
 }
 
 // ═══════════════════════════════════════════════
@@ -2505,6 +2538,7 @@ async function saveInvoice(editId){
     if(!proceed)return;
   }
 
+  let glOk=true, fifoOk=true;
   if(editId){
     const inv=DB.invoices.find(i=>i.id===editId);const paid=inv.amountPaid||0;
     // Remove old FIFO layers for this invoice from Supabase
@@ -2515,18 +2549,27 @@ async function saveInvoice(editId){
     // Remove old GL entries for this invoice
     await _sb.from('gl_entries').delete().eq('ref', editId);
     DB.gl=DB.gl.filter(g=>g.ref!==editId);
-    postInvoiceGL(inv);
-    writeFIFOLayers(inv);
+    glOk=await postInvoiceGL(inv);
+    fifoOk=await writeFIFOLayers(inv);
   }else{
     const id=nextSeq('INV');
     const inv={id,vendorId,invoiceNum,date,dueDate,memo,era,lines,subtotal,tax:0,total:subtotal,amountPaid:0,balance:subtotal,status:'open',glPosted:true};
     await saveInvoiceToSB(inv);
-    postInvoiceGL(inv);
-    writeFIFOLayers(inv);
+    glOk=await postInvoiceGL(inv);
+    fifoOk=await writeFIFOLayers(inv);
   }
   closeModal();
   const views={invoices:renderInvoices,dashboard:renderDashboard,troy:renderTroy,fifo:renderFIFO};if(views[currentView])views[currentView]();
   updateSidebarStats();
+
+  if(!glOk){
+    showToast('Invoice saved, but the GL accrual entry failed to save — check Trial Balance and post a manual correcting Journal Entry.','warn');
+    return;
+  }
+  if(!fifoOk){
+    showToast('Invoice and GL entry saved, but one or more FIFO inventory layers failed to save — check FIFO Deliveries.','warn');
+    return;
+  }
 
   // Auto-run pastry extraction if this is a Rebel Bread invoice
   const savedInvId = editId || DB.invoices[DB.invoices.length-1]?.id;
@@ -2551,6 +2594,7 @@ function countFIFOLines(lines){return lines.filter(l=>l.ingredient).length}
 
 async function writeFIFOLayers(inv){
   const vName=vendorName(inv.vendorId);
+  let allOk=true;
   for(const line of inv.lines){
     if(!line.ingredient)continue;
     const ing=loadIngredients().find(i=>i.name===line.ingredient);if(!ing)continue;
@@ -2574,8 +2618,10 @@ async function writeFIFOLayers(inv){
       invoiceNo:inv.invoiceNum||inv.id,
       apInvoiceId:inv.id
     };
-    await saveFIFOLayerToSB(layer);
+    const ok=await saveFIFOLayerToSB(layer);
+    if(!ok)allOk=false;
   }
+  return allOk;
 }
 
 async function postInvoiceGL(inv){
@@ -2588,8 +2634,8 @@ async function postInvoiceGL(inv){
     entries.push({acct:'1300',name:'Receivable — Prior Owner (Troy)',dr:inv.total,cr:0});
     entries.push({acct:'2000',name:'Accounts Payable',dr:0,cr:inv.total});
   }
-  const je={id:nextGLId(),date:inv.date,ref:inv.id,era,memo:'A/P accrual'+(era==='troy'?' (Troy-era)':era==='dc-paid'?' (DC paid for Troy)':'')+' — '+vendorName(inv.vendorId)+' '+(inv.invoiceNum||inv.id),entries};
-  await saveGLToSB(je);
+  const je={id:await nextGLId(),date:inv.date,ref:inv.id,era,memo:'A/P accrual'+(era==='troy'?' (Troy-era)':era==='dc-paid'?' (DC paid for Troy)':'')+' — '+vendorName(inv.vendorId)+' '+(inv.invoiceNum||inv.id),entries};
+  return await saveGLToSB(je);
 }
 
 // ═══════════════════════════════════════════════
@@ -2662,15 +2708,27 @@ async function savePayment(){
   inv.amountPaid=(inv.amountPaid||0)+amount;inv.balance=Math.max(0,inv.total-inv.amountPaid);
   if(inv.balance<0.005){inv.balance=0;inv.status='paid'}else inv.status='partial';
   const cashName=COA.find(a=>a.acct===cashAcct)?.name||cashAcct;
-  const je={id:nextGLId(),date,ref:pmtId,era,
+  const je={id:await nextGLId(),date,ref:pmtId,era,
     memo:'Payment'+(era==='dc-paid'?' (DC→Troy)':era==='troy'?' (Troy-era)':'')+' — '+vendorName(inv.vendorId)+' '+(ref||pmtId),
     entries:[{acct:'2000',name:'Accounts Payable',dr:amount,cr:0},{acct:cashAcct,name:cashName,dr:0,cr:amount}]};
-  await savePaymentToSB(pmt);
-  await saveInvoiceToSB(inv);
-  await saveGLToSB(je);
+  const pmtOk=await savePaymentToSB(pmt);
+  const invOk=await saveInvoiceToSB(inv);
+  const glOk=await saveGLToSB(je);
   closeModal();
   const views={payments:renderPayments,dashboard:renderDashboard,invoices:renderInvoices,troy:renderTroy};if(views[currentView])views[currentView]();
   updateSidebarStats();
+  if(!pmtOk){
+    showToast('Payment failed to save — nothing was recorded. Please try again.','warn');
+    return;
+  }
+  if(!invOk){
+    showToast('Payment saved, but the invoice balance update failed — check the invoice and re-open/save it if the balance looks wrong.','warn');
+    return;
+  }
+  if(!glOk){
+    showToast('Payment saved, but the GL entry failed to save — check Trial Balance and post a manual correcting Journal Entry.','warn');
+    return;
+  }
 }
 
 // ═══════════════════════════════════════════════
@@ -2731,8 +2789,12 @@ async function saveJE(){
   if(jeLines.some(l=>!l.acct)){errEl.textContent='All lines need an account.';return}
   const dr=jeLines.reduce((s,l)=>s+(l.dr||0),0);const cr=jeLines.reduce((s,l)=>s+(l.cr||0),0);
   if(Math.abs(dr-cr)>0.005){errEl.textContent=`Out of balance by ${fmt(Math.abs(dr-cr))}.`;return}
-  const je={id:nextGLId(),date,ref:jeRef,era,memo,entries:jeLines.map(l=>({acct:l.acct,name:COA.find(a=>a.acct===l.acct)?.name||l.acct,dr:l.dr||0,cr:l.cr||0,...(l.memo?{memo:l.memo}:{})}))};
-  await saveGLToSB(je);
+  const je={id:await nextGLId(),date,ref:jeRef,era,memo,entries:jeLines.map(l=>({acct:l.acct,name:COA.find(a=>a.acct===l.acct)?.name||l.acct,dr:l.dr||0,cr:l.cr||0,...(l.memo?{memo:l.memo}:{})}))};
+  const glOk=await saveGLToSB(je);
+  if(!glOk){
+    errEl.textContent='Save failed — the entry was not posted. Check your connection and try again.';
+    return;
+  }
   closeModal();showToast(`Journal entry posted — ${jeRef}`);
   const views={gl:renderGL,troy:renderTroy,dashboard:renderDashboard};if(views[currentView])views[currentView]();
   updateSidebarStats();
@@ -4473,6 +4535,7 @@ async function confirmAPMatch(){
   showLoadingOverlay('Recording payment(s)...');
 
   var erasUsed = {};
+  var pmtFailures = [], invFailures = [], glFailures = [];
 
   // Pay each invoice its own balance first (standard payment flow), then apply variance to the LAST invoice
   for(var i = 0; i < invoices.length; i++){
@@ -4496,13 +4559,16 @@ async function confirmAPMatch(){
 
     var cashAcct = row.bank === 'Glacier Bank' ? '1010' : '1011';
     var cashName = row.bank === 'Glacier Bank' ? 'Glacier Bank' : 'SouthState Bank';
-    var je = {id:nextGLId(), date:row.pmnt_date, ref:pmtId, era:invEra,
+    var je = {id:await nextGLId(), date:row.pmnt_date, ref:pmtId, era:invEra,
       memo:'Bank-matched payment'+(invEra==='troy'?' (Troy-era)':invEra==='dc-paid'?' (DC paid for Troy)':'')+' \u2014 ' + vendorName(inv.vendorId) + ' ' + (row.ck_num||pmtId),
       entries:[{acct:'2000',name:'Accounts Payable',dr:payAmt,cr:0},{acct:cashAcct,name:cashName,dr:0,cr:payAmt}]};
 
-    await savePaymentToSB(pmt);
-    await saveInvoiceToSB(inv);
-    await saveGLToSB(je);
+    var pmtOk=await savePaymentToSB(pmt);
+    if(!pmtOk)pmtFailures.push(inv.id);
+    var invOk=await saveInvoiceToSB(inv);
+    if(!invOk)invFailures.push(inv.id);
+    var glOk=await saveGLToSB(je);
+    if(!glOk)glFailures.push(inv.id+' ('+pmtId+')');
     DB.payments.push(pmt);
 
     // Record the match link
@@ -4539,7 +4605,15 @@ async function confirmAPMatch(){
   hideLoadingOverlay();
   closeModal();
   var eraNote = distinctEras.length > 1 ? ' \u2014 mixed era (split across ' + distinctEras.join('/') + ')' : '';
-  showToast('Matched ' + invoices.length + ' invoice(s)' + (Math.abs(variance)>=0.01 ? ' \u2014 variance ' + fmt(variance) + ' booked' : '') + eraNote);
+  if(pmtFailures.length||invFailures.length||glFailures.length){
+    var parts=[];
+    if(pmtFailures.length)parts.push('payment record failed for: '+pmtFailures.join(', '));
+    if(invFailures.length)parts.push('invoice balance update failed for: '+invFailures.join(', '));
+    if(glFailures.length)parts.push('GL entry failed for: '+glFailures.join(', '));
+    showToast('Match partially recorded \u2014 '+parts.join('; ')+'. Check Trial Balance and correct manually.','warn');
+  } else {
+    showToast('Matched ' + invoices.length + ' invoice(s)' + (Math.abs(variance)>=0.01 ? ' \u2014 variance ' + fmt(variance) + ' booked' : '') + eraNote);
+  }
   updateSidebarStats();
   if(currentView === 'bank-ledger') renderBankLedger();
 }
@@ -4556,10 +4630,17 @@ async function markAsDirectExpense(rowId){
   var expAcctMap = {'Coffee Exp':'5010','Food Exp':'5020','Chai Exp':'5040','Milk Exp':'5040','Kombucha Exp':'5040','Supply Exp':'5040','Syrup Exp':'5040','Matcha Exp':'5040','Tea Exp':'5040'};
   var expAcct = expAcctMap[row.account] || '5040';
 
-  var je = {id:nextGLId(), date:row.pmnt_date, ref:'DIRECT-'+row.id, era:ERA.DC,
+  var je = {id:await nextGLId(), date:row.pmnt_date, ref:'DIRECT-'+row.id, era:ERA.DC,
     memo:'Direct expense (no invoice) \u2014 ' + (row.customer_vendor||'') + ' \u2014 ' + row.account,
     entries:[{acct:expAcct,name:row.account,dr:amtAbs,cr:0},{acct:cashAcct,name:cashName,dr:0,cr:amtAbs}]};
-  await saveGLToSB(je);
+  var glOk = await saveGLToSB(je);
+  if(!glOk){
+    hideLoadingOverlay();
+    closeModal();
+    showToast('GL entry failed to save \u2014 nothing was recorded. Try again.','warn');
+    if(currentView === 'bank-ledger') renderBankLedger();
+    return;
+  }
 
   await saveBankMatch({
     id: 'BLM-' + Date.now(),
@@ -4643,10 +4724,15 @@ async function confirmDirectPost(rowId){
     : [{acct:acct,name:acctName,dr:amtAbs,cr:0},{acct:cashAcct,name:cashName,dr:0,cr:amtAbs}];
 
   showLoadingOverlay('Recording...');
-  var je = {id:nextGLId(), date:row.pmnt_date, ref:'DIRECT-'+row.id, era:ERA.DC,
+  var je = {id:await nextGLId(), date:row.pmnt_date, ref:'DIRECT-'+row.id, era:ERA.DC,
     memo:memoInput||((row.customer_vendor||'(no vendor)')+' - '+acctName),
     entries:entries};
-  await saveGLToSB(je);
+  var glOk = await saveGLToSB(je);
+  if(!glOk){
+    hideLoadingOverlay();
+    errEl.textContent='Save failed — the entry was not posted. Check your connection and try again.';
+    return;
+  }
 
   await saveBankMatch({
     id:'BLM-'+Date.now(), bank_ledger_id:row.id, match_kind:'direct',
@@ -4763,6 +4849,7 @@ async function confirmRevMatch(){
   }
 
   showLoadingOverlay('Recording match...');
+  var glFailures = [];
   for(var i = 0; i < selectedIds.length; i++){
     var s = REV.settlements.find(function(x){ return x.id === selectedIds[i]; });
     if(!s) continue;
@@ -4774,12 +4861,17 @@ async function confirmRevMatch(){
     };
     await saveBankMatch(matchRow);
     REV.bankMatches.push(matchRow);
-    await postRevMatchTransferGL(row, s, matchId);
+    var glOk = await postRevMatchTransferGL(row, s, matchId);
+    if(!glOk) glFailures.push(s.date);
   }
 
   hideLoadingOverlay();
   closeModal();
-  showToast('Matched ' + selectedIds.length + ' settlement date(s)');
+  if(glFailures.length){
+    showToast('Matched, but the deposit-transfer GL entry failed for: ' + glFailures.join(', ') + ' — check Trial Balance and post a manual correcting Journal Entry.', 'warn');
+  } else {
+    showToast('Matched ' + selectedIds.length + ' settlement date(s)');
+  }
   if(currentView === 'bank-ledger') renderBankLedger();
 }
 
@@ -4793,13 +4885,13 @@ async function confirmRevMatch(){
 // itself, same as how revenue matching already works today.
 async function postRevMatchTransferGL(row, s, matchId){
   var total=settlementGLTotal(s);
-  if(total<=0)return;
+  if(total<=0)return true;
   var cashAcct = row.bank === 'Glacier Bank' ? '1010' : '1011';
   var cashName = row.bank === 'Glacier Bank' ? 'Glacier Bank' : 'SouthState Bank';
-  var je={id:nextGLId(),date:row.pmnt_date,ref:matchId,era:ERA.DC,
+  var je={id:await nextGLId(),date:row.pmnt_date,ref:matchId,era:ERA.DC,
     memo:'Deposit confirmed — '+fmtDate(s.date)+' settlement ('+(row.customer_vendor||'')+')',
     entries:[{acct:cashAcct,name:cashName,dr:total,cr:0},{acct:'1015',name:'Undeposited Funds',dr:0,cr:total}]};
-  await saveGLToSB(je);
+  return await saveGLToSB(je);
 }
 
 async function unmatchBankRow(rowId){
