@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -434,6 +435,7 @@ const ERA_LABELS={dc:'Dream Center',troy:'Troy (Pre-Acq.)','dc-paid':'DC Paid fo
 const COA=[
   {acct:'1010',name:'Operating Checking',type:'Asset'},
   {acct:'1011',name:'SouthState Bank',type:'Asset'},
+  {acct:'1015',name:'Undeposited Funds',type:'Asset'},
   {acct:'1020',name:'Savings / Reserve',type:'Asset'},
   {acct:'1300',name:'Receivable — Prior Owner (Troy)',type:'Asset'},
   {acct:'1410',name:'Coffee Inventory',type:'Asset'},
@@ -444,8 +446,11 @@ const COA=[
   {acct:'1460',name:'Syrup & Alt-Milk Inventory',type:'Asset'},
   {acct:'2000',name:'Accounts Payable',type:'Liability'},
   {acct:'2040',name:'Gift Card Liability',type:'Liability'},
+  {acct:'2050',name:'Sales Tax Payable',type:'Liability'},
+  {acct:'2060',name:'Tips Payable',type:'Liability'},
   {acct:'2100',name:'Loan — Denver Dream Center',type:'Liability'},
   {acct:'3100',name:'Net Assets — Donated Acquisition',type:'Equity'},
+  {acct:'4010',name:'In-Store Revenue',type:'Revenue'},
   {acct:'5010',name:'COGS — Coffee & Espresso',type:'Expense'},
   {acct:'5020',name:'COGS — Food & Pastry',type:'Expense'},
   {acct:'5030',name:'COGS — Retail',type:'Expense'},
@@ -856,6 +861,7 @@ function renderSidebar(){
       '<button class="nav-item" onclick="showView(\'payments\')" id="nav-payments"><span class="nav-icon">&#8861;</span> Payments</button>' +
       '<div class="sidebar-section">Accounting</div>' +
       '<button class="nav-item" onclick="showView(\'gl\')" id="nav-gl"><span class="nav-icon">&#8862;</span> GL Entries</button>' +
+      '<button class="nav-item" onclick="showView(\'trial-balance\')" id="nav-trial-balance"><span class="nav-icon">&#8801;</span> Trial Balance</button>' +
       '<button class="nav-item" onclick="showView(\'troy\')" id="nav-troy"><span class="nav-icon">&#9671;</span> 1300 \xb7 Troy Recv.</button>' +
       '<button class="nav-item" onclick="openJEModal()"><span class="nav-icon">&#10022;</span> Journal Entry</button>' +
       '<div class="sidebar-section">Inventory</div>' +
@@ -1148,7 +1154,44 @@ async function saveSettlementToSB(s){
   return true;
 }
 
-// Load revenue data from Supabase
+// ═══════════════════════════════════════════════
+// REVENUE MODULE — GL POSTING
+// Books the day's settlement as:
+//   Dr  1015 Undeposited Funds   (gross_net + tax + tips)
+//   Cr  4010 In-Store Revenue    (gross_net)
+//   Cr  2050 Sales Tax Payable   (tax, if > 0)
+//   Cr  2060 Tips Payable        (tips, if > 0)
+// Recognizes revenue on the day of sale (accrual basis).
+// The transfer from Undeposited Funds to the real bank
+// account happens separately, when the settlement is
+// matched to an actual bank deposit in the Bank Ledger
+// module (see confirmRevMatch / postRevMatchTransferGL).
+// ═══════════════════════════════════════════════
+function settlementGLTotal(s){
+  return Math.round(((s.gross_net||0)+(s.tax||0)+(s.tips||0))*100)/100;
+}
+
+async function postSettlementGL(s){
+  // Remove any prior GL entry for this settlement first, so re-importing
+  // a corrected day (Clover preview already warns "will overwrite") never
+  // double-posts revenue.
+  await _sb.from('gl_entries').delete().eq('ref', s.id);
+  DB.gl=DB.gl.filter(function(g){return g.ref!==s.id});
+
+  var total=settlementGLTotal(s);
+  if(total<=0)return; // nothing to book for a zero/void day
+
+  var entries=[{acct:'1015',name:'Undeposited Funds',dr:total,cr:0}];
+  entries.push({acct:'4010',name:'In-Store Revenue',dr:0,cr:Math.round((s.gross_net||0)*100)/100});
+  if(s.tax>0.004)entries.push({acct:'2050',name:'Sales Tax Payable',dr:0,cr:Math.round(s.tax*100)/100});
+  if(s.tips>0.004)entries.push({acct:'2060',name:'Tips Payable',dr:0,cr:Math.round(s.tips*100)/100});
+
+  var je={id:nextGLId(),date:s.date,ref:s.id,era:ERA.DC,
+    memo:'Daily settlement — '+fmtDate(s.date)+' ('+s.order_count+' orders)',entries:entries};
+  await saveGLToSB(je);
+}
+
+
 async function loadRevData(){
   var res = await _sb.from('daily_settlement').select('*').order('settlement_date', {ascending:false});
   if(!res.error && res.data){
@@ -1356,7 +1399,8 @@ async function confirmCloverImport(){
       s.deposit_amount = existing.deposit_amount;
     }
     var ok = await saveSettlementToSB(s);
-    if(!ok) errors.push(dates[i]);
+    if(!ok){ errors.push(dates[i]); continue; }
+    await postSettlementGL(s);
   }
   hideLoadingOverlay();
   if(errors.length){
@@ -1630,6 +1674,7 @@ function showView(view){
     vendors:['Vendors','Manage payees'],
     payments:['Payments','Payment history'],
     gl:['GL Entries','Journal entries — all eras'],
+    'trial-balance':['Trial Balance','All GL accounts \xb7 debit and credit totals'],
     troy:['1300 · Troy Receivable','Prior owner balance ledger'],
     fifo:['FIFO Deliveries','Inventory delivery log'],
     rules:['Matching Rules','Vendor product \u2192 ingredient mapping'],
@@ -1651,7 +1696,7 @@ function showView(view){
   var navEl=$('nav-'+view);if(navEl)navEl.classList.add('active');
   const renders={
     dashboard:renderDashboard,invoices:renderInvoices,vendors:renderVendors,
-    payments:renderPayments,gl:renderGL,troy:renderTroy,fifo:renderFIFO,
+    payments:renderPayments,gl:renderGL,'trial-balance':renderTrialBalance,troy:renderTroy,fifo:renderFIFO,
     rules:renderRules,ingredients:renderIngredients,recipes:renderRecipes,
     'pastry-close':renderPastryClose,'pastry-tracker':renderPastryTracker,
     'pastry-skus':renderPastrySkus,
@@ -1765,6 +1810,7 @@ function renderDashboard(){
 // INVOICES VIEW
 // ═══════════════════════════════════════════════
 let invFilter={search:'',status:'all',vendor:'all',era:'all'};
+let tbFilter={asOf:'',era:'all'};
 function renderInvoices(){
   $('topbar-actions').innerHTML=`<button class="btn btn-primary" onclick="openInvoiceModal()">＋ New Invoice</button>`;
   let invs=[...DB.invoices].sort((a,b)=>b.date.localeCompare(a.date));
@@ -1885,6 +1931,80 @@ function renderGL(){
     </div>`;
   }).join('');
   $('content').innerHTML=`<div class="alert alert-info" style="margin-bottom:16px">Auto-generated from invoices and payments. Use <strong>Journal Entry</strong> for adjustments and payroll deduction postings to 1300.</div>${html||'<div class="empty-state"><div class="empty-icon">⊞</div><div>No entries yet</div></div>'}`;
+}
+
+// ═══════════════════════════════════════════════
+// TRIAL BALANCE
+// Sums every posted GL entry (all invoices, payments,
+// journal entries, bank matches, and daily settlements)
+// by account. Shows raw debit and credit totals per
+// account rather than a normalized single balance
+// column, so any account with an unexpected-sign
+// balance is visible rather than silently flipped.
+// ═══════════════════════════════════════════════
+function renderTrialBalance(){
+  $('topbar-actions').innerHTML=
+    `<input type="date" id="tb-asof" value="${tbFilter.asOf}" onchange="tbFilter.asOf=this.value;renderTrialBalance()" style="padding:6px 10px;border:1px solid var(--border);border-radius:var(--r);font-size:13px" title="As of date (leave blank for all entries)">`+
+    `<select onchange="tbFilter.era=this.value;renderTrialBalance()" style="padding:6px 10px;border:1px solid var(--border);border-radius:var(--r);font-size:13px">`+
+      `<option value="all" ${tbFilter.era==='all'?'selected':''}>All eras</option>`+
+      `<option value="dc" ${tbFilter.era==='dc'?'selected':''}>Dream Center</option>`+
+      `<option value="troy" ${tbFilter.era==='troy'?'selected':''}>Troy (Pre-Acq.)</option>`+
+      `<option value="dc-paid" ${tbFilter.era==='dc-paid'?'selected':''}>DC Paid for Troy</option>`+
+    `</select>`;
+
+  const entries=DB.gl.filter(je=>
+    (!tbFilter.asOf||je.date<=tbFilter.asOf)&&
+    (tbFilter.era==='all'||(je.era||ERA.DC)===tbFilter.era)
+  );
+
+  const totals={};
+  entries.forEach(je=>je.entries.forEach(e=>{
+    if(!totals[e.acct])totals[e.acct]={dr:0,cr:0};
+    totals[e.acct].dr+=e.dr||0;
+    totals[e.acct].cr+=e.cr||0;
+  }));
+
+  const typeOrder=['Asset','Liability','Equity','Revenue','Expense'];
+  const typeLabel={Asset:'Assets',Liability:'Liabilities',Equity:'Equity',Revenue:'Revenue',Expense:'Expenses'};
+  let grandDr=0,grandCr=0;
+  const sections=typeOrder.map(type=>{
+    const accts=COA.filter(a=>a.type===type&&totals[a.acct]&&(totals[a.acct].dr>0.004||totals[a.acct].cr>0.004));
+    if(accts.length===0)return'';
+    let secDr=0,secCr=0;
+    const rows=accts.map(a=>{
+      const t=totals[a.acct];const net=t.dr-t.cr;
+      secDr+=t.dr;secCr+=t.cr;grandDr+=t.dr;grandCr+=t.cr;
+      return`<tr>
+        <td class="mono">${a.acct}</td><td>${a.name}</td>
+        <td class="text-right mono">${t.dr>0.004?fmt(t.dr):'—'}</td>
+        <td class="text-right mono">${t.cr>0.004?fmt(t.cr):'—'}</td>
+        <td class="text-right mono fw600" style="color:${net>=0?'var(--ink)':'var(--red)'}">${fmt(net)}</td>
+      </tr>`;
+    }).join('');
+    return`<div class="card" style="margin-bottom:10px">
+      <div class="card-header" style="background:var(--bg)"><span class="card-title">${typeLabel[type]}</span></div>
+      <div style="padding:4px 0"><table style="width:100%">
+        <thead><tr><th style="padding:6px 12px;font-size:10px;color:var(--ink-lo);width:80px">Acct</th><th style="padding:6px 12px;font-size:10px;color:var(--ink-lo)">Account</th><th style="padding:6px 12px;font-size:10px;color:var(--ink-lo);text-align:right;width:110px">Debit</th><th style="padding:6px 12px;font-size:10px;color:var(--ink-lo);text-align:right;width:110px">Credit</th><th style="padding:6px 12px;font-size:10px;color:var(--ink-lo);text-align:right;width:110px">Net</th></tr></thead>
+        <tbody>${rows}</tbody>
+        <tfoot><tr style="border-top:1px solid var(--border)"><td></td><td style="font-weight:600;padding:6px 12px">Subtotal — ${typeLabel[type]}</td><td class="text-right mono fw600" style="padding:6px 12px">${fmt(secDr)}</td><td class="text-right mono fw600" style="padding:6px 12px">${fmt(secCr)}</td><td></td></tr></tfoot>
+      </table></div>
+    </div>`;
+  }).join('');
+
+  const diff=Math.round((grandDr-grandCr)*100)/100;
+  const balanced=Math.abs(diff)<0.005;
+
+  $('content').innerHTML=
+    `<div class="alert alert-info" style="margin-bottom:16px">Sums every posted GL entry (invoice accruals, payments, manual journal entries, bank matches, and daily settlements)${tbFilter.asOf?' through '+fmtDate(tbFilter.asOf):' as of today'}. Debit and credit totals shown raw per account - check the Net column for anything with an unexpected sign.</div>`+
+    (sections||'<div class="empty-state"><div class="empty-icon">⊞</div><div>No GL entries yet</div></div>')+
+    `<div class="card"><div class="card-body" style="display:flex;justify-content:space-between;align-items:center">
+      <div style="font-size:13px;font-weight:700">Total</div>
+      <div style="display:flex;gap:24px;align-items:center">
+        <span style="font-size:13px;color:var(--ink-mid)">Debits: <strong class="mono" style="color:var(--ink)">${fmt(grandDr)}</strong></span>
+        <span style="font-size:13px;color:var(--ink-mid)">Credits: <strong class="mono" style="color:var(--ink)">${fmt(grandCr)}</strong></span>
+        <span style="font-size:13px;font-weight:700;color:${balanced?'var(--green)':'var(--red)'}">${balanced?'✓ Balanced':'Out of balance by '+fmt(Math.abs(diff))}</span>
+      </div>
+    </div></div>`;
 }
 
 // ═══════════════════════════════════════════════
@@ -2302,7 +2422,7 @@ function renderLineItems(){
         oninput="lineItems[${i}].description=this.value;autoMatchIngredient(${i},this.value)">
       <select onchange="lineItems[${i}].acct=this.value">
         <option value="">Account…</option>
-        ${COA.filter(a=>a.type!=='Liability'&&a.type!=='Equity').map(a=>`<option value="${a.acct}" ${line.acct===a.acct?'selected':''}>${a.acct} · ${a.name}</option>`).join('')}
+        ${COA.filter(a=>a.type!=='Liability'&&a.type!=='Equity'&&a.type!=='Revenue').map(a=>`<option value="${a.acct}" ${line.acct===a.acct?'selected':''}>${a.acct} · ${a.name}</option>`).join('')}
       </select>
       <div class="ing-cell">
         <select id="ing-sel-${i}" onchange="lineItems[${i}].ingredient=this.value;onIngredientChange(${i})">
@@ -2499,7 +2619,7 @@ function openPaymentModal(invoiceId){
       <div class="form-group"><label>Amount *</label><input type="number" id="pmt-amount" min="0.01" step="0.01" placeholder="0.00" value="${pre?pre.balance.toFixed(2):''}"></div>
       <div class="form-group"><label>Method</label><select id="pmt-method"><option>ACH</option><option>Check</option><option>Credit Card</option><option>Cash</option><option>Payroll Deduction</option><option>Other</option></select></div>
       <div class="form-group"><label>Reference / Check #</label><input id="pmt-ref" placeholder="ACH trace, check #…"></div>
-      <div class="form-group"><label>Cash Account</label><select id="pmt-cash">${COA.filter(a=>a.acct.startsWith('1')&&a.acct!=='1300').map(a=>`<option value="${a.acct}" ${a.acct==='1010'?'selected':''}>${a.acct} · ${a.name}</option>`).join('')}</select></div>
+      <div class="form-group"><label>Cash Account</label><select id="pmt-cash">${COA.filter(a=>a.acct.startsWith('1')&&a.acct!=='1300'&&a.acct!=='1015').map(a=>`<option value="${a.acct}" ${a.acct==='1010'?'selected':''}>${a.acct} · ${a.name}</option>`).join('')}</select></div>
       <div class="form-group span-2"><label>Memo</label><input id="pmt-memo" placeholder="Payment notes…"></div>
     </div>
     <div id="pmt-preview" style="margin-top:8px"></div></div>
@@ -4533,6 +4653,7 @@ async function confirmRevMatch(){
     };
     await saveBankMatch(matchRow);
     REV.bankMatches.push(matchRow);
+    await postRevMatchTransferGL(row, s, matchId);
   }
 
   hideLoadingOverlay();
@@ -4541,9 +4662,29 @@ async function confirmRevMatch(){
   if(currentView === 'bank-ledger') renderBankLedger();
 }
 
+// Transfers a settlement's recognized total out of Undeposited Funds and
+// into the actual bank account once the deposit is confirmed via a
+// Bank Ledger match. Uses the same settlementGLTotal() figure booked at
+// settlement time (not the bank row's raw amount), so Undeposited Funds
+// always nets to exactly zero for a matched settlement -- any real-world
+// gap between what Clover recognized and what the bank actually shows
+// remains visible as an unmatched/leftover amount on the bank ledger row
+// itself, same as how revenue matching already works today.
+async function postRevMatchTransferGL(row, s, matchId){
+  var total=settlementGLTotal(s);
+  if(total<=0)return;
+  var cashAcct = row.bank === 'Glacier Bank' ? '1010' : '1011';
+  var cashName = row.bank === 'Glacier Bank' ? 'Glacier Bank' : 'SouthState Bank';
+  var je={id:nextGLId(),date:row.pmnt_date,ref:matchId,era:ERA.DC,
+    memo:'Deposit confirmed — '+fmtDate(s.date)+' settlement ('+(row.customer_vendor||'')+')',
+    entries:[{acct:cashAcct,name:cashName,dr:total,cr:0},{acct:'1015',name:'Undeposited Funds',dr:0,cr:total}]};
+  await saveGLToSB(je);
+}
+
 async function unmatchBankRow(rowId){
   var matches = blRowMatches(rowId);
   var apMatches = matches.filter(function(m){ return m.match_kind === 'ap_payment'; });
+  var revMatches = matches.filter(function(m){ return m.match_kind === 'clover_revenue'; });
 
   var reverseToo = false;
   if(apMatches.length > 0){
@@ -4556,6 +4697,13 @@ async function unmatchBankRow(rowId){
     if(!reverseToo){
       if(!confirm('Remove match link only? The payment(s) will remain recorded in AP.')) return;
     }
+  } else if(revMatches.length > 0){
+    if(!confirm(
+      'This transaction is matched to ' + revMatches.length + ' settlement date(s).\n\n' +
+      'Removing the match will also reverse the deposit-transfer GL entry for ' +
+      (revMatches.length === 1 ? 'that settlement' : 'those settlements') +
+      ' - the amount moves back into Undeposited Funds pending a new match.'
+    )) return;
   } else {
     if(!confirm('Remove match(es) for this transaction?')) return;
   }
@@ -4582,6 +4730,16 @@ async function unmatchBankRow(rowId){
     }
   }
 
+  // Revenue-match transfer entries have no standalone "payment" record to
+  // optionally leave in place -- they exist purely because of the match,
+  // so unmatching always reverses them (moves the amount back into
+  // Undeposited Funds, ref keyed on the match id itself).
+  for(var j = 0; j < revMatches.length; j++){
+    var rm = revMatches[j];
+    await _sb.from('gl_entries').delete().eq('ref', rm.id);
+    DB.gl = DB.gl.filter(function(x){ return x.ref !== rm.id; });
+  }
+
   var ok = await deleteBankMatchesForRow(rowId);
   hideLoadingOverlay();
   if(!ok){ showToast('Failed to remove match','warn'); return; }
@@ -4604,7 +4762,7 @@ async function unmatchBankRow(rowId){
     }
   }
 
-  showToast(reverseToo ? 'Match removed and payment(s) reversed' : 'Match removed');
+  showToast(reverseToo ? 'Match removed and payment(s) reversed' : (revMatches.length>0 ? 'Match removed and deposit transfer reversed' : 'Match removed'));
   updateSidebarStats();
   if(currentView === 'bank-ledger') renderBankLedger();
 }
