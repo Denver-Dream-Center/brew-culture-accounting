@@ -4301,6 +4301,52 @@ function openBankLedgerModal(editId){
       '<input type="hidden" id="era-val-bl" value="' + v('era','dc') + '"></div>';
   }
 
+  // ── Direct GL-booking section, inline in the edit modal ──────────────
+  // Only offered for existing, still-open rows: a brand-new row has no id
+  // yet to attach a JE/match to, and an already matched/coded row must be
+  // unmatched first (its GL entry already exists and era is derived from it).
+  var blStatus = editId ? blRowStatus(editId) : null;
+  var blMType = editId ? blMatchType(row) : null;
+  var glSection = '';
+  if(editId && blStatus === 'open'){
+    var suggestedAcct = BL_DIRECT_ACCT_MAP[row.account] || '';
+    var glAcctOptions = COA.map(function(a){
+      return '<option value="' + a.acct + '"' + (a.acct===suggestedAcct?' selected':'') + '>' + a.acct + ' \xb7 ' + a.name + '</option>';
+    }).join('');
+    var routeNote = '';
+    if(blMType === 'ap'){
+      routeNote = '<div class="alert" style="background:var(--amber-lo);border:1px solid var(--amber);font-size:12px;margin-bottom:10px">' +
+        'This category normally routes through <strong>AP Matching</strong> (linked to a vendor invoice). ' +
+        'Use the picker below only if you want to book it straight to the GL instead. ' +
+        '<button class="btn btn-ghost btn-sm" style="margin-left:4px" onclick="closeModal();openAPMatchModal(\'' + editId + '\')">Open AP Match instead</button>' +
+      '</div>';
+    } else if(blMType === 'revenue'){
+      routeNote = '<div class="alert" style="background:var(--amber-lo);border:1px solid var(--amber);font-size:12px;margin-bottom:10px">' +
+        'This category normally routes through <strong>Clover Revenue Matching</strong>. ' +
+        'Use the picker below only if you want to book it straight to the GL instead. ' +
+        '<button class="btn btn-ghost btn-sm" style="margin-left:4px" onclick="closeModal();openRevMatchModal(\'' + editId + '\')">Open Revenue Match instead</button>' +
+      '</div>';
+    }
+    glSection =
+      '<div style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">' +
+        '<div style="font-weight:600;font-size:13px;margin-bottom:10px">Book to General Ledger</div>' +
+        routeNote +
+        '<div class="form-grid">' +
+          '<div class="form-group span-2"><label>GL Account *</label>' +
+            '<select id="bl-gl-acct"><option value="">-- Select account --</option>' + glAcctOptions + '</select>' +
+            '<span class="form-hint">' + (suggestedAcct ? 'Suggested based on category "' + row.account + '" \u2014 change it if that is not right.' : 'No default suggestion for "' + (row.account||'this category') + '" \u2014 pick the right account.') + '</span>' +
+          '</div>' +
+          '<div class="form-group span-2"><label>GL Memo</label><input id="bl-gl-memo" placeholder="Optional \u2014 defaults to vendor and account"></div>' +
+        '</div>' +
+        '<div id="bl-gl-err" style="color:var(--red);font-size:12px;margin-top:8px"></div>' +
+      '</div>';
+  } else if(editId && blStatus !== 'open'){
+    glSection = '<div style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border);font-size:12px;color:var(--ink-mid)">' +
+      'This transaction is already ' + (blStatus==='matched'?'matched':'coded') + ' to the GL. ' +
+      'Click <strong>Unmatch</strong> on the ledger row first if you need to change how it was booked.' +
+    '</div>';
+  }
+
   openModal(
     '<div class="modal" style="max-width:600px">' +
       '<div class="modal-header">' +
@@ -4325,10 +4371,12 @@ function openBankLedgerModal(editId){
           '<div class="form-group span-2"><label>Note</label><input id="bl-note" value="' + v('note') + '" placeholder="Optional free-text note"></div>' +
         '</div>' +
         '<div id="bl-err" style="color:var(--red);font-size:12px;margin-top:8px"></div>' +
+        glSection +
       '</div>' +
       '<div class="modal-footer">' +
         '<button class="btn btn-ghost" onclick="closeModal()">Cancel</button>' +
-        '<button class="btn btn-primary" onclick="saveBankLedgerModal(\'' + (editId||'') + '\')">Save</button>' +
+        '<button class="btn btn-secondary" onclick="saveBankLedgerModal(\'' + (editId||'') + '\')">Save</button>' +
+        (editId && blStatus === 'open' ? '<button class="btn btn-primary" onclick="saveAndPostToGL(\'' + editId + '\')">Save &amp; Post to GL</button>' : '') +
       '</div>' +
     '</div>'
   );
@@ -4813,14 +4861,12 @@ function openDirectPostModal(rowId){
   );
 }
 
-async function confirmDirectPost(rowId){
-  var row = REV.bankLedger.find(function(r){ return r.id === rowId; });
-  if(!row) return;
-  var acct = $('direct-post-acct').value;
-  var memoInput = $('direct-post-memo').value.trim();
-  var errEl = $('direct-post-err');
-  if(!acct){ errEl.textContent='Select a GL account.'; return; }
-
+// Shared core of the "Code to GL" direct-posting flow — posts one JE
+// (Dr/Cr cash vs the chosen account, direction depending on debit/credit)
+// and records a 'direct' bank_ledger_match. Used by both the standalone
+// "Code to GL" button/modal and the inline GL section in the edit modal,
+// so the two paths can never drift apart.
+async function postBankRowToGL(row, acct, memoInput){
   var acctInfo = COA.find(function(a){ return a.acct===acct; });
   var acctName = acctInfo ? acctInfo.name : acct;
   var amtAbs = Math.abs(parseFloat(row.gross_amount)||0);
@@ -4834,27 +4880,109 @@ async function confirmDirectPost(rowId){
     ? [{acct:cashAcct,name:cashName,dr:amtAbs,cr:0},{acct:acct,name:acctName,dr:0,cr:amtAbs}]
     : [{acct:acct,name:acctName,dr:amtAbs,cr:0},{acct:cashAcct,name:cashName,dr:0,cr:amtAbs}];
 
-  showLoadingOverlay('Recording...');
   var je = {id:await nextGLId(), date:row.pmnt_date, ref:'DIRECT-'+row.id, era:ERA.DC,
     memo:memoInput||((row.customer_vendor||'(no vendor)')+' - '+acctName),
     entries:entries};
   var glOk = await saveGLToSB(je);
-  if(!glOk){
-    hideLoadingOverlay();
+  if(!glOk) return false;
+
+  var matchId = 'BLM-'+Date.now();
+  await saveBankMatch({
+    id:matchId, bank_ledger_id:row.id, match_kind:'direct',
+    payment_id:null, invoice_id:null, amount:amtAbs, created_at:new Date().toISOString()
+  });
+  REV.bankMatches.push({id:matchId, bank_ledger_id:row.id, match_kind:'direct', payment_id:null, invoice_id:null, amount:amtAbs});
+  return true;
+}
+
+async function confirmDirectPost(rowId){
+  var row = REV.bankLedger.find(function(r){ return r.id === rowId; });
+  if(!row) return;
+  var acct = $('direct-post-acct').value;
+  var memoInput = $('direct-post-memo').value.trim();
+  var errEl = $('direct-post-err');
+  if(!acct){ errEl.textContent='Select a GL account.'; return; }
+
+  showLoadingOverlay('Recording...');
+  var ok = await postBankRowToGL(row, acct, memoInput);
+  hideLoadingOverlay();
+  if(!ok){
     errEl.textContent='Save failed — the entry was not posted. Check your connection and try again.';
     return;
   }
 
-  await saveBankMatch({
-    id:'BLM-'+Date.now(), bank_ledger_id:row.id, match_kind:'direct',
-    payment_id:null, invoice_id:null, amount:amtAbs, created_at:new Date().toISOString()
-  });
-  REV.bankMatches.push({id:'BLM-'+Date.now(), bank_ledger_id:row.id, match_kind:'direct', payment_id:null, invoice_id:null, amount:amtAbs});
-
-  hideLoadingOverlay();
+  var acctInfo = COA.find(function(a){ return a.acct===acct; });
   closeModal();
-  showToast('Coded to '+acct+' \xb7 '+acctName);
+  showToast('Coded to '+acct+' \xb7 '+(acctInfo?acctInfo.name:acct));
   if(currentView === 'bank-ledger') renderBankLedger();
+}
+
+// Called from the inline "Book to General Ledger" section of the edit
+// modal: saves whatever row-field edits were made (same validation/shape
+// as the plain Save button), then immediately posts the result to GL —
+// one click instead of Save, close, find the row again, click Code to GL.
+async function saveAndPostToGL(editId){
+  if(!editId) return;
+  var mainErr = $('bl-err');
+  var glErr = $('bl-gl-err');
+  var acct = $('bl-gl-acct') ? $('bl-gl-acct').value : '';
+  if(!acct){ if(glErr) glErr.textContent='Select a GL account.'; return; }
+
+  var pmntDate = $('bl-pmnt-date').value;
+  var bank     = $('bl-bank').value;
+  var vendor   = $('bl-vendor').value.trim();
+  var transType= $('bl-trans-type').value;
+  var amtRaw   = parseFloat($('bl-amount').value) || 0;
+
+  if(!pmntDate){ mainErr.textContent='Payment date required.'; return; }
+  if(!vendor)  { mainErr.textContent='Customer/Vendor required.'; return; }
+  if(!amtRaw)  { mainErr.textContent='Amount required.'; return; }
+
+  var newEra = $('era-val-bl').value || 'dc';
+  var existingMatches = blRowMatches(editId);
+  var hadEra = REV.bankLedger.find(function(r){ return r.id === editId; });
+  var oldEra = hadEra ? (hadEra.era||'dc') : 'dc';
+  if(newEra !== oldEra && existingMatches.length > 0){
+    mainErr.innerHTML = 'This transaction is matched to ' + existingMatches.length +
+      ' AP payment(s)/settlement(s) \u2014 era is derived from the match and can\'t be edited directly. ' +
+      'Click <strong>Unmatch</strong> on the ledger row to change it.';
+    return;
+  }
+
+  var grossAmt = transType === 'Debit' ? -Math.abs(amtRaw) : Math.abs(amtRaw);
+  var existingRow = REV.bankLedger.find(function(r){ return r.id === editId; });
+  var row = {
+    id: editId,
+    row_id: existingRow ? existingRow.row_id : (REV.bankLedger.length + 1),
+    pmnt_date: pmntDate,
+    bank: bank,
+    customer_vendor: vendor,
+    description: $('bl-desc').value.trim(),
+    era: newEra,
+    stmt_type: $('bl-stmt-type').value,
+    stmt_sec: $('bl-stmt-sec').value,
+    stmt_category: $('bl-stmt-cat').value,
+    account: $('bl-account').value,
+    note: $('bl-note').value.trim(),
+    ck_num: $('bl-ck').value.trim(),
+    trans_type: transType,
+    gross_amount: grossAmt
+  };
+
+  showLoadingOverlay('Saving & posting...');
+  var saveOk = await saveBankLedgerRow(row);
+  if(!saveOk){ hideLoadingOverlay(); mainErr.textContent='Save failed. Check console.'; return; }
+  var idx = REV.bankLedger.findIndex(function(r){ return r.id === editId; });
+  if(idx >= 0) REV.bankLedger[idx] = row; else REV.bankLedger.push(row);
+
+  var memoInput = $('bl-gl-memo').value.trim();
+  var postOk = await postBankRowToGL(row, acct, memoInput);
+  hideLoadingOverlay();
+  if(!postOk){ glErr.textContent='Transaction saved, but GL posting failed. Check console and try posting again.'; return; }
+
+  closeModal();
+  showToast('Transaction saved and posted to GL');
+  renderBankLedger();
 }
 
 // ── CLOVER REVENUE MATCHING ─────────────────────────────────────────────
