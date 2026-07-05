@@ -316,6 +316,7 @@
   <nav class="sidebar" id="sidebar-root"></nav>
   <input type="file" id="import-file-input" accept=".json" style="display:none" onchange="importData(this)">
   <input type="file" id="clover-file-input" accept=".xlsx,.xls" style="display:none" onchange="handleCloverFile(this)">
+  <input type="file" id="loyalty-file-input" accept=".xlsx,.xls" style="display:none" onchange="handleLoyaltyFile(this)">
   <input type="file" id="ledger-file-input" accept=".xlsx,.xls" style="display:none" onchange="handleLedgerFile(this)">
   <div class="main">
     <div class="topbar">
@@ -1024,6 +1025,34 @@ function parseCloverXLSX(ab){
     return '';
   }
 
+  // Same problem as extractDate but for a time-only value: SheetJS may hand
+  // back a Date object (epoch date + time-of-day), an Excel fractional-day
+  // serial, or a plain "HH:MM:SS" string depending on how the cell was
+  // formatted in the source file. Postgres will hard-reject anything that
+  // isn't a clean HH:MM:SS for a TIME column, so this always returns either
+  // a valid string or ''.
+  function extractTime(val){
+    if(!val && val !== 0) return '';
+    if(val instanceof Date){
+      var hh = String(val.getUTCHours()).padStart(2,'0');
+      var mm = String(val.getUTCMinutes()).padStart(2,'0');
+      var ss = String(val.getUTCSeconds()).padStart(2,'0');
+      return hh + ':' + mm + ':' + ss;
+    }
+    if(typeof val === 'string' && val.match(/^\d{1,2}:\d{2}(:\d{2})?$/)){
+      return val.length === 5 ? val + ':00' : val;
+    }
+    if(typeof val === 'number'){
+      // Excel time serial: fractional part of a day
+      var totalSec = Math.round((val % 1) * 86400);
+      var h = String(Math.floor(totalSec/3600)).padStart(2,'0');
+      var m = String(Math.floor((totalSec%3600)/60)).padStart(2,'0');
+      var s = String(totalSec%60).padStart(2,'0');
+      return h + ':' + m + ':' + s;
+    }
+    return '';
+  }
+
   // --- Build order-level map (for tip/tax/payment dedup) ---
   var orderMap = {};
   rows.forEach(function(r){
@@ -1034,8 +1063,11 @@ function parseCloverXLSX(ab){
 
       orderMap[oid] = {
         date: dateStr,
+        time: extractTime(r['time']),
+        employee: r['employee'] || '',
         payment_type: r['payment_type'] || '',
         card_type: r['card_type'] || '',
+        order_note: r['orderNote'] || '',
         tip: parseFloat(r['Order_Tip_Amount']) || 0,
         tax: parseFloat(r['Order_Tax']) || 0,
         order_net: parseFloat(r['Order_Net']) || 0,
@@ -1050,18 +1082,32 @@ function parseCloverXLSX(ab){
     var itemName = normaliseItemName(r['item_name']);
     var isRevenue = r['is_revenue'] === true || String(r['is_revenue']).toLowerCase() === 'true';
     var refunded  = r['refunded']   === true || String(r['refunded']).toLowerCase()   === 'true';
+    var exchanged = r['exchanged']  === true || String(r['exchanged']).toLowerCase()  === 'true';
     orderMap[oid].items.push({
       item_name:    itemName,
+      item_id:      r['item_id'] || '',
+      sku:          r['sku'] || '',
+      item_code:    r['item_code'] || '',
       category:     r['category'] || '',
+      category1:    r['category1'] || '',
+      category2:    r['category2'] || '',
+      category3:    r['category3'] || '',
+      tag:          r['tag'] || '',
+      tag1:         r['tag1'] || '',
+      tag2:         r['tag2'] || '',
+      tag3:         r['tag3'] || '',
       modifiers:    r['modifiers'] || '',
       item_price:   parseFloat(r['item_price']) || 0,
       item_gross:   parseFloat(r['item_gross_amount']) || 0,
       item_net:     parseFloat(r['item_net_amount']) || 0,
       item_tax:     parseFloat(r['item_tax_amount']) || 0,
       item_disc:    parseFloat(r['item_total_discount']) || 0,
+      item_discount_names: r['item_discount_names'] || '',
+      item_total_refund:   parseFloat(r['item_total_refund']) || 0,
       item_mod_amt: parseFloat(r['item_modifications_amount']) || 0,
       is_revenue:   isRevenue,
-      refunded:     refunded
+      refunded:     refunded,
+      exchanged:    exchanged
     });
   });
 
@@ -1124,7 +1170,66 @@ function parseCloverXLSX(ab){
     day.item_count  = day.item_lines.length;
   });
 
-  return dayMap;
+  // --- Order-level and item-level detail, for clover_orders / clover_order_items ---
+  // Built from the same orderMap used for the day aggregate above, rather than
+  // discarded once totals are computed — this is what feeds future per-order
+  // and per-item analysis (volume by time of day, loyalty cross-reference,
+  // menu-item performance) that the day-level daily_settlement can't answer.
+  var cloverOrders = [];
+  var cloverItems = [];
+  Object.keys(orderMap).forEach(function(oid){
+    var o = orderMap[oid];
+    if(!o.date) return; // no usable date, can't attribute to a day
+    cloverOrders.push({
+      order_id: oid,
+      sale_date: o.date,
+      sale_time: o.time || null,
+      employee: o.employee || '',
+      payment_type: o.payment_type || '',
+      card_type: o.card_type || '',
+      order_note: o.order_note || '',
+      order_net: o.order_net,
+      order_tax: o.tax,
+      order_tip_amount: o.tip,
+      order_amount_collected: o.amount_collected,
+      order_total_discount: o.discount,
+      order_discount_names: o.discount_names || '',
+      order_total_refund: o.refund,
+      is_revenue: o.items.some(function(it){ return it.is_revenue; }),
+      refunded: o.items.every(function(it){ return it.refunded; }) && o.items.length > 0
+    });
+    o.items.forEach(function(it, idx){
+      cloverItems.push({
+        id: oid + '-' + idx,
+        order_id: oid,
+        item_id: it.item_id || '',
+        sku: it.sku || '',
+        item_code: it.item_code || '',
+        item_name: it.item_name,
+        category: it.category || '',
+        category1: it.category1 || '',
+        category2: it.category2 || '',
+        category3: it.category3 || '',
+        tag: it.tag || '',
+        tag1: it.tag1 || '',
+        tag2: it.tag2 || '',
+        tag3: it.tag3 || '',
+        modifiers: it.modifiers || '',
+        item_price: it.item_price,
+        item_gross_amount: it.item_gross,
+        item_net_amount: it.item_net,
+        item_tax_amount: it.item_tax,
+        item_total_discount: it.item_disc,
+        item_discount_names: it.item_discount_names || '',
+        item_total_refund: it.item_total_refund || 0,
+        refunded: it.refunded,
+        is_revenue: it.is_revenue,
+        exchanged: it.exchanged || false
+      });
+    });
+  });
+
+  return {dayMap: dayMap, orders: cloverOrders, items: cloverItems};
 }
 
 // Build settlement record for a parsed day
@@ -1289,6 +1394,22 @@ function renderRevImport(){
         '<div id="clover-parse-result" style="margin-top:16px"></div>' +
       '</div>' +
     '</div>' +
+    '<div class="card" style="margin-top:16px">' +
+      '<div class="card-header"><span class="card-title">Loyalty App Import</span>' +
+        '<span style="font-size:12px;color:var(--ink-lo)">Loyalzoo transaction export (.xlsx)</span>' +
+      '</div>' +
+      '<div class="card-body">' +
+        '<div class="upload-zone" id="loyalty-drop-zone" onclick="$$(\'loyalty-file-input\').click()"' +
+          ' ondragover="event.preventDefault();this.classList.add(\'dragover\')"' +
+          ' ondragleave="this.classList.remove(\'dragover\')"' +
+          ' ondrop="event.preventDefault();this.classList.remove(\'dragover\');handleLoyaltyDrop(event.dataTransfer.files)">' +
+          '<div class="upload-icon">&#8679;</div>' +
+          '<div class="upload-title">Drop Loyalty App export here or click to browse</div>' +
+          '<div class="upload-sub">P#### transactions *.xlsx</div>' +
+        '</div>' +
+        '<div id="loyalty-parse-result" style="margin-top:16px"></div>' +
+      '</div>' +
+    '</div>' +
     '<div class="card" style="margin-top:0">' +
       '<div class="card-header"><span class="card-title">Already Imported</span></div>' +
       '<div class="card-body" style="padding:0">' +
@@ -1329,9 +1450,9 @@ function processCloverFile(file){
   reader.onload = function(e){
     try{
       var ab = e.target.result;
-      var dayMap = parseCloverXLSX(ab);
-      _cloverParsed = dayMap;
-      renderCloverPreview(dayMap);
+      var parsed = parseCloverXLSX(ab);
+      _cloverParsed = parsed;
+      renderCloverPreview(parsed.dayMap);
     } catch(err){
       resultEl.innerHTML = '<div class="alert" style="background:var(--red-lo);border:1px solid #EAB5B1;color:var(--red)">Parse error: ' + err.message + '</div>';
       console.error(err);
@@ -1412,12 +1533,13 @@ function renderCloverPreview(dayMap){
 
 async function confirmCloverImport(){
   if(!_cloverParsed) return;
-  var dates = Object.keys(_cloverParsed);
+  var dayMap = _cloverParsed.dayMap;
+  var dates = Object.keys(dayMap);
   showLoadingOverlay('Saving ' + dates.length + ' day(s)...');
   var errors = [];
   var glErrors = [];
   for(var i = 0; i < dates.length; i++){
-    var s = buildSettlement(_cloverParsed[dates[i]]);
+    var s = buildSettlement(dayMap[dates[i]]);
     // Check if already exists to preserve deposit_status
     var existing = REV.settlements.find(function(x){ return x.date === s.date; });
     if(existing){
@@ -1430,6 +1552,13 @@ async function confirmCloverImport(){
     var glOk = await postSettlementGL(s);
     if(!glOk) glErrors.push(dates[i]);
   }
+
+  // Order-level and item-level detail — separate tables, separate failure
+  // mode from the settlement/GL save above. A failure here doesn't block
+  // or roll back the accounting side; it's reported independently since
+  // this data feeds future analysis, not the books themselves.
+  var detailErr = await saveCloverOrdersAndItems(_cloverParsed.orders, _cloverParsed.items);
+
   hideLoadingOverlay();
   if(errors.length){
     showToast('Import failed for: ' + errors.join(', '), 'warn');
@@ -1439,12 +1568,199 @@ async function confirmCloverImport(){
     _cloverParsed = null;
     if(glErrors.length){
       showToast('Settlement(s) saved, but the GL entry failed for: ' + glErrors.join(', ') + ' — check Trial Balance and re-post manually via Journal Entry.', 'warn');
+    } else if(detailErr){
+      showToast('Imported ' + dates.length + ' day(s), but order/item detail failed to save \u2014 check console', 'warn');
     } else {
-      showToast('Imported ' + dates.length + ' day(s)');
+      showToast('Imported ' + dates.length + ' day(s), ' + _cloverParsed.orders.length + ' order(s), ' + _cloverParsed.items.length + ' item line(s)');
     }
     showView('rev-settlement');
   }
 }
+
+// Batch upsert order-level and item-level Clover detail. Chunked at 100 rows
+// per request, same pattern as the Bank Ledger bulk import, to stay well
+// under Supabase's request size limits on a full day (or multi-day) file.
+async function saveCloverOrdersAndItems(orders, items){
+  var CHUNK = 100;
+  var hadError = false;
+  for(var i = 0; i < orders.length; i += CHUNK){
+    var chunk = orders.slice(i, i + CHUNK);
+    var res = await _sb.from('clover_orders').upsert(chunk, {onConflict:'order_id'});
+    if(res.error){ console.error('saveCloverOrders chunk error', res.error); hadError = true; }
+  }
+  for(var j = 0; j < items.length; j += CHUNK){
+    var ichunk = items.slice(j, j + CHUNK);
+    var ires = await _sb.from('clover_order_items').upsert(ichunk, {onConflict:'id'});
+    if(ires.error){ console.error('saveCloverItems chunk error', ires.error); hadError = true; }
+  }
+  return hadError;
+}
+
+// ═══════════════════════════════════════════════
+// REVENUE MODULE — LOYALTY APP IMPORT
+// ═══════════════════════════════════════════════
+var _loyaltyParsed = null; // holds parsed transaction rows between parse and confirm
+
+function parseLoyaltyXLSX(ab){
+  var wb = XLSX.read(ab, {type:'array', cellDates:true});
+  var ws = wb.Sheets[wb.SheetNames[0]];
+  var rows = XLSX.utils.sheet_to_json(ws, {raw:true, defval:''});
+
+  // Full timestamp (date + time) -> ISO 8601 string, using UTC accessors so
+  // a SheetJS Date object (anchored to the naive Excel serial, no real
+  // timezone attached) doesn't get silently shifted by the browser's local
+  // timezone. Matches the same UTC-accessor approach used in parseCloverXLSX.
+  function extractDateTime(val){
+    if(!val && val !== 0) return null;
+    if(val instanceof Date){
+      return val.getUTCFullYear() + '-' + String(val.getUTCMonth()+1).padStart(2,'0') + '-' +
+        String(val.getUTCDate()).padStart(2,'0') + 'T' +
+        String(val.getUTCHours()).padStart(2,'0') + ':' +
+        String(val.getUTCMinutes()).padStart(2,'0') + ':' +
+        String(val.getUTCSeconds()).padStart(2,'0');
+    }
+    if(typeof val === 'string' && val.trim()) return val.trim();
+    if(typeof val === 'number') return excelDateToStr(val); // fallback, date-only precision
+    return null;
+  }
+
+  function extractDateOnly(val){
+    if(!val && val !== 0) return null;
+    if(val instanceof Date){
+      return val.getUTCFullYear() + '-' + String(val.getUTCMonth()+1).padStart(2,'0') + '-' + String(val.getUTCDate()).padStart(2,'0');
+    }
+    if(typeof val === 'string' && val.match(/^\d{4}-\d{2}-\d{2}/)) return val.slice(0,10);
+    if(typeof val === 'number') return excelDateToStr(val);
+    return null;
+  }
+
+  function toBool(val){
+    if(typeof val === 'boolean') return val;
+    var s = String(val).trim().toLowerCase();
+    if(s === 'true') return true;
+    if(s === 'false') return false;
+    return null;
+  }
+
+  return rows.filter(function(r){ return r['Id']; }).map(function(r){
+    return {
+      id: String(r['Id']),
+      type: r['Type'] || '',
+      reward_count: parseInt(r['Reward count']) || 0,
+      amount: parseFloat(r['Amount']) || 0,
+      description: r['Description'] || '',
+      order_id: r['Order Id'] || null,
+      staff_id: r['Staff Id'] || null,
+      ts: extractDateTime(r['Timestamp']),
+      customer_id: r['Customer id'] ? String(r['Customer id']) : null,
+      first_name: r['First name'] || '',
+      last_name: r['Last name'] || '',
+      email: r['Email'] || '',
+      phone_number: r['Phone number'] ? String(r['Phone number']) : '',
+      comment: r['Comment'] || '',
+      points_balance: parseInt(r['Points']) || 0,
+      barcode: r['Barcode'] ? String(r['Barcode']) : '',
+      last_purchase: extractDateOnly(r['Last purchase']),
+      last_checkin: extractDateOnly(r['Last_checkin']),
+      consent: toBool(r['Consent']),
+      status: r['Status'] || '',
+      imported_at: new Date().toISOString()
+    };
+  });
+}
+
+function handleLoyaltyDrop(files){
+  if(files && files[0]) processLoyaltyFile(files[0]);
+}
+
+function handleLoyaltyFile(input){
+  if(input.files && input.files[0]) processLoyaltyFile(input.files[0]);
+  input.value = '';
+}
+
+function processLoyaltyFile(file){
+  var resultEl = $('loyalty-parse-result');
+  if(!resultEl) return;
+  resultEl.innerHTML = '<div style="color:var(--ink-mid);font-size:13px">Reading file...</div>';
+  var reader = new FileReader();
+  reader.onload = function(e){
+    try{
+      var rows = parseLoyaltyXLSX(e.target.result);
+      _loyaltyParsed = rows;
+      renderLoyaltyPreview(rows);
+    } catch(err){
+      resultEl.innerHTML = '<div class="alert" style="background:var(--red-lo);border:1px solid #EAB5B1;color:var(--red)">Parse error: ' + err.message + '</div>';
+      console.error(err);
+    }
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+function renderLoyaltyPreview(rows){
+  var resultEl = $('loyalty-parse-result');
+  if(!resultEl) return;
+  if(rows.length === 0){
+    resultEl.innerHTML = '<div class="alert alert-info">No transactions found in file.</div>';
+    return;
+  }
+  var pointsGiven = rows.filter(function(r){ return r.type === 'points_given'; }).length;
+  var rewardsGiven = rows.filter(function(r){ return r.type === 'reward_given'; }).length;
+  var noOrder = rows.filter(function(r){ return !r.order_id; }).length;
+
+  var shown = rows.slice(0, 50);
+  var tableRows = shown.map(function(r){
+    var name = (r.first_name + ' ' + r.last_name).trim() || '\u2014';
+    return '<tr>' +
+      '<td>' + (r.ts ? r.ts.replace('T',' ') : '\u2014') + '</td>' +
+      '<td>' + name + '</td>' +
+      '<td>' + r.type + '</td>' +
+      '<td class="text-right mono">' + r.reward_count + '</td>' +
+      '<td class="text-right mono">' + fmt(r.amount) + '</td>' +
+      '<td>' + (r.order_id || '<span style="color:var(--ink-lo)">none</span>') + '</td>' +
+      '<td>' + (r.status || '\u2014') + '</td>' +
+    '</tr>';
+  }).join('');
+  var truncNote = rows.length > 50 ? '<div style="font-size:11px;color:var(--ink-lo);margin-top:6px">Showing first 50 of ' + rows.length + ' rows.</div>' : '';
+
+  resultEl.innerHTML =
+    '<div class="alert alert-inv" style="margin-bottom:12px">Found ' + rows.length + ' transaction(s) \u2014 ' +
+      pointsGiven + ' points_given, ' + rewardsGiven + ' reward_given' +
+      (noOrder > 0 ? ', ' + noOrder + ' with no linked order' : '') +
+      '. Review below then confirm import.' +
+    '</div>' +
+    '<div class="parse-table-wrap">' +
+      '<table><thead><tr>' +
+        '<th>Timestamp</th><th>Customer</th><th>Type</th><th class="text-right">Points</th>' +
+        '<th class="text-right">Amount</th><th>Order Id</th><th>Status</th>' +
+      '</tr></thead><tbody>' + tableRows + '</tbody></table>' +
+    '</div>' + truncNote +
+    '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px">' +
+      '<button class="btn btn-secondary" onclick="_loyaltyParsed=null;$$(\'loyalty-parse-result\').innerHTML=\'\'">Cancel</button>' +
+      '<button class="btn btn-primary" onclick="confirmLoyaltyImport()">&#10003; Confirm Import</button>' +
+    '</div>';
+}
+
+async function confirmLoyaltyImport(){
+  if(!_loyaltyParsed || !_loyaltyParsed.length) return;
+  showLoadingOverlay('Saving ' + _loyaltyParsed.length + ' transaction(s)...');
+  var CHUNK = 100;
+  var hadError = false;
+  for(var i = 0; i < _loyaltyParsed.length; i += CHUNK){
+    var chunk = _loyaltyParsed.slice(i, i + CHUNK);
+    var res = await _sb.from('loyalty_transactions').upsert(chunk, {onConflict:'id'});
+    if(res.error){ console.error('loyalty import chunk error', res.error); hadError = true; }
+  }
+  hideLoadingOverlay();
+  var count = _loyaltyParsed.length;
+  _loyaltyParsed = null;
+  $('loyalty-parse-result').innerHTML = '';
+  if(hadError){
+    showToast('Import completed with errors \u2014 check console', 'warn');
+  } else {
+    showToast('Imported ' + count + ' loyalty transaction(s)');
+  }
+}
+
 
 // ═══════════════════════════════════════════════
 // REVENUE MODULE — DASHBOARD
