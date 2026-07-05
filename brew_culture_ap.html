@@ -1000,7 +1000,15 @@ function classifyPayment(pt){
 
 // Parse Clover XLSX ArrayBuffer -> structured day object
 function parseCloverXLSX(ab){
-  var wb = XLSX.read(ab, {type:'array', cellDates:true});
+  // cellDates deliberately OFF: SheetJS's date/time Date-object conversion
+  // turned out to be anchored to the browser's own local timezone (see the
+  // extractTime/extractDate bug fix above this was chasing). Rather than
+  // depend on the runtime's timezone matching Denver — which is a
+  // coincidence, not a guarantee — read the raw Excel serial numbers
+  // directly and do the date/time math ourselves. A serial is just a
+  // number (days since the epoch, fractional part = time of day); there is
+  // no timezone concept in it at all, so this is deterministic everywhere.
+  var wb = XLSX.read(ab, {type:'array', cellDates:false});
   var ws = wb.Sheets[wb.SheetNames[0]];
   var rows = XLSX.utils.sheet_to_json(ws, {raw:true, defval:''});
 
@@ -1729,17 +1737,19 @@ async function saveCloverOrdersAndItems(orders, items){
 var _loyaltyParsed = null; // holds parsed transaction rows between parse and confirm
 
 function parseLoyaltyXLSX(ab){
-  var wb = XLSX.read(ab, {type:'array', cellDates:true});
+  // cellDates OFF — see parseCloverXLSX for why. Raw numeric serials only.
+  var wb = XLSX.read(ab, {type:'array', cellDates:false});
   var ws = wb.Sheets[wb.SheetNames[0]];
   var rows = XLSX.utils.sheet_to_json(ws, {raw:true, defval:''});
 
   // Full timestamp (date + time) -> ISO 8601 string.
   //
-  // BUG FIX (Jan 2026): originally used UTC accessors on the assumption
-  // that SheetJS's Date objects were timezone-agnostic. Confirmed via
-  // browser debug log this is wrong — SheetJS anchors date/time serials to
-  // LOCAL midnight, so local getters are the correct read (see the same
-  // fix in parseCloverXLSX's extractDate/extractTime).
+  // With cellDates:false above, this always receives the raw numeric Excel
+  // serial (never a Date object) — the instanceof Date branch below is a
+  // harmless defensive fallback that shouldn't actually fire. The numeric
+  // branch does its own epoch-ms arithmetic, which is timezone-agnostic
+  // (new Date(ms) is not affected by local timezone), unlike letting
+  // SheetJS pre-convert to a Date, which is what caused the original bug.
   function extractDateTime(val){
     if(!val && val !== 0) return null;
     if(val instanceof Date){
@@ -1750,7 +1760,18 @@ function parseLoyaltyXLSX(ab){
         String(val.getSeconds()).padStart(2,'0');
     }
     if(typeof val === 'string' && val.trim()) return val.trim();
-    if(typeof val === 'number') return excelDateToStr(val); // fallback, date-only precision
+    if(typeof val === 'number'){
+      // Excel serial (date + fractional time), converted via epoch-ms —
+      // timezone-agnostic, preserves both date AND time (excelDateToStr
+      // would discard the time portion, which we need here).
+      var ms = Math.round((val - 25569) * 86400 * 1000);
+      var d = new Date(ms);
+      return d.getUTCFullYear() + '-' + String(d.getUTCMonth()+1).padStart(2,'0') + '-' +
+        String(d.getUTCDate()).padStart(2,'0') + 'T' +
+        String(d.getUTCHours()).padStart(2,'0') + ':' +
+        String(d.getUTCMinutes()).padStart(2,'0') + ':' +
+        String(d.getUTCSeconds()).padStart(2,'0');
+    }
     return null;
   }
 
@@ -4395,7 +4416,10 @@ function processLedgerFile(file){
   var reader = new FileReader();
   reader.onload = function(e){
     try{
-      var wb = XLSX.read(e.target.result, {type:'array', cellDates:true});
+      // cellDates OFF — see parseCloverXLSX for why (SheetJS's Date
+      // conversion is anchored to the runtime's local timezone, which we
+      // can't guarantee matches Denver). Raw numeric serials only.
+      var wb = XLSX.read(e.target.result, {type:'array', cellDates:false});
       var ws = wb.Sheets['Bank Ledger'] || wb.Sheets[wb.SheetNames[0]];
       // The exported ledger has a 3-row banner before the real header (title, subtitle, header row)
       var rows = XLSX.utils.sheet_to_json(ws, {raw:true, defval:'', range:2});
