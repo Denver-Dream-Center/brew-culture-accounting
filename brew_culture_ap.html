@@ -996,6 +996,32 @@ function parseCloverXLSX(ab){
   var ws = wb.Sheets[wb.SheetNames[0]];
   var rows = XLSX.utils.sheet_to_json(ws, {raw:true, defval:''});
 
+  // TEMPORARY DEBUG — remove once the cutoff investigation is resolved.
+  // Logs exactly what SheetJS handed us for the first few rows' date/time
+  // cells: the raw value, its JS type, and (if it's a Date) both UTC and
+  // local getters side by side, so we can see directly whether SheetJS is
+  // producing what we expect instead of inferring it from output totals.
+  console.log('=== CLOVER PARSE DEBUG (first 5 rows) ===');
+  rows.slice(0, 5).forEach(function(r, i){
+    var dv = r['date'], tv = r['time'];
+    var info = {
+      row: i,
+      order: r['order'],
+      date_raw: dv, date_type: typeof dv, date_isDate: dv instanceof Date,
+      time_raw: tv, time_type: typeof tv, time_isDate: tv instanceof Date
+    };
+    if(dv instanceof Date){
+      info.date_UTC = dv.getUTCFullYear()+'-'+(dv.getUTCMonth()+1)+'-'+dv.getUTCDate();
+      info.date_LOCAL = dv.getFullYear()+'-'+(dv.getMonth()+1)+'-'+dv.getDate();
+    }
+    if(tv instanceof Date){
+      info.time_UTC = dv && dv.getUTCHours!==undefined ? tv.getUTCHours()+':'+tv.getUTCMinutes()+':'+tv.getUTCSeconds() : null;
+      info.time_LOCAL = tv.getHours()+':'+tv.getMinutes()+':'+tv.getSeconds();
+    }
+    console.log(JSON.stringify(info));
+  });
+  console.log('=== END CLOVER PARSE DEBUG ===');
+
   // Robust date -> YYYY-MM-DD from any SheetJS format
   function extractDate(val){
     if(!val && val !== 0) return '';
