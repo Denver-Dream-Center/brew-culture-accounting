@@ -967,8 +967,16 @@ var MODIFIER_MAP = {
 // Excel serial date -> YYYY-MM-DD
 function excelDateToStr(serial){
   if(!serial && serial !== 0) return '';
-  if(serial instanceof Date) return serial.toISOString().slice(0,10);
-  // Excel serial: days since 1900-01-01 (with 1900 leap year bug)
+  // If SheetJS already handed us a Date object, it's local-midnight-anchored
+  // (see extractDate/extractTime) — use local getters, not toISOString()
+  // (UTC), to avoid the same off-by-timezone bug fixed there.
+  if(serial instanceof Date){
+    return serial.getFullYear() + '-' + String(serial.getMonth()+1).padStart(2,'0') + '-' + String(serial.getDate()).padStart(2,'0');
+  }
+  // Excel serial: days since 1900-01-01 (with 1900 leap year bug).
+  // This branch constructs the Date ourselves via epoch-ms, which IS
+  // timezone-agnostic, so toISOString() (UTC) is correct here — unlike
+  // the branch above, this isn't reading a SheetJS-constructed Date.
   var d = new Date(Math.round((serial - 25569) * 86400 * 1000));
   return d.toISOString().slice(0,10);
 }
@@ -996,40 +1004,24 @@ function parseCloverXLSX(ab){
   var ws = wb.Sheets[wb.SheetNames[0]];
   var rows = XLSX.utils.sheet_to_json(ws, {raw:true, defval:''});
 
-  // TEMPORARY DEBUG — remove once the cutoff investigation is resolved.
-  // Logs exactly what SheetJS handed us for the first few rows' date/time
-  // cells: the raw value, its JS type, and (if it's a Date) both UTC and
-  // local getters side by side, so we can see directly whether SheetJS is
-  // producing what we expect instead of inferring it from output totals.
-  console.log('=== CLOVER PARSE DEBUG (first 5 rows) ===');
-  rows.slice(0, 5).forEach(function(r, i){
-    var dv = r['date'], tv = r['time'];
-    var info = {
-      row: i,
-      order: r['order'],
-      date_raw: dv, date_type: typeof dv, date_isDate: dv instanceof Date,
-      time_raw: tv, time_type: typeof tv, time_isDate: tv instanceof Date
-    };
-    if(dv instanceof Date){
-      info.date_UTC = dv.getUTCFullYear()+'-'+(dv.getUTCMonth()+1)+'-'+dv.getUTCDate();
-      info.date_LOCAL = dv.getFullYear()+'-'+(dv.getMonth()+1)+'-'+dv.getDate();
-    }
-    if(tv instanceof Date){
-      info.time_UTC = dv && dv.getUTCHours!==undefined ? tv.getUTCHours()+':'+tv.getUTCMinutes()+':'+tv.getUTCSeconds() : null;
-      info.time_LOCAL = tv.getHours()+':'+tv.getMinutes()+':'+tv.getSeconds();
-    }
-    console.log(JSON.stringify(info));
-  });
-  console.log('=== END CLOVER PARSE DEBUG ===');
-
   // Robust date -> YYYY-MM-DD from any SheetJS format
+  //
+  // CONFIRMED VIA BROWSER DEBUG LOG (Jan 2026): SheetJS's cellDates:true
+  // anchors date/time serials to LOCAL midnight, not UTC midnight — e.g. a
+  // cell showing 5:38pm came back as Date "1899-12-31T00:38:00.000Z", where
+  // getHours() (local) correctly gives 17, but getUTCHours() gives 0. Using
+  // UTC getters here was a bug — it happened to still work for the DATE
+  // column only by coincidence, because Denver's negative UTC offset keeps
+  // local-midnight-anchored dates within the same UTC calendar day. That's
+  // not true for positive-offset timezones, so local getters are used
+  // uniformly below rather than relying on that coincidence.
   function extractDate(val){
     if(!val && val !== 0) return '';
     // SheetJS Date object (cellDates:true + raw:true)
     if(val instanceof Date){
-      var y = val.getUTCFullYear();
-      var m = String(val.getUTCMonth()+1).padStart(2,'0');
-      var d = String(val.getUTCDate()).padStart(2,'0');
+      var y = val.getFullYear();
+      var m = String(val.getMonth()+1).padStart(2,'0');
+      var d = String(val.getDate()).padStart(2,'0');
       return y + '-' + m + '-' + d;
     }
     // Already ISO string
@@ -1057,12 +1049,20 @@ function parseCloverXLSX(ab){
   // formatted in the source file. Postgres will hard-reject anything that
   // isn't a clean HH:MM:SS for a TIME column, so this always returns either
   // a valid string or ''.
+  //
+  // BUG FIX (Jan 2026): this used getUTCHours/Minutes/Seconds, which was
+  // exactly backwards. Confirmed via browser debug log: a 5:38pm order
+  // came back as Date "1899-12-31T00:38:00.000Z" — getHours() (local)
+  // correctly gives 17:38, getUTCHours() gives 0:38. SheetJS anchors the
+  // time serial to LOCAL midnight, so local getters are the correct read,
+  // not UTC. This was the root cause of the settlement-day cutoff rolling
+  // nearly every order forward instead of only the genuine after-5pm ones.
   function extractTime(val){
     if(!val && val !== 0) return '';
     if(val instanceof Date){
-      var hh = String(val.getUTCHours()).padStart(2,'0');
-      var mm = String(val.getUTCMinutes()).padStart(2,'0');
-      var ss = String(val.getUTCSeconds()).padStart(2,'0');
+      var hh = String(val.getHours()).padStart(2,'0');
+      var mm = String(val.getMinutes()).padStart(2,'0');
+      var ss = String(val.getSeconds()).padStart(2,'0');
       return hh + ':' + mm + ':' + ss;
     }
     if(typeof val === 'string' && val.match(/^\d{1,2}:\d{2}(:\d{2})?$/)){
@@ -1733,18 +1733,21 @@ function parseLoyaltyXLSX(ab){
   var ws = wb.Sheets[wb.SheetNames[0]];
   var rows = XLSX.utils.sheet_to_json(ws, {raw:true, defval:''});
 
-  // Full timestamp (date + time) -> ISO 8601 string, using UTC accessors so
-  // a SheetJS Date object (anchored to the naive Excel serial, no real
-  // timezone attached) doesn't get silently shifted by the browser's local
-  // timezone. Matches the same UTC-accessor approach used in parseCloverXLSX.
+  // Full timestamp (date + time) -> ISO 8601 string.
+  //
+  // BUG FIX (Jan 2026): originally used UTC accessors on the assumption
+  // that SheetJS's Date objects were timezone-agnostic. Confirmed via
+  // browser debug log this is wrong — SheetJS anchors date/time serials to
+  // LOCAL midnight, so local getters are the correct read (see the same
+  // fix in parseCloverXLSX's extractDate/extractTime).
   function extractDateTime(val){
     if(!val && val !== 0) return null;
     if(val instanceof Date){
-      return val.getUTCFullYear() + '-' + String(val.getUTCMonth()+1).padStart(2,'0') + '-' +
-        String(val.getUTCDate()).padStart(2,'0') + 'T' +
-        String(val.getUTCHours()).padStart(2,'0') + ':' +
-        String(val.getUTCMinutes()).padStart(2,'0') + ':' +
-        String(val.getUTCSeconds()).padStart(2,'0');
+      return val.getFullYear() + '-' + String(val.getMonth()+1).padStart(2,'0') + '-' +
+        String(val.getDate()).padStart(2,'0') + 'T' +
+        String(val.getHours()).padStart(2,'0') + ':' +
+        String(val.getMinutes()).padStart(2,'0') + ':' +
+        String(val.getSeconds()).padStart(2,'0');
     }
     if(typeof val === 'string' && val.trim()) return val.trim();
     if(typeof val === 'number') return excelDateToStr(val); // fallback, date-only precision
@@ -1754,7 +1757,7 @@ function parseLoyaltyXLSX(ab){
   function extractDateOnly(val){
     if(!val && val !== 0) return null;
     if(val instanceof Date){
-      return val.getUTCFullYear() + '-' + String(val.getUTCMonth()+1).padStart(2,'0') + '-' + String(val.getUTCDate()).padStart(2,'0');
+      return val.getFullYear() + '-' + String(val.getMonth()+1).padStart(2,'0') + '-' + String(val.getDate()).padStart(2,'0');
     }
     if(typeof val === 'string' && val.match(/^\d{4}-\d{2}-\d{2}/)) return val.slice(0,10);
     if(typeof val === 'number') return excelDateToStr(val);
@@ -4370,7 +4373,9 @@ function excelSerialToISO(serial){
 function ledgerDateToISO(val){
   if(val === null || val === undefined || val === '') return '';
   if(val instanceof Date){
-    var y=val.getUTCFullYear(), m=String(val.getUTCMonth()+1).padStart(2,'0'), d=String(val.getUTCDate()).padStart(2,'0');
+    // Same SheetJS local-anchoring behavior fixed in parseCloverXLSX's
+    // extractDate — local getters, not UTC, are the correct read.
+    var y=val.getFullYear(), m=String(val.getMonth()+1).padStart(2,'0'), d=String(val.getDate()).padStart(2,'0');
     return y+'-'+m+'-'+d;
   }
   if(typeof val === 'number') return excelSerialToISO(val);
