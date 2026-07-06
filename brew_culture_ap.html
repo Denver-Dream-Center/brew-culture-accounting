@@ -436,6 +436,8 @@ const COA=[
   {acct:'1010',name:'Operating Checking',type:'Asset'},
   {acct:'1011',name:'SouthState Bank',type:'Asset'},
   {acct:'1015',name:'Undeposited Funds',type:'Asset'},
+  {acct:'1016',name:'Undeposited Credit Card Revenue',type:'Asset'},
+  {acct:'1017',name:'Undeposited Cash Revenue',type:'Asset'},
   {acct:'1020',name:'Savings / Reserve',type:'Asset'},
   {acct:'1300',name:'Receivable — Prior Owner (Troy)',type:'Asset'},
   {acct:'1410',name:'Coffee Inventory',type:'Asset'},
@@ -1408,30 +1410,48 @@ async function saveSettlementToSB(s){
 // ═══════════════════════════════════════════════
 // REVENUE MODULE — GL POSTING
 // Books the day's settlement as:
-//   Dr  1015 Undeposited Funds   (gross_net + tax + tips)
+//   Dr  1016 Undeposited Credit Card Revenue  (card/debit portion)
+//   Dr  1017 Undeposited Cash Revenue         (cash portion)
 //   Cr  4010 In-Store Revenue    (gross_net)
 //   Cr  2050 Sales Tax Payable   (tax, if > 0)
 //   Cr  2060 Tips Payable        (tips, if > 0)
-// Recognizes revenue on the day of sale (accrual basis).
-// The transfer from Undeposited Funds to the real bank
-// account happens separately, when the settlement is
-// matched to an actual bank deposit in the Bank Ledger
-// module (see confirmRevMatch / postRevMatchTransferGL).
+// Recognizes revenue on the day of sale (accrual basis), split at
+// recognition time by how it was actually paid for — not lumped into one
+// combined "Undeposited Funds" bucket. This is deliberate: only the card
+// portion ever moves through Clover's bank sweep, so keeping it in its own
+// account means the bank match (below) can clear exactly that account with
+// no variance, rather than moving a combined total and needing to explain
+// a cash-sized gap afterward. Cash sits in its own account until a future
+// cash-reconciliation step clears it out when actually deposited.
+//
+// The card-portion split uses credit_swept when the import provided a
+// verified Bank_Sweep_Date/Unique_Credit_Amt_Collected breakdown; older
+// imports fall back to the payment-type-classified card_collected figure.
+// Either way, the cash-side debit is the RESIDUAL (total - card portion),
+// not a separately-summed figure — this guarantees the two debit lines
+// always sum exactly to gross_net + tax + tips, with no stray rounding gap.
 // ═══════════════════════════════════════════════
 function settlementGLTotal(s){
   return Math.round(((s.gross_net||0)+(s.tax||0)+(s.tips||0))*100)/100;
 }
 
-// The dollar figure that should actually match a bank deposit for this
-// settlement. When the file provided a verified Bank_Sweep_Date/Unique_*
-// breakdown, credit_swept (card/debit only, cash excluded — cash never
-// goes through Clover's bank sweep) is authoritative. Older imports
-// without that breakdown fall back to the previous cash+card sum.
-function settlementMatchAmount(s){
+// The card/debit portion of a settlement — this is what Clover's bank
+// sweep actually deposits, and what should match a real bank deposit,
+// what gets debited to 1016 at recognition, and what gets credited out of
+// 1016 at match time. Verified credit_swept when available; otherwise the
+// payment-type-classified card_collected figure for older imports.
+function settlementCardPortion(s){
   if(s.credit_swept !== null && s.credit_swept !== undefined){
     return Math.round(s.credit_swept*100)/100;
   }
-  return Math.round(((s.cash_collected||0)+(s.card_collected||0))*100)/100;
+  return Math.round((s.card_collected||0)*100)/100;
+}
+
+// Kept as the name used by the Bank Ledger match screen — same figure as
+// settlementCardPortion, since the card portion IS the amount that should
+// match a real bank deposit.
+function settlementMatchAmount(s){
+  return settlementCardPortion(s);
 }
 
 async function postSettlementGL(s){
@@ -1444,7 +1464,12 @@ async function postSettlementGL(s){
   var total=settlementGLTotal(s);
   if(total<=0)return true; // nothing to book for a zero/void day
 
-  var entries=[{acct:'1015',name:'Undeposited Funds',dr:total,cr:0}];
+  var cardPortion = settlementCardPortion(s);
+  var cashPortion = Math.round((total - cardPortion)*100)/100;
+
+  var entries=[];
+  if(Math.abs(cardPortion) > 0.004) entries.push({acct:'1016',name:'Undeposited Credit Card Revenue',dr:cardPortion,cr:0});
+  if(Math.abs(cashPortion) > 0.004) entries.push({acct:'1017',name:'Undeposited Cash Revenue',dr:cashPortion,cr:0});
   entries.push({acct:'4010',name:'In-Store Revenue',dr:0,cr:Math.round((s.gross_net||0)*100)/100});
   if(s.tax>0.004)entries.push({acct:'2050',name:'Sales Tax Payable',dr:0,cr:Math.round(s.tax*100)/100});
   if(s.tips>0.004)entries.push({acct:'2060',name:'Tips Payable',dr:0,cr:Math.round(s.tips*100)/100});
@@ -3261,7 +3286,7 @@ function openPaymentModal(invoiceId){
       <div class="form-group"><label>Amount *</label><input type="number" id="pmt-amount" min="0.01" step="0.01" placeholder="0.00" value="${pre?pre.balance.toFixed(2):''}"></div>
       <div class="form-group"><label>Method</label><select id="pmt-method"><option>ACH</option><option>Check</option><option>Credit Card</option><option>Cash</option><option>Payroll Deduction</option><option>Other</option></select></div>
       <div class="form-group"><label>Reference / Check #</label><input id="pmt-ref" placeholder="ACH trace, check #…"></div>
-      <div class="form-group"><label>Cash Account</label><select id="pmt-cash">${COA.filter(a=>a.acct.startsWith('1')&&a.acct!=='1300'&&a.acct!=='1015').map(a=>`<option value="${a.acct}" ${a.acct==='1010'?'selected':''}>${a.acct} · ${a.name}</option>`).join('')}</select></div>
+      <div class="form-group"><label>Cash Account</label><select id="pmt-cash">${COA.filter(a=>a.acct.startsWith('1')&&a.acct!=='1300'&&a.acct!=='1015'&&a.acct!=='1016'&&a.acct!=='1017').map(a=>`<option value="${a.acct}" ${a.acct==='1010'?'selected':''}>${a.acct} · ${a.name}</option>`).join('')}</select></div>
       <div class="form-group span-2"><label>Memo</label><input id="pmt-memo" placeholder="Payment notes…"></div>
     </div>
     <div id="pmt-preview" style="margin-top:8px"></div></div>
@@ -5505,9 +5530,12 @@ function openRevMatchModal(rowId){
           : '<div class="match-row-list">' +
             unmatched.map(function(s){
               var collected = settlementMatchAmount(s);
+              var cashPortion = (s.credit_swept !== null && s.credit_swept !== undefined)
+                ? Math.round(((s.gross_net||0)+(s.tax||0)+(s.tips||0) - s.credit_swept)*100)/100
+                : Math.round((s.cash_collected||0)*100)/100;
               var breakdown = (s.credit_swept !== null && s.credit_swept !== undefined)
-                ? 'Credit/Debit Swept: ' + fmt(s.credit_swept)
-                : ('Cash: ' + fmt(s.cash_collected) + ' \u2014 Card: ' + fmt(s.card_collected));
+                ? 'Credit/Debit Swept: ' + fmt(collected) + ' \u2014 Cash (separate): ' + fmt(cashPortion)
+                : ('Card: ' + fmt(collected) + ' \u2014 Cash (separate): ' + fmt(cashPortion));
               return '<div class="match-row-item" id="rev-set-' + s.id + '" onclick="toggleRevDateSelect(\'' + s.id + '\')">' +
                 '<div class="match-row-check">&#10003;</div>' +
                 '<div style="flex:1">' +
@@ -5621,22 +5649,22 @@ async function confirmRevMatch(){
   else if(currentView === 'rev-settlement') renderRevSettlement();
 }
 
-// Transfers a settlement's recognized total out of Undeposited Funds and
-// into the actual bank account once the deposit is confirmed via a
-// Bank Ledger match. Uses the same settlementGLTotal() figure booked at
-// settlement time (not the bank row's raw amount), so Undeposited Funds
-// always nets to exactly zero for a matched settlement -- any real-world
-// gap between what Clover recognized and what the bank actually shows
-// remains visible as an unmatched/leftover amount on the bank ledger row
-// itself, same as how revenue matching already works today.
+// Transfers a settlement's CARD portion out of Undeposited Credit Card
+// Revenue and into the actual bank account once the deposit is confirmed
+// via a Bank Ledger match. Deliberately only the card portion — cash never
+// moved through this bank sweep in the first place, so it stays sitting in
+// Undeposited Cash Revenue until a future cash-reconciliation step clears
+// it separately. Because 1016 only ever holds the card portion (posted
+// that way at settlement time), this now nets to exactly zero on a clean
+// match with no cash-sized "leftover" to explain.
 async function postRevMatchTransferGL(row, s, matchId){
-  var total=settlementGLTotal(s);
-  if(total<=0)return true;
+  var cardPortion=settlementCardPortion(s);
+  if(cardPortion<=0)return true;
   var cashAcct = row.bank === 'Glacier Bank' ? '1010' : '1011';
   var cashName = row.bank === 'Glacier Bank' ? 'Glacier Bank' : 'SouthState Bank';
   var je={id:await nextGLId(),date:row.pmnt_date,ref:matchId,era:ERA.DC,
     memo:'Deposit confirmed — '+fmtDate(s.date)+' settlement ('+(row.customer_vendor||'')+')',
-    entries:[{acct:cashAcct,name:cashName,dr:total,cr:0},{acct:'1015',name:'Undeposited Funds',dr:0,cr:total}]};
+    entries:[{acct:cashAcct,name:cashName,dr:cardPortion,cr:0},{acct:'1016',name:'Undeposited Credit Card Revenue',dr:0,cr:cardPortion}]};
   return await saveGLToSB(je);
 }
 
@@ -5662,7 +5690,7 @@ async function unmatchBankRow(rowId){
       'This transaction is matched to ' + revMatches.length + ' settlement date(s).\n\n' +
       'Removing the match will also reverse the deposit-transfer GL entry for ' +
       (revMatches.length === 1 ? 'that settlement' : 'those settlements') +
-      ' - the amount moves back into Undeposited Funds pending a new match.'
+      ' - the amount moves back into Undeposited Credit Card Revenue pending a new match.'
     )) return;
   } else if(directMatches.length > 0){
     if(!confirm(
