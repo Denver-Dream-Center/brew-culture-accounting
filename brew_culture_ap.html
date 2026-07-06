@@ -317,6 +317,7 @@
   <input type="file" id="import-file-input" accept=".json" style="display:none" onchange="importData(this)">
   <input type="file" id="clover-file-input" accept=".xlsx,.xls" style="display:none" onchange="handleCloverFile(this)">
   <input type="file" id="loyalty-file-input" accept=".xlsx,.xls" style="display:none" onchange="handleLoyaltyFile(this)">
+  <input type="file" id="sweepprep-file-input" accept=".xlsx,.xls" style="display:none" onchange="handleSweepPrepFile(this)">
   <input type="file" id="ledger-file-input" accept=".xlsx,.xls" style="display:none" onchange="handleLedgerFile(this)">
   <div class="main">
     <div class="topbar">
@@ -1568,6 +1569,28 @@ function renderRevImport(){
         '<div id="loyalty-parse-result" style="margin-top:16px"></div>' +
       '</div>' +
     '</div>' +
+    '<div class="card" style="margin-top:16px">' +
+      '<div class="card-header"><span class="card-title">Bank Sweep Prep Tool</span>' +
+        '<span style="font-size:12px;color:var(--ink-lo)">Reformats a raw Clover export for bank-sweep matching</span>' +
+      '</div>' +
+      '<div class="card-body">' +
+        '<div style="font-size:12px;color:var(--ink-mid);margin-bottom:12px">' +
+          'Drop the raw Clover daily sales file here first. It comes back reformatted with a blank ' +
+          '<strong>Bank_Sweep_Date</strong> column, dedup formulas for Net/Tax/Tip/Amount Collected/Credit ' +
+          'Collected, and a totals row \u2014 ready for you to move records between days, fill in the sweep ' +
+          'date, and re-upload through the Clover Import above.' +
+        '</div>' +
+        '<div class="upload-zone" id="sweepprep-drop-zone" onclick="$$(\'sweepprep-file-input\').click()"' +
+          ' ondragover="event.preventDefault();this.classList.add(\'dragover\')"' +
+          ' ondragleave="this.classList.remove(\'dragover\')"' +
+          ' ondrop="event.preventDefault();this.classList.remove(\'dragover\');handleSweepPrepDrop(event.dataTransfer.files)">' +
+          '<div class="upload-icon">&#8679;</div>' +
+          '<div class="upload-title">Drop raw Clover export here or click to browse</div>' +
+          '<div class="upload-sub">Full Orders Detail export, straight from Clover *.xlsx</div>' +
+        '</div>' +
+        '<div id="sweepprep-result" style="margin-top:16px"></div>' +
+      '</div>' +
+    '</div>' +
     '<div class="card" style="margin-top:0">' +
       '<div class="card-header"><span class="card-title">Already Imported</span></div>' +
       '<div class="card-body" style="padding:0">' +
@@ -1955,6 +1978,162 @@ async function confirmLoyaltyImport(){
     showToast('Imported ' + count + ' loyalty transaction(s)');
   }
 }
+
+// ═══════════════════════════════════════════════
+// REVENUE MODULE — BANK SWEEP PREP TOOL
+// Takes a raw Clover "Full Orders Detail" export and reformats it into the
+// bank-sweep-matching layout: inserts a blank Bank_Sweep_Date column plus
+// five Unique_* dedup columns with LIVE Excel formulas (not precomputed
+// values — this file is meant to be manually edited afterward, moved
+// between days, and re-totaled by Excel itself as records shift around),
+// then a totals row two rows below the last record. The result is handed
+// straight back as a download; nothing here touches the database at all.
+// ═══════════════════════════════════════════════
+function handleSweepPrepDrop(files){
+  if(files && files[0]) processSweepPrepFile(files[0]);
+}
+
+function handleSweepPrepFile(input){
+  if(input.files && input.files[0]) processSweepPrepFile(input.files[0]);
+  input.value = '';
+}
+
+function processSweepPrepFile(file){
+  var resultEl = $('sweepprep-result');
+  if(!resultEl) return;
+  resultEl.innerHTML = '<div style="color:var(--ink-mid);font-size:13px">Reading file...</div>';
+  var reader = new FileReader();
+  reader.onload = function(e){
+    try{
+      var outName = file.name.replace(/\.xlsx$/i, '') + '_sweep_prep.xlsx';
+      var wbOut = buildSweepPrepWorkbook(e.target.result);
+      var wbArr = XLSX.write(wbOut, {bookType:'xlsx', type:'array'});
+      var blob = new Blob([wbArr], {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url; a.download = outName; a.click();
+      URL.revokeObjectURL(url);
+      resultEl.innerHTML = '<div class="alert alert-inv">Reformatted file downloaded as <strong>' + outName + '</strong>. Fill in Bank_Sweep_Date, move records between days as needed, then re-upload through the Clover Import above.</div>';
+    } catch(err){
+      resultEl.innerHTML = '<div class="alert" style="background:var(--red-lo);border:1px solid #EAB5B1;color:var(--red)">' + err.message + '</div>';
+      console.error(err);
+    }
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+function buildSweepPrepWorkbook(ab){
+  var wb = XLSX.read(ab, {type:'array', cellDates:false});
+  // Same sheet-detection approach as the main Clover importer — don't
+  // assume index 0, find the sheet that actually has 'order' and 'date'.
+  var ws = null;
+  for(var si = 0; si < wb.SheetNames.length; si++){
+    var candidate = wb.Sheets[wb.SheetNames[si]];
+    var headerRow = (XLSX.utils.sheet_to_json(candidate, {header:1, range:0})[0]) || [];
+    if(headerRow.indexOf('order') !== -1 && headerRow.indexOf('date') !== -1){
+      ws = candidate;
+      break;
+    }
+  }
+  if(!ws) ws = wb.Sheets[wb.SheetNames[0]];
+  var rows = XLSX.utils.sheet_to_json(ws, {raw:true, defval:''});
+  if(rows.length === 0) throw new Error('No data rows found in this file.');
+
+  var origHeaders = Object.keys(rows[0]);
+  if(origHeaders.indexOf('Bank_Sweep_Date') !== -1){
+    throw new Error('This file already has a Bank_Sweep_Date column \u2014 it looks like it\'s already been through this tool.');
+  }
+
+  // Build the new header order: Bank_Sweep_Date goes immediately before
+  // 'date'; each Unique_* column goes immediately after its source column
+  // (Unique_Credit_Amt_Collected rides right after Unique_Order_Amt_Collected,
+  // both after Order_Amount_collected) — matching the layout already
+  // established by hand in earlier files.
+  var newHeaders = [];
+  origHeaders.forEach(function(h){
+    if(h === 'date') newHeaders.push('Bank_Sweep_Date');
+    newHeaders.push(h);
+    if(h === 'Order_Net') newHeaders.push('Unique_Order_Net');
+    if(h === 'Order_Tax') newHeaders.push('Unique_Order_Tax');
+    if(h === 'Order_Tip_Amount') newHeaders.push('Unique_Order_Tip');
+    if(h === 'Order_Amount_collected'){
+      newHeaders.push('Unique_Order_Amt_Collected');
+      newHeaders.push('Unique_Credit_Amt_Collected');
+    }
+  });
+
+  var colLetter = {};
+  newHeaders.forEach(function(h, idx){ colLetter[h] = XLSX.utils.encode_col(idx); });
+
+  ['order','date','payment_type','Order_Net','Order_Tax','Order_Tip_Amount','Order_Amount_collected'].forEach(function(req){
+    if(colLetter[req] === undefined){
+      throw new Error('Expected column "' + req + '" not found in this file \u2014 is this a Clover Full Orders Detail export?');
+    }
+  });
+
+  var UNIQUE_COLS = ['Unique_Order_Net','Unique_Order_Tax','Unique_Order_Tip','Unique_Order_Amt_Collected','Unique_Credit_Amt_Collected'];
+
+  // Build row data first with plain placeholder values, then set live
+  // formulas directly on the resulting cell objects afterward — aoa_to_sheet
+  // doesn't reliably interpret {f:...} objects embedded in the array itself.
+  var aoa = [newHeaders];
+  rows.forEach(function(r){
+    var rowArr = [];
+    newHeaders.forEach(function(h){
+      if(h === 'Bank_Sweep_Date' || UNIQUE_COLS.indexOf(h) !== -1){ rowArr.push(''); return; }
+      rowArr.push(r[h]);
+    });
+    aoa.push(rowArr);
+  });
+  var lastDataRow = rows.length + 1; // header is row 1
+  aoa.push([]); // spacer row
+  var totalsRowNum = lastDataRow + 2;
+  var totalsRowArr = [];
+  newHeaders.forEach(function(h){
+    totalsRowArr.push(UNIQUE_COLS.indexOf(h) !== -1 ? 0 : '');
+  });
+  aoa.push(totalsRowArr);
+
+  var newWs = XLSX.utils.aoa_to_sheet(aoa);
+
+  // Now overwrite the Unique_* cells with live dedup formulas. Dedup logic:
+  // if this row's order ID matches the row directly above it, output 0
+  // (already counted); otherwise output the real per-order value. Row 2's
+  // "row above" is the header row, so the comparison is never true there —
+  // no special-casing needed, every data row uses the same formula shape.
+  for(var i = 0; i < rows.length; i++){
+    var excelRow = i + 2;
+    var prevRow = excelRow - 1;
+    var oCol = colLetter['order'];
+    var dedupCond = oCol + excelRow + '=' + oCol + prevRow;
+
+    newWs[colLetter['Unique_Order_Net'] + excelRow] =
+      {t:'n', f:'IF(' + dedupCond + ',0,' + colLetter['Order_Net'] + excelRow + ')'};
+    newWs[colLetter['Unique_Order_Tax'] + excelRow] =
+      {t:'n', f:'IF(' + dedupCond + ',0,' + colLetter['Order_Tax'] + excelRow + ')'};
+    newWs[colLetter['Unique_Order_Tip'] + excelRow] =
+      {t:'n', f:'IF(' + dedupCond + ',0,' + colLetter['Order_Tip_Amount'] + excelRow + ')'};
+    newWs[colLetter['Unique_Order_Amt_Collected'] + excelRow] =
+      {t:'n', f:'IF(' + dedupCond + ',0,' + colLetter['Order_Amount_collected'] + excelRow + ')'};
+    // Credit/debit only — references the just-computed Unique_Order_Amt_Collected
+    // cell so the dedup and the payment-type check don't have to be repeated.
+    var pCol = colLetter['payment_type'];
+    var uAmtCell = colLetter['Unique_Order_Amt_Collected'] + excelRow;
+    newWs[colLetter['Unique_Credit_Amt_Collected'] + excelRow] =
+      {t:'n', f:'IF(OR(' + pCol + excelRow + '="Credit Card",' + pCol + excelRow + '="Debit Card")' + ',' + uAmtCell + ',0)'};
+  }
+
+  // Totals row — SUM every Unique_* column, explicitly excluding Bank_Sweep_Date.
+  UNIQUE_COLS.forEach(function(h){
+    var col = colLetter[h];
+    newWs[col + totalsRowNum] = {t:'n', f:'SUM(' + col + '2:' + col + lastDataRow + ')'};
+  });
+
+  var newWb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(newWb, newWs, 'FullOrdersDetails_prepped');
+  return newWb;
+}
+
 
 
 // ═══════════════════════════════════════════════
