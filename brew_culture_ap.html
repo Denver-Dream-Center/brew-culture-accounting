@@ -1009,8 +1009,56 @@ function parseCloverXLSX(ab){
   // number (days since the epoch, fractional part = time of day); there is
   // no timezone concept in it at all, so this is deterministic everywhere.
   var wb = XLSX.read(ab, {type:'array', cellDates:false});
-  var ws = wb.Sheets[wb.SheetNames[0]];
+  // Pick the sheet that actually has the expected Clover columns, rather
+  // than assuming index 0 — a file can have an extra scratch/summary sheet
+  // ahead of the real data (confirmed happening in practice: a workbook
+  // with a "Sheet1" placeholder before the real "FullOrdersDetails_..."
+  // sheet would otherwise be silently misread with no error at all).
+  var ws = null;
+  for(var si = 0; si < wb.SheetNames.length; si++){
+    var candidate = wb.Sheets[wb.SheetNames[si]];
+    var headerRow = (XLSX.utils.sheet_to_json(candidate, {header:1, range:0})[0]) || [];
+    if(headerRow.indexOf('order') !== -1 && headerRow.indexOf('date') !== -1){
+      ws = candidate;
+      break;
+    }
+  }
+  if(!ws) ws = wb.Sheets[wb.SheetNames[0]]; // fallback if nothing matched
   var rows = XLSX.utils.sheet_to_json(ws, {raw:true, defval:''});
+
+  // Does this file have the manually-added Bank_Sweep_Date/Unique_* columns
+  // (the bank-sweep reconciliation format), or is it a plain Clover export?
+  // Every row object has every header key present (defval:'' backfills
+  // blanks), so checking row 0 is a safe, cheap format detector.
+  var hasBankSweep = rows.length > 0 && Object.prototype.hasOwnProperty.call(rows[0], 'Bank_Sweep_Date');
+
+  // The Unique_* columns only dedupe correctly if a given order's rows are
+  // physically adjacent in the file (the underlying spreadsheet formula is
+  // "zero this out if the order ID above matches"). If Clover's export (or
+  // any re-sort) ever splits one order's rows apart, the same order ID
+  // would get treated as "new" a second time — silently double-counting or
+  // dropping revenue with no visible symptom. Walk the file in its own row
+  // order and hard-block if any order ID reappears after we've moved past
+  // it, rather than risk a silent bad import.
+  if(hasBankSweep){
+    var seenOrders = {};
+    var currentOrder = null;
+    var brokenOrders = [];
+    rows.forEach(function(r){
+      var oid = r['order'];
+      if(!oid) return; // totals row (blank order + blank Bank_Sweep_Date) — not real data
+      if(oid !== currentOrder){
+        if(seenOrders[oid] && brokenOrders.indexOf(oid) === -1){
+          brokenOrders.push(oid);
+        }
+        seenOrders[oid] = true;
+        currentOrder = oid;
+      }
+    });
+    if(brokenOrders.length > 0){
+      throw new Error('Order row(s) not grouped together in this file, so the Unique_* dedup formulas can\'t be trusted \u2014 order ID(s): ' + brokenOrders.join(', ') + '. Re-sort the export so every order\'s rows are adjacent, then re-upload.');
+    }
+  }
 
   // Robust date -> YYYY-MM-DD from any SheetJS format
   //
@@ -1102,19 +1150,34 @@ function parseCloverXLSX(ab){
     if(!oid) return;
     if(!orderMap[oid]){
       var dateStr = extractDate(r['date']);
+      var bankSweepDateStr = hasBankSweep ? extractDate(r['Bank_Sweep_Date']) : dateStr;
 
       orderMap[oid] = {
         date: dateStr,
         time: extractTime(r['time']),
+        // The date this order's card/debit total actually gets deposited,
+        // per the manually-verified Bank_Sweep_Date column — independent
+        // of `date` (the true calendar date the order was placed). Falls
+        // back to the calendar date for plain (non-bank-sweep-format) files.
+        bank_sweep_date: bankSweepDateStr,
         employee: r['employee'] || '',
         payment_type: r['payment_type'] || '',
         card_type: r['card_type'] || '',
         order_note: r['orderNote'] || '',
-        tip: parseFloat(r['Order_Tip_Amount']) || 0,
-        tax: parseFloat(r['Order_Tax']) || 0,
-        order_net: parseFloat(r['Order_Net']) || 0,
+        // Unique_* columns are pre-deduplicated by the spreadsheet (only
+        // the first row of each order carries a nonzero value, contiguity
+        // already validated above) — safe to read directly since we only
+        // ever look at an order's first-seen row here anyway.
+        tip: parseFloat(hasBankSweep ? r['Unique_Order_Tip'] : r['Order_Tip_Amount']) || 0,
+        tax: parseFloat(hasBankSweep ? r['Unique_Order_Tax'] : r['Order_Tax']) || 0,
+        order_net: parseFloat(hasBankSweep ? r['Unique_Order_Net'] : r['Order_Net']) || 0,
         order_gross: parseFloat(r['Order_Gross']) || 0,
-        amount_collected: parseFloat(r['Order_Amount_collected']) || 0,
+        amount_collected: parseFloat(hasBankSweep ? r['Unique_Order_Amt_Collected'] : r['Order_Amount_collected']) || 0,
+        // Card/debit portion only (excludes cash) — this is what Clover
+        // actually sweeps to the bank, straight from the manually-verified
+        // Unique_Credit_Amt_Collected column. null for plain-format files
+        // (no such distinction available there).
+        credit_swept: hasBankSweep ? (parseFloat(r['Unique_Credit_Amt_Collected']) || 0) : null,
         discount: parseFloat(r['Order_Total_Discount']) || 0,
         refund: parseFloat(r['Order_Total_Refund']) || 0,
         discount_names: r['Order_discount_names'] || '',
@@ -1153,34 +1216,18 @@ function parseCloverXLSX(ab){
     });
   });
 
-  // TEMPORARY DEBUG — dumps every order's extracted date, flagging any
-  // that differ from the majority date in this file. Since the file's
-  // raw date serial is confirmed uniform (verified externally), any order
-  // landing on a different date here is a genuine parsing bug, not real
-  // data — this will show us exactly which order(s) and why.
-  (function(){
-    var dateCounts = {};
-    Object.keys(orderMap).forEach(function(oid){
-      var d = orderMap[oid].date;
-      dateCounts[d] = (dateCounts[d]||0) + 1;
-    });
-    var majority = Object.keys(dateCounts).sort(function(a,b){ return dateCounts[b]-dateCounts[a]; })[0];
-    console.log('=== CLOVER DATE DEBUG === majority date:', majority, 'counts:', JSON.stringify(dateCounts));
-    Object.keys(orderMap).forEach(function(oid){
-      var o = orderMap[oid];
-      if(o.date !== majority){
-        console.log('DIVERGENT ORDER:', JSON.stringify({order: oid, extracted_date: o.date, extracted_time: o.time}));
-      }
-    });
-    console.log('=== END CLOVER DATE DEBUG ===');
-  })();
-
   // --- Aggregate to day ---
+  // Bucketed by bank_sweep_date, which equals the calendar date for plain
+  // (non-bank-sweep-format) files, or the manually-verified sweep date for
+  // files that provide one — either way this is what daily_settlement and
+  // bank matching operate on. clover_orders.sale_date (set above) always
+  // keeps the true calendar date regardless of which bucket a day's
+  // settlement lands in.
   var dayMap = {};
   Object.keys(orderMap).forEach(function(oid){
     var o = orderMap[oid];
     if(!o.date) return;
-    var d = o.date;
+    var d = o.bank_sweep_date || o.date;
     if(!dayMap[d]){
       dayMap[d] = {
         date: d,
@@ -1193,6 +1240,7 @@ function parseCloverXLSX(ab){
         card_net: 0,
         cash_collected: 0,
         card_collected: 0,
+        credit_swept: 0,
         discounts: 0,
         refunds: 0,
         item_lines: []
@@ -1206,6 +1254,7 @@ function parseCloverXLSX(ab){
     day.tips             += o.tip;
     day.discounts        += o.discount;
     day.refunds           += o.refund;
+    if(hasBankSweep) day.credit_swept += o.credit_swept;
     var ch = classifyPayment(o.payment_type);
     if(ch === 'cash'){
       day.cash_net       += o.order_net;
@@ -1228,6 +1277,7 @@ function parseCloverXLSX(ab){
     day.card_net         = Math.round(day.card_net         * 100) / 100;
     day.cash_collected   = Math.round(day.cash_collected   * 100) / 100;
     day.card_collected   = Math.round(day.card_collected   * 100) / 100;
+    day.credit_swept     = hasBankSweep ? (Math.round(day.credit_swept * 100) / 100) : null;
     day.discounts        = Math.round(day.discounts        * 100) / 100;
     day.refunds           = Math.round(day.refunds          * 100) / 100;
     day.order_count = day.orders.length;
@@ -1248,7 +1298,8 @@ function parseCloverXLSX(ab){
       order_id: oid,
       sale_date: o.date,
       sale_time: o.time || null,
-      settlement_date: o.date, // plain calendar date — cutoff-shifting reverted (see note above)
+      settlement_date: o.bank_sweep_date || o.date, // real bank sweep date when the file provides one, else mirrors sale_date
+      credit_swept: o.credit_swept,
       item_count: o.items.length,
       employee: o.employee || '',
       payment_type: o.payment_type || '',
@@ -1311,6 +1362,7 @@ function buildSettlement(dayData){
     card_net: dayData.card_net,
     cash_collected: dayData.cash_collected,
     card_collected: dayData.card_collected,
+    credit_swept: dayData.credit_swept != null ? dayData.credit_swept : null,
     discounts: dayData.discounts,
     refunds: dayData.refunds,
     order_count: dayData.order_count,
@@ -1337,6 +1389,7 @@ async function saveSettlementToSB(s){
     card_net: s.card_net,
     cash_collected: s.cash_collected || 0,
     card_collected: s.card_collected || 0,
+    credit_swept: (s.credit_swept !== undefined && s.credit_swept !== null) ? s.credit_swept : null,
     discounts: s.discounts,
     refunds: s.refunds || 0,
     order_count: s.order_count,
@@ -1367,6 +1420,18 @@ async function saveSettlementToSB(s){
 // ═══════════════════════════════════════════════
 function settlementGLTotal(s){
   return Math.round(((s.gross_net||0)+(s.tax||0)+(s.tips||0))*100)/100;
+}
+
+// The dollar figure that should actually match a bank deposit for this
+// settlement. When the file provided a verified Bank_Sweep_Date/Unique_*
+// breakdown, credit_swept (card/debit only, cash excluded — cash never
+// goes through Clover's bank sweep) is authoritative. Older imports
+// without that breakdown fall back to the previous cash+card sum.
+function settlementMatchAmount(s){
+  if(s.credit_swept !== null && s.credit_swept !== undefined){
+    return Math.round(s.credit_swept*100)/100;
+  }
+  return Math.round(((s.cash_collected||0)+(s.card_collected||0))*100)/100;
 }
 
 async function postSettlementGL(s){
@@ -1402,6 +1467,7 @@ async function loadRevData(){
         cash_net: r.cash_net, card_net: r.card_net,
         cash_collected: r.cash_collected || 0,
         card_collected: r.card_collected || 0,
+        credit_swept: (r.credit_swept !== undefined) ? r.credit_swept : null,
         discounts: r.discounts || 0,
         refunds: r.refunds || 0,
         order_count: r.order_count, item_count: r.item_count,
@@ -5438,12 +5504,15 @@ function openRevMatchModal(rowId){
           ? '<div class="empty-state" style="padding:24px"><div>No unmatched settlement dates available.</div></div>'
           : '<div class="match-row-list">' +
             unmatched.map(function(s){
-              var collected = s.cash_collected + s.card_collected;
+              var collected = settlementMatchAmount(s);
+              var breakdown = (s.credit_swept !== null && s.credit_swept !== undefined)
+                ? 'Credit/Debit Swept: ' + fmt(s.credit_swept)
+                : ('Cash: ' + fmt(s.cash_collected) + ' \u2014 Card: ' + fmt(s.card_collected));
               return '<div class="match-row-item" id="rev-set-' + s.id + '" onclick="toggleRevDateSelect(\'' + s.id + '\')">' +
                 '<div class="match-row-check">&#10003;</div>' +
                 '<div style="flex:1">' +
                   '<div style="font-weight:600;font-size:13px">' + fmtDate(s.date) + '</div>' +
-                  '<div style="font-size:11px;color:var(--ink-lo)">Cash: ' + fmt(s.cash_collected) + ' \u2014 Card: ' + fmt(s.card_collected) + '</div>' +
+                  '<div style="font-size:11px;color:var(--ink-lo)">' + breakdown + '</div>' +
                 '</div>' +
                 '<div class="mono fw600">' + fmt(collected) + '</div>' +
               '</div>';
@@ -5483,7 +5552,7 @@ function updateRevMatchSummary(){
 
   var total = selectedIds.reduce(function(sum, id){
     var s = REV.settlements.find(function(x){ return x.id === id; });
-    return sum + (s ? (s.cash_collected + s.card_collected) : 0);
+    return sum + (s ? settlementMatchAmount(s) : 0);
   }, 0);
   var variance = Math.round((amtAbs - total) * 100) / 100;
 
@@ -5520,7 +5589,7 @@ async function confirmRevMatch(){
     var matchRow = {
       id: matchId, bank_ledger_id: row.id, match_kind: 'clover_revenue',
       payment_id: null, invoice_id: null, settlement_date: s.date,
-      amount: s.cash_collected + s.card_collected, created_at: new Date().toISOString()
+      amount: settlementMatchAmount(s), created_at: new Date().toISOString()
     };
     await saveBankMatch(matchRow);
     REV.bankMatches.push(matchRow);
@@ -5535,7 +5604,7 @@ async function confirmRevMatch(){
       // so a Bank Ledger match had no visible effect on the Revenue side.)
       s.deposit_status = 'deposited';
       s.deposit_date = row.pmnt_date;
-      s.deposit_amount = s.cash_collected + s.card_collected;
+      s.deposit_amount = settlementMatchAmount(s);
       await saveSettlementToSB(s);
     }
   }
