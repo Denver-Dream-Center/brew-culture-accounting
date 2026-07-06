@@ -1087,34 +1087,13 @@ function parseCloverXLSX(ab){
     return '';
   }
 
-  // Clover's actual daily deposit sweep cuts off at 5:00pm, not midnight —
-  // a sale at 5:47pm on 12/31 gets swept into the bank with the NEXT day's
-  // batch, not 12/31's. This buckets orders into that same 5pm-to-5pm
-  // "business day" so daily_settlement lines up with the real bank deposit
-  // day-for-day, instead of leaving a small offsetting variance between
-  // every pair of adjacent days (see the Dec 30/31 discussion).
-  //
-  // Deliberately only affects the settlement_date used for revenue GL /
-  // bank matching — clover_orders.sale_date / sale_time (built separately,
-  // below) always keeps the true calendar date and clock time of the sale,
-  // untouched, for accurate day-of-week / daily-target analysis later.
-  //
-  // If Clover's sweep time ever actually gets corrected (per the
-  // conversation with Clover support), this is the one constant to change
-  // — or set to 24 to disable the shift entirely and bucket by calendar day.
-  var CLOVER_SETTLEMENT_CUTOFF_HOUR = 17;
-
-  function settlementDayFor(dateStr, timeStr){
-    if(!dateStr) return dateStr;
-    if(!timeStr) return dateStr; // no time captured — can't shift, assume same day
-    var parts = timeStr.split(':');
-    var totalSec = (parseInt(parts[0])||0)*3600 + (parseInt(parts[1])||0)*60 + (parseInt(parts[2])||0);
-    if(totalSec < CLOVER_SETTLEMENT_CUTOFF_HOUR*3600) return dateStr;
-    // Roll forward one calendar day, via UTC to dodge DST edge cases
-    var d = new Date(dateStr + 'T00:00:00Z');
-    d.setUTCDate(d.getUTCDate() + 1);
-    return d.getUTCFullYear() + '-' + String(d.getUTCMonth()+1).padStart(2,'0') + '-' + String(d.getUTCDate()).padStart(2,'0');
-  }
+  // NOTE: a settlement-day cutoff rule (rolling late-day sales into the
+  // next day's bucket to match the bank's deposit sweep) was tried and
+  // reverted — the actual cutoff time turned out to vary day to day
+  // (observed anywhere from 5:34pm to 6:20pm), so no fixed hour could
+  // reliably encode it. Settlement day is back to a plain calendar date
+  // (whatever Clover's own "date" column says). Reconciling a day's
+  // settlement against its actual bank deposit is a manual step for now.
 
   // --- Build order-level map (for tip/tax/payment dedup) ---
   var orderMap = {};
@@ -1179,7 +1158,7 @@ function parseCloverXLSX(ab){
   Object.keys(orderMap).forEach(function(oid){
     var o = orderMap[oid];
     if(!o.date) return;
-    var d = settlementDayFor(o.date, o.time);
+    var d = o.date;
     if(!dayMap[d]){
       dayMap[d] = {
         date: d,
@@ -1247,7 +1226,7 @@ function parseCloverXLSX(ab){
       order_id: oid,
       sale_date: o.date,
       sale_time: o.time || null,
-      settlement_date: settlementDayFor(o.date, o.time),
+      settlement_date: o.date, // plain calendar date — cutoff-shifting reverted (see note above)
       item_count: o.items.length,
       employee: o.employee || '',
       payment_type: o.payment_type || '',
@@ -1320,48 +1299,6 @@ function buildSettlement(dayData){
     notes: '',
     imported_at: new Date().toISOString()
   };
-}
-
-// Recomputes a settlement day's totals from every clover_orders row ever
-// stored with that settlement_date — not just whatever's in the file being
-// imported right now. This is what makes overlapping/multi-part historical
-// uploads safe: e.g. importing 1/1-1/5 creates a partial 1/6 settlement
-// from 1/5's 5-6pm spillover, then later importing 1/6's own file re-reads
-// BOTH sets of orders from the database and produces the correct combined
-// total, instead of the second import silently overwriting and losing the
-// first one's contribution.
-async function buildSettlementFromDB(dateStr){
-  var res = await _sb.from('clover_orders').select('*').eq('settlement_date', dateStr);
-  if(res.error){ console.error('buildSettlementFromDB', res.error); return null; }
-  var orders = res.data || [];
-  var day = {
-    date: dateStr, gross_net:0, gross_before_disc:0, tax:0, tips:0,
-    cash_net:0, card_net:0, cash_collected:0, card_collected:0,
-    discounts:0, refunds:0, order_count: orders.length, item_count:0
-  };
-  orders.forEach(function(o){
-    day.gross_net         += parseFloat(o.order_net)||0;
-    day.gross_before_disc += parseFloat(o.order_net)||0; // gross-before-discount isn't separately stored per order; discount is tracked via order_total_discount below
-    day.tax               += parseFloat(o.order_tax)||0;
-    day.tips              += parseFloat(o.order_tip_amount)||0;
-    day.discounts         += parseFloat(o.order_total_discount)||0;
-    day.refunds            += parseFloat(o.order_total_refund)||0;
-    day.item_count         += o.item_count||0;
-    var ch = classifyPayment(o.payment_type);
-    if(ch === 'cash'){
-      day.cash_net       += parseFloat(o.order_net)||0;
-      day.cash_collected += parseFloat(o.order_amount_collected)||0;
-    } else {
-      day.card_net       += parseFloat(o.order_net)||0;
-      day.card_collected += parseFloat(o.order_amount_collected)||0;
-    }
-  });
-  // gross_before_disc should reflect the pre-discount amount, i.e. net + discount
-  day.gross_before_disc = day.gross_net + day.discounts;
-  ['gross_net','gross_before_disc','tax','tips','cash_net','card_net','cash_collected','card_collected','discounts','refunds'].forEach(function(k){
-    day[k] = Math.round(day[k]*100)/100;
-  });
-  return buildSettlement(day);
 }
 
 
@@ -1655,14 +1592,8 @@ async function confirmCloverImport(){
   var glErrors = [];
   var depositMismatch = [];
   for(var i = 0; i < dates.length; i++){
-    showLoadingOverlay('Rebuilding settlements... (' + (i+1) + '/' + dates.length + ')');
-    // Rebuilt from the FULL set of stored orders for this settlement day,
-    // not just this file's dayMap — so a day that was partially populated
-    // by an earlier overlapping upload (e.g. 5-6pm spillover from the
-    // previous day's file) gets its correct combined total, not a total
-    // that only reflects whatever's in the file open right now.
-    var s = await buildSettlementFromDB(dates[i]);
-    if(!s){ errors.push(dates[i]); continue; }
+    showLoadingOverlay('Saving settlements... (' + (i+1) + '/' + dates.length + ')');
+    var s = buildSettlement(dayMap[dates[i]]);
     // Check if already exists to preserve deposit_status
     var existing = REV.settlements.find(function(x){ return x.date === s.date; });
     if(existing){
@@ -1671,9 +1602,9 @@ async function confirmCloverImport(){
       s.deposit_amount = existing.deposit_amount;
       // If this day was already matched to a real bank deposit, that match's
       // transfer entry is frozen at the OLD total — it won't auto-adjust.
-      // A new/changed total here would leave Undeposited Funds off by the
-      // difference until the match is redone, so flag it rather than let
-      // it silently drift.
+      // A new/changed total here (e.g. re-importing a corrected file) would
+      // leave Undeposited Funds off by the difference until the match is
+      // redone, so flag it rather than let it silently drift.
       var oldTotal = settlementGLTotal(existing);
       var newTotal = settlementGLTotal(s);
       if(existing.deposit_status === 'deposited' && Math.abs(oldTotal - newTotal) > 0.01){
