@@ -1153,6 +1153,28 @@ function parseCloverXLSX(ab){
     });
   });
 
+  // TEMPORARY DEBUG — dumps every order's extracted date, flagging any
+  // that differ from the majority date in this file. Since the file's
+  // raw date serial is confirmed uniform (verified externally), any order
+  // landing on a different date here is a genuine parsing bug, not real
+  // data — this will show us exactly which order(s) and why.
+  (function(){
+    var dateCounts = {};
+    Object.keys(orderMap).forEach(function(oid){
+      var d = orderMap[oid].date;
+      dateCounts[d] = (dateCounts[d]||0) + 1;
+    });
+    var majority = Object.keys(dateCounts).sort(function(a,b){ return dateCounts[b]-dateCounts[a]; })[0];
+    console.log('=== CLOVER DATE DEBUG === majority date:', majority, 'counts:', JSON.stringify(dateCounts));
+    Object.keys(orderMap).forEach(function(oid){
+      var o = orderMap[oid];
+      if(o.date !== majority){
+        console.log('DIVERGENT ORDER:', JSON.stringify({order: oid, extracted_date: o.date, extracted_time: o.time}));
+      }
+    });
+    console.log('=== END CLOVER DATE DEBUG ===');
+  })();
+
   // --- Aggregate to day ---
   var dayMap = {};
   Object.keys(orderMap).forEach(function(oid){
