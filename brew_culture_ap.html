@@ -2041,7 +2041,15 @@ function processSweepPrepFile(file){
   var reader = new FileReader();
   reader.onload = function(e){
     try{
-      var outName = file.name.replace(/\.xlsx$/i, '') + '_sweep_prep.xlsx';
+      var baseName = file.name.replace(/\.xlsx$/i, '');
+      // If the uploaded file already ends in "_sweep_prep_<N>" (the user's
+      // own versioning convention for tracking multiple rounds of moving
+      // records between adjacent days), bump N by 1 instead of stacking
+      // another literal "_sweep_prep" suffix on top of it.
+      var versionMatch = baseName.match(/^(.*_sweep_prep_)(\d+)$/);
+      var outName = versionMatch
+        ? versionMatch[1] + (parseInt(versionMatch[2], 10) + 1) + '.xlsx'
+        : baseName + '_sweep_prep.xlsx';
       var wbOut = buildSweepPrepWorkbook(e.target.result);
       var wbArr = XLSX.write(wbOut, {bookType:'xlsx', type:'array'});
       var blob = new Blob([wbArr], {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
@@ -2179,6 +2187,30 @@ function buildSweepPrepWorkbook(ab){
     var col = colLetter[h];
     newWs[col + totalsRowNum] = {t:'n', f:'SUM(' + col + '2:' + col + lastDataRow + ')'};
   });
+
+  // Date/time display formatting, matching the format the owner applies by
+  // hand after this tool runs — so the output already looks right without
+  // manual reformatting. Applied to every data row across all 6 date/time
+  // columns (Bank_Sweep_Date included, even though it starts blank — once
+  // a real date gets typed in, it displays correctly right away).
+  var DATE_FMT = 'm/d/yy;@';
+  var TIME_FMT = '[$-409]h:mm:ss\\ AM/PM;@';
+  var DATE_COLS = ['Bank_Sweep_Date','date','original_date','payment_date'];
+  var TIME_COLS = ['time','payment_time'];
+  for(var dr = 2; dr <= lastDataRow; dr++){
+    DATE_COLS.forEach(function(h){
+      if(colLetter[h] === undefined) return;
+      var addr = colLetter[h] + dr;
+      if(!newWs[addr]) newWs[addr] = {t:'s', v:''};
+      newWs[addr].z = DATE_FMT;
+    });
+    TIME_COLS.forEach(function(h){
+      if(colLetter[h] === undefined) return;
+      var addr = colLetter[h] + dr;
+      if(!newWs[addr]) newWs[addr] = {t:'s', v:''};
+      newWs[addr].z = TIME_FMT;
+    });
+  }
 
   var newWb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(newWb, newWs, 'FullOrdersDetails_prepped');
