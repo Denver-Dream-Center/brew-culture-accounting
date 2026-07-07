@@ -2293,6 +2293,12 @@ function renderRevSettlement(){
       : '<span class="badge badge-open">Pending</span>';
     var depAmt = s.deposit_amount ? fmt(s.deposit_amount) : '\u2014';
     var depDate = s.deposit_date ? fmtDate(s.deposit_date) : '\u2014';
+    // Card Rcvd = what actually gets swept to the bank (credit_swept when
+    // available, net of any gift card redemption; card_collected fallback
+    // for older imports) — this is the figure to reconcile against the
+    // bank ledger deposit, not `card_net` (recognized revenue, excludes
+    // tax/tips and isn't gift-card-aware).
+    var cardRcvd = settlementCardPortion(s);
     return '<tr>' +
       '<td>' + fmtDate(s.date) + '</td>' +
       '<td class="text-right mono fw600">' + fmt(s.gross_net) + '</td>' +
@@ -2301,6 +2307,7 @@ function renderRevSettlement(){
       '<td class="text-right mono">' + fmt(s.tips) + '</td>' +
       '<td class="text-right mono">' + fmt(s.cash_net) + '</td>' +
       '<td class="text-right mono">' + fmt(s.card_net) + '</td>' +
+      '<td class="text-right mono fw600">' + fmt(cardRcvd) + '</td>' +
       '<td class="text-right mono">' + s.order_count + '</td>' +
       '<td>' + depBadge + '</td>' +
       '<td class="mono">' + depDate + '</td>' +
@@ -2322,7 +2329,7 @@ function renderRevSettlement(){
       '<div class="tbl-wrap"><table>' +
         '<thead><tr><th>Date</th><th class="text-right">Net Rev</th><th class="text-right">vs $1,200</th>' +
           '<th class="text-right">Tax</th><th class="text-right">Tips</th>' +
-          '<th class="text-right">Cash</th><th class="text-right">Card</th>' +
+          '<th class="text-right">Cash</th><th class="text-right">Card</th><th class="text-right">Card Rcvd</th>' +
           '<th class="text-right">Orders</th><th>Status</th>' +
           '<th>Deposit Date</th><th class="text-right">Deposit Amt</th><th></th></tr></thead>' +
         '<tbody>' + rows + '</tbody>' +
