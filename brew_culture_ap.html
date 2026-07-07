@@ -1684,6 +1684,19 @@ function renderCloverPreview(dayMap){
     var refCell = day.refunds > 0
       ? '<span style="color:var(--red)">' + fmt(day.refunds) + '</span>'
       : '<span style="color:var(--ink-lo)">\u2014</span>';
+    // Card/cash split shown here must match what postSettlementGL actually
+    // posts, not the raw payment-type classification — otherwise this
+    // preview overstates Card Rcvd by any gift-card-redeemed amount on a
+    // split-tender order (the bug this replaces: card_collected includes
+    // the full order total regardless of tender, with no awareness of
+    // Gift_Card_Redeemed at all).
+    var giftPortion = day.gift_card_redeemed || 0;
+    var cardPortion = settlementCardPortion(day);
+    var dayTotal = Math.round((day.gross_net + day.tax + day.tips)*100)/100;
+    var cashPortion = Math.round((dayTotal - cardPortion - giftPortion)*100)/100;
+    var giftCell = giftPortion > 0
+      ? '<span style="color:#9B6A10">' + fmt(giftPortion) + '</span>'
+      : '<span style="color:var(--ink-lo)">\u2014</span>';
     return '<tr class="' + rowCls + '">' +
       '<td>' + fmtDate(d) + dupNote + '</td>' +
       '<td class="text-right mono">' + fmt(day.gross_before_disc) + '</td>' +
@@ -1692,8 +1705,9 @@ function renderCloverPreview(dayMap){
       '<td class="text-right mono fw600">' + fmt(day.gross_net) + '</td>' +
       '<td class="text-right mono">' + fmt(day.tax) + '</td>' +
       '<td class="text-right mono">' + fmt(day.tips) + '</td>' +
-      '<td class="text-right mono">' + fmt(day.cash_collected) + '</td>' +
-      '<td class="text-right mono">' + fmt(day.card_collected) + '</td>' +
+      '<td class="text-right mono">' + fmt(cashPortion) + '</td>' +
+      '<td class="text-right mono">' + fmt(cardPortion) + '</td>' +
+      '<td class="text-right mono">' + giftCell + '</td>' +
       '<td class="text-right mono">' + day.order_count + '</td>' +
     '</tr>';
   }).join('');
@@ -1724,6 +1738,7 @@ function renderCloverPreview(dayMap){
         '<th class="text-right">Tips</th>' +
         '<th class="text-right">Cash Rcvd</th>' +
         '<th class="text-right">Card Rcvd</th>' +
+        '<th class="text-right">Gift Card</th>' +
         '<th class="text-right">Orders</th>' +
       '</tr></thead><tbody>' + rows + '</tbody></table>' +
     '</div>' +
