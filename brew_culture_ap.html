@@ -1793,6 +1793,8 @@ async function confirmCloverImport(){
   if(errors.length){
     showToast('Import failed for: ' + errors.join(', '), 'warn');
   } else {
+    var orderCount = _cloverParsed.orders.length;
+    var itemCount = _cloverParsed.items.length;
     await loadRevData();
     renderSidebar();
     _cloverParsed = null;
@@ -1803,7 +1805,7 @@ async function confirmCloverImport(){
     } else if(detailErr){
       showToast('Imported ' + dates.length + ' day(s), but order/item detail failed to save \u2014 check console', 'warn');
     } else {
-      showToast('Imported ' + dates.length + ' day(s), ' + _cloverParsed.orders.length + ' order(s), ' + _cloverParsed.items.length + ' item line(s)');
+      showToast('Imported ' + dates.length + ' day(s), ' + orderCount + ' order(s), ' + itemCount + ' item line(s)');
     }
     showView('rev-settlement');
   }
