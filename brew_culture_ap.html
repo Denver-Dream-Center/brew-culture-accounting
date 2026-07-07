@@ -1181,6 +1181,14 @@ function parseCloverXLSX(ab){
         // Unique_Credit_Amt_Collected column. null for plain-format files
         // (no such distinction available there).
         credit_swept: hasBankSweep ? (parseFloat(r['Unique_Credit_Amt_Collected']) || 0) : null,
+        // Gift card portion of this order, manually entered on split-tender
+        // orders (Clover doesn't isolate this anywhere in the export — the
+        // combined payment_type string, e.g. "Gift Cards, Credit Card", is
+        // the only signal a gift card was involved at all). 0 when absent
+        // or the file predates this column. Not "new" money either way —
+        // relieves Gift Card Liability rather than hitting Undeposited Cash
+        // or Undeposited Credit Card Revenue.
+        gift_card_redeemed: hasBankSweep ? (parseFloat(r['Gift_Card_Redeemed']) || 0) : 0,
         discount: parseFloat(r['Order_Total_Discount']) || 0,
         refund: parseFloat(r['Order_Total_Refund']) || 0,
         discount_names: r['Order_discount_names'] || '',
@@ -1244,6 +1252,7 @@ function parseCloverXLSX(ab){
         cash_collected: 0,
         card_collected: 0,
         credit_swept: 0,
+        gift_card_redeemed: 0,
         discounts: 0,
         refunds: 0,
         item_lines: []
@@ -1258,6 +1267,7 @@ function parseCloverXLSX(ab){
     day.discounts        += o.discount;
     day.refunds           += o.refund;
     if(hasBankSweep) day.credit_swept += o.credit_swept;
+    day.gift_card_redeemed += o.gift_card_redeemed;
     var ch = classifyPayment(o.payment_type);
     if(ch === 'cash'){
       day.cash_net       += o.order_net;
@@ -1281,6 +1291,7 @@ function parseCloverXLSX(ab){
     day.cash_collected   = Math.round(day.cash_collected   * 100) / 100;
     day.card_collected   = Math.round(day.card_collected   * 100) / 100;
     day.credit_swept     = hasBankSweep ? (Math.round(day.credit_swept * 100) / 100) : null;
+    day.gift_card_redeemed = Math.round(day.gift_card_redeemed * 100) / 100;
     day.discounts        = Math.round(day.discounts        * 100) / 100;
     day.refunds           = Math.round(day.refunds          * 100) / 100;
     day.order_count = day.orders.length;
@@ -1303,6 +1314,7 @@ function parseCloverXLSX(ab){
       sale_time: o.time || null,
       settlement_date: o.bank_sweep_date || o.date, // real bank sweep date when the file provides one, else mirrors sale_date
       credit_swept: o.credit_swept,
+      gift_card_redeemed: o.gift_card_redeemed,
       item_count: o.items.length,
       employee: o.employee || '',
       payment_type: o.payment_type || '',
@@ -1366,6 +1378,7 @@ function buildSettlement(dayData){
     cash_collected: dayData.cash_collected,
     card_collected: dayData.card_collected,
     credit_swept: dayData.credit_swept != null ? dayData.credit_swept : null,
+    gift_card_redeemed: dayData.gift_card_redeemed || 0,
     discounts: dayData.discounts,
     refunds: dayData.refunds,
     order_count: dayData.order_count,
@@ -1393,6 +1406,7 @@ async function saveSettlementToSB(s){
     cash_collected: s.cash_collected || 0,
     card_collected: s.card_collected || 0,
     credit_swept: (s.credit_swept !== undefined && s.credit_swept !== null) ? s.credit_swept : null,
+    gift_card_redeemed: s.gift_card_redeemed || 0,
     discounts: s.discounts,
     refunds: s.refunds || 0,
     order_count: s.order_count,
@@ -1466,11 +1480,17 @@ async function postSettlementGL(s){
   if(total<=0)return true; // nothing to book for a zero/void day
 
   var cardPortion = settlementCardPortion(s);
-  var cashPortion = Math.round((total - cardPortion)*100)/100;
+  var giftCardPortion = Math.round((s.gift_card_redeemed||0)*100)/100;
+  var cashPortion = Math.round((total - cardPortion - giftCardPortion)*100)/100;
 
   var entries=[];
   if(Math.abs(cardPortion) > 0.004) entries.push({acct:'1016',name:'Undeposited Credit Card Revenue',dr:cardPortion,cr:0});
   if(Math.abs(cashPortion) > 0.004) entries.push({acct:'1017',name:'Undeposited Cash Revenue',dr:cashPortion,cr:0});
+  // Gift card redemptions aren't new money in either direction — the cash
+  // was already collected (and should already have been credited to this
+  // same liability account) whenever the card was originally sold. Debiting
+  // it here relieves the liability as the shop fulfills the obligation.
+  if(Math.abs(giftCardPortion) > 0.004) entries.push({acct:'2040',name:'Gift Card Liability',dr:giftCardPortion,cr:0});
   entries.push({acct:'4010',name:'In-Store Revenue',dr:0,cr:Math.round((s.gross_net||0)*100)/100});
   if(s.tax>0.004)entries.push({acct:'2050',name:'Sales Tax Payable',dr:0,cr:Math.round(s.tax*100)/100});
   if(s.tips>0.004)entries.push({acct:'2060',name:'Tips Payable',dr:0,cr:Math.round(s.tips*100)/100});
@@ -1494,6 +1514,7 @@ async function loadRevData(){
         cash_collected: r.cash_collected || 0,
         card_collected: r.card_collected || 0,
         credit_swept: (r.credit_swept !== undefined) ? r.credit_swept : null,
+        gift_card_redeemed: r.gift_card_redeemed || 0,
         discounts: r.discounts || 0,
         refunds: r.refunds || 0,
         order_count: r.order_count, item_count: r.item_count,
@@ -2048,7 +2069,9 @@ function buildSweepPrepWorkbook(ab){
   // 'date'; each Unique_* column goes immediately after its source column
   // (Unique_Credit_Amt_Collected rides right after Unique_Order_Amt_Collected,
   // both after Order_Amount_collected) — matching the layout already
-  // established by hand in earlier files.
+  // established by hand in earlier files. Gift_Card_Redeemed rides right
+  // after that, before Unique_Credit_Amt_Collected, since the credit-swept
+  // formula needs it to net out split-tender (gift card + card) orders.
   var newHeaders = [];
   origHeaders.forEach(function(h){
     if(h === 'date') newHeaders.push('Bank_Sweep_Date');
@@ -2058,6 +2081,7 @@ function buildSweepPrepWorkbook(ab){
     if(h === 'Order_Tip_Amount') newHeaders.push('Unique_Order_Tip');
     if(h === 'Order_Amount_collected'){
       newHeaders.push('Unique_Order_Amt_Collected');
+      newHeaders.push('Gift_Card_Redeemed');
       newHeaders.push('Unique_Credit_Amt_Collected');
     }
   });
@@ -2071,7 +2095,10 @@ function buildSweepPrepWorkbook(ab){
     }
   });
 
+  // Gift_Card_Redeemed is manual entry (blank by default, same as
+  // Bank_Sweep_Date) — everything else in UNIQUE_COLS gets a live formula.
   var UNIQUE_COLS = ['Unique_Order_Net','Unique_Order_Tax','Unique_Order_Tip','Unique_Order_Amt_Collected','Unique_Credit_Amt_Collected'];
+  var BLANK_COLS = ['Bank_Sweep_Date','Gift_Card_Redeemed'];
 
   // Build row data first with plain placeholder values, then set live
   // formulas directly on the resulting cell objects afterward — aoa_to_sheet
@@ -2080,7 +2107,7 @@ function buildSweepPrepWorkbook(ab){
   rows.forEach(function(r){
     var rowArr = [];
     newHeaders.forEach(function(h){
-      if(h === 'Bank_Sweep_Date' || UNIQUE_COLS.indexOf(h) !== -1){ rowArr.push(''); return; }
+      if(BLANK_COLS.indexOf(h) !== -1 || UNIQUE_COLS.indexOf(h) !== -1){ rowArr.push(''); return; }
       rowArr.push(r[h]);
     });
     aoa.push(rowArr);
@@ -2088,9 +2115,10 @@ function buildSweepPrepWorkbook(ab){
   var lastDataRow = rows.length + 1; // header is row 1
   aoa.push([]); // spacer row
   var totalsRowNum = lastDataRow + 2;
+  var TOTALED_COLS = UNIQUE_COLS.concat(['Gift_Card_Redeemed']); // every inserted column except Bank_Sweep_Date
   var totalsRowArr = [];
   newHeaders.forEach(function(h){
-    totalsRowArr.push(UNIQUE_COLS.indexOf(h) !== -1 ? 0 : '');
+    totalsRowArr.push(TOTALED_COLS.indexOf(h) !== -1 ? 0 : '');
   });
   aoa.push(totalsRowArr);
 
@@ -2115,16 +2143,24 @@ function buildSweepPrepWorkbook(ab){
       {t:'n', f:'IF(' + dedupCond + ',0,' + colLetter['Order_Tip_Amount'] + excelRow + ')'};
     newWs[colLetter['Unique_Order_Amt_Collected'] + excelRow] =
       {t:'n', f:'IF(' + dedupCond + ',0,' + colLetter['Order_Amount_collected'] + excelRow + ')'};
-    // Credit/debit only — references the just-computed Unique_Order_Amt_Collected
-    // cell so the dedup and the payment-type check don't have to be repeated.
+    // Credit/debit only, net of any gift card portion. Uses SEARCH (a
+    // substring check) rather than an exact match, since Clover reports
+    // split-tender orders as a combined string like "Gift Cards, Credit
+    // Card" — an exact "=" comparison against "Credit Card" would miss
+    // these entirely and silently exclude the whole order from the
+    // credit-swept total, which is the bug this replaces. Gift_Card_Redeemed
+    // defaults to blank/0 for every normal order and only needs a manual
+    // entry on the rare split-tender row.
     var pCol = colLetter['payment_type'];
     var uAmtCell = colLetter['Unique_Order_Amt_Collected'] + excelRow;
+    var gcCell = colLetter['Gift_Card_Redeemed'] + excelRow;
     newWs[colLetter['Unique_Credit_Amt_Collected'] + excelRow] =
-      {t:'n', f:'IF(OR(' + pCol + excelRow + '="Credit Card",' + pCol + excelRow + '="Debit Card")' + ',' + uAmtCell + ',0)'};
+      {t:'n', f:'IF(OR(ISNUMBER(SEARCH("Credit Card",' + pCol + excelRow + ')),ISNUMBER(SEARCH("Debit Card",' + pCol + excelRow + ')))' +
+        ',' + uAmtCell + '-IF(' + gcCell + '="",0,' + gcCell + '),0)'};
   }
 
-  // Totals row — SUM every Unique_* column, explicitly excluding Bank_Sweep_Date.
-  UNIQUE_COLS.forEach(function(h){
+  // Totals row — SUM every inserted column, explicitly excluding Bank_Sweep_Date.
+  TOTALED_COLS.forEach(function(h){
     var col = colLetter[h];
     newWs[col + totalsRowNum] = {t:'n', f:'SUM(' + col + '2:' + col + lastDataRow + ')'};
   });
