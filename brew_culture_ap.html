@@ -6818,8 +6818,10 @@ async function saveEmployee(editId){
       effectiveEndDate:null, reason:'Initial setup'
     };
     await saveStatusToSB(status);
-    const rateVal = parseFloat($('emp-rate').value);
-    if(!rateVal){closeModal();renderPayrollEmployees();showToast('Employee saved — add a starting pay rate from the employee record.');return}
+    const rateInput=$('emp-rate').value;
+    if(rateInput===''){closeModal();renderPayrollEmployees();showToast('Employee saved — add a starting pay rate from the employee record.');return}
+    const rateVal=parseFloat(rateInput);
+    if(isNaN(rateVal)||rateVal<0){closeModal();renderPayrollEmployees();showToast('Employee saved — add a starting pay rate from the employee record.');return}
     const rate={
       id:nextSeq('PYR'), employeeId:employee.id, payRate:rateVal,
       payRateType:$('emp-rate-type').value, effectiveStartDate:$('emp-rate-start').value||todayStr(),
@@ -6930,7 +6932,10 @@ function openPayRateModal(employeeId){
 }
 
 async function savePayRate(employeeId){
-  const rateVal=parseFloat($('pyr-rate').value); if(!rateVal){$('pyr-err').textContent='Rate required.';return}
+  const rateInput=$('pyr-rate').value;
+  if(rateInput===''){$('pyr-err').textContent='Rate required.';return}
+  const rateVal=parseFloat(rateInput);
+  if(isNaN(rateVal)||rateVal<0){$('pyr-err').textContent='Enter a valid rate (0 or more).';return}
   const startDate=$('pyr-start').value; if(!startDate){$('pyr-err').textContent='Effective date required.';return}
   // Close out the currently open-ended rate, ending the day before the new rate starts
   const current = currentPayRate(employeeId);
