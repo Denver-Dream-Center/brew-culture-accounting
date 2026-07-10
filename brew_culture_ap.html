@@ -6966,92 +6966,104 @@ async function saveShiftToSB(shift){
   return ok;
 }
 
+var shiftFormRows = [];       // {shiftId, employeeId, clockIn, clockOut} -- one per grid row
+var shiftFormDeletedIds = []; // shift_log ids removed from the grid, to delete on save
+
+function loadShiftFormForDate(dateStr){
+  const shifts = shiftsForDate(dateStr);
+  shiftFormRows = shifts.map(s=>({shiftId:s.id, employeeId:s.employeeId, clockIn:s.clockIn, clockOut:s.clockOut}));
+  if(shiftFormRows.length===0) shiftFormRows.push({shiftId:null, employeeId:'', clockIn:'', clockOut:''});
+  shiftFormDeletedIds = [];
+}
+
 function renderPayrollShifts(){
-  $('topbar-actions').innerHTML =
-    `<input type="date" id="shift-date-sel" value="${shiftLogDate}" onchange="shiftLogDate=this.value;renderPayrollShifts()" style="padding:6px 10px;border:1px solid var(--border);border-radius:var(--r);font-size:13px">` +
-    `<button class="btn btn-primary" onclick="openShiftModal(null,'${shiftLogDate}')">＋ Add Shift</button>`;
-
-  const shifts = shiftsForDate(shiftLogDate);
-  const activeEmps = DB.employees.filter(e=>e.active!==false).sort((a,b)=>a.name.localeCompare(b.name));
-
-  const rows = shifts.map(s=>{
-    const dur = shiftDurationHours(s.clockIn, s.clockOut);
-    const durHtml = s.clockOut===null||s.clockOut===undefined
-      ? '<span style="color:var(--amber)">Still clocked in</span>'
-      : dur===null
-        ? '<span style="color:var(--red)">Clock-out before clock-in</span>'
-        : dur + ' hrs';
-    return `<tr onclick="openShiftModal('${s.id}','${shiftLogDate}')" style="cursor:pointer">
-      <td>${employeeName(s.employeeId)}</td>
-      <td class="mono">${fmtTime12(s.clockIn)}</td>
-      <td class="mono">${s.clockOut?fmtTime12(s.clockOut):'—'}</td>
-      <td class="mono">${durHtml}</td>
-      <td style="font-size:12px;color:var(--ink-mid)">${s.notes||'—'}</td>
-    </tr>`;
-  }).join('');
-
-  const totalHours = shifts.reduce((sum,s)=>{const d=shiftDurationHours(s.clockIn,s.clockOut);return sum+(d||0)},0);
-
+  $('topbar-actions').innerHTML='';
+  loadShiftFormForDate(shiftLogDate);
+  const activeEmps = DB.employees.filter(e=>e.active!==false);
   $('content').innerHTML = `<div class="card">
-    <div class="card-header"><span class="card-title">${fmtDate(shiftLogDate)}</span><span style="font-size:12px;color:var(--ink-mid)">${shifts.length} shift${shifts.length!==1?'s':''} · ${totalHours.toFixed(2)} total hrs</span></div>
-    <div class="tbl-wrap"><table>
-      <thead><tr><th>Employee</th><th>Clock In</th><th>Clock Out</th><th>Duration</th><th>Notes</th></tr></thead>
-      <tbody>${rows||'<tr><td colspan="5" class="text-center" style="padding:32px;color:var(--ink-lo)">No shifts logged for this date</td></tr>'}</tbody>
-    </table></div>
-  </div>
-  ${activeEmps.length===0?'<div class="alert alert-info" style="margin-top:12px">No active employees yet — add one in Employees first.</div>':''}`;
+    <div class="card-header">
+      <span class="card-title">Daily Shift Entry</span>
+      <input type="date" id="shift-date-top" value="${shiftLogDate}" onchange="shiftLogDate=this.value;renderPayrollShifts()" style="padding:6px 10px;border:1px solid var(--border);border-radius:var(--r);font-size:13px">
+    </div>
+    <div class="card-body">
+      <div style="display:grid;grid-template-columns:2fr 1fr 1fr 36px;gap:8px;padding:0 0 6px;font-size:11px;font-weight:600;color:var(--ink-lo);letter-spacing:.06em;text-transform:uppercase">
+        <span>Employee</span><span>Clock In</span><span>Clock Out</span><span></span>
+      </div>
+      <div id="shift-rows-body"></div>
+      <button class="btn btn-ghost btn-sm" onclick="addShiftRow()" style="margin-top:6px">＋ Add row</button>
+      ${activeEmps.length===0?'<div class="alert alert-info" style="margin-top:12px">No active employees yet — add one in Employees first.</div>':''}
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:16px;padding-top:14px;border-top:1px solid var(--border-lo)">
+        <span id="shift-total-hrs" style="font-size:13px;color:var(--ink-mid)"></span>
+        <div><span id="shift-save-err" style="color:var(--red);font-size:12px;margin-right:10px"></span>
+        <button class="btn btn-primary" onclick="saveShiftDay()">Save Day</button></div>
+      </div>
+    </div>
+  </div>`;
+  renderShiftRows();
 }
 
-function openShiftModal(editId, dateStr){
-  const editing = editId ? DB.shiftLog.find(s=>s.id===editId) : null;
+function renderShiftRows(){
+  const body = $('shift-rows-body'); if(!body) return;
   const activeEmps = DB.employees.filter(e=>e.active!==false).sort((a,b)=>a.name.localeCompare(b.name));
-  openModal(`<div class="modal" style="max-width:480px">
-    <div class="modal-header">
-      <div><div class="modal-title">${editing?'Edit Shift':'Add Shift'}</div><div class="modal-sub">${editing?fmtDate(editing.workDate):'Manual entry'}</div></div>
-      <button class="close-btn" onclick="closeModal()">×</button>
-    </div>
-    <div class="modal-body"><div class="form-grid">
-      <div class="form-group span-2"><label>Employee *</label><select id="shift-emp">
-        <option value="">Select employee…</option>
-        ${activeEmps.map(e=>`<option value="${e.id}" ${editing?.employeeId===e.id?'selected':''}>${e.name}</option>`).join('')}
-      </select></div>
-      <div class="form-group span-2"><label>Work Date *</label><input type="date" id="shift-date" value="${editing?.workDate||dateStr||todayStr()}"></div>
-      <div class="form-group"><label>Clock In *</label><input type="time" id="shift-in" value="${editing?.clockIn||''}"></div>
-      <div class="form-group"><label>Clock Out</label><input type="time" id="shift-out" value="${editing?.clockOut||''}"><span class="form-hint">Leave blank if still clocked in</span></div>
-      <div class="form-group span-2"><label>Notes</label><input id="shift-notes" value="${editing?.notes||''}" placeholder="Optional"></div>
-    </div></div>
-    <div class="modal-footer">
-      <span id="shift-err" style="color:var(--red);font-size:12px;margin-right:auto"></span>
-      ${editing?`<button class="btn btn-danger" onclick="deleteShift('${editId}')">Delete</button>`:''}
-      <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="saveShift('${editId||''}')">${editing?'Save':'Add Shift'}</button>
-    </div>
-  </div>`);
+  body.innerHTML = shiftFormRows.map((row,i)=>`<div style="display:grid;grid-template-columns:2fr 1fr 1fr 36px;gap:8px;margin-bottom:8px;align-items:center">
+    <select onchange="shiftFormRows[${i}].employeeId=this.value">
+      <option value="">Select employee…</option>
+      ${activeEmps.map(e=>`<option value="${e.id}" ${row.employeeId===e.id?'selected':''}>${e.name}</option>`).join('')}
+    </select>
+    <input type="time" value="${row.clockIn||''}" oninput="shiftFormRows[${i}].clockIn=this.value;updateShiftTotal()">
+    <input type="time" value="${row.clockOut||''}" oninput="shiftFormRows[${i}].clockOut=this.value;updateShiftTotal()">
+    <button class="rm-btn" onclick="removeShiftRow(${i})">×</button>
+  </div>`).join('');
+  updateShiftTotal();
 }
 
-async function saveShift(editId){
-  const employeeId=$('shift-emp').value; if(!employeeId){$('shift-err').textContent='Select an employee.';return}
-  const workDate=$('shift-date').value; if(!workDate){$('shift-err').textContent='Work date required.';return}
-  const clockIn=$('shift-in').value; if(!clockIn){$('shift-err').textContent='Clock-in time required.';return}
-  const clockOut=$('shift-out').value||null;
-  const notes=$('shift-notes').value.trim()||null;
-  if(clockOut && timeToMinutes(clockOut) < timeToMinutes(clockIn)){
-    if(!confirm('Clock-out is earlier than clock-in on the same date — save anyway?')) return;
+function addShiftRow(){
+  shiftFormRows.push({shiftId:null, employeeId:'', clockIn:'', clockOut:''});
+  renderShiftRows();
+}
+
+function removeShiftRow(i){
+  const row = shiftFormRows[i];
+  if(row.shiftId) shiftFormDeletedIds.push(row.shiftId);
+  shiftFormRows.splice(i,1);
+  if(shiftFormRows.length===0) shiftFormRows.push({shiftId:null, employeeId:'', clockIn:'', clockOut:''});
+  renderShiftRows();
+}
+
+function updateShiftTotal(){
+  let total=0;
+  shiftFormRows.forEach(r=>{const d=shiftDurationHours(r.clockIn,r.clockOut); if(d) total+=d});
+  const el=$('shift-total-hrs'); if(el) el.textContent = total.toFixed(2)+' hrs entered (rows with both clock-in and clock-out filled in)';
+}
+
+async function saveShiftDay(){
+  const errEl=$('shift-save-err'); errEl.textContent='';
+  // Only rows with something entered are saved; a leftover blank row is ignored.
+  const validRows = shiftFormRows.filter(r=>r.employeeId||r.clockIn||r.clockOut);
+  for(const r of validRows){
+    if(!r.employeeId){errEl.textContent='Every row needs an employee.';return}
+    if(!r.clockIn){errEl.textContent='Every row needs a clock-in time.';return}
+    if(r.clockOut && timeToMinutes(r.clockOut) < timeToMinutes(r.clockIn)){
+      if(!confirm(employeeName(r.employeeId)+': clock-out is earlier than clock-in — save anyway?')) return;
+    }
   }
-  const shift = editId
-    ? {...DB.shiftLog.find(s=>s.id===editId), employeeId, workDate, clockIn, clockOut, notes}
-    : {id:nextSeq('SHFT'), employeeId, workDate, clockIn, clockOut, source:'manual', notes};
-  const ok = await saveShiftToSB(shift);
-  if(!ok){$('shift-err').textContent='Save failed. Check connection.';return}
-  shiftLogDate = workDate;
-  closeModal();renderPayrollShifts();
-}
-
-async function deleteShift(id){
-  if(!confirm('Delete this shift entry?'))return;
-  const ok = await sbDelete('shift_log', id);
-  if(ok) DB.shiftLog = DB.shiftLog.filter(s=>s.id!==id);
-  closeModal();renderPayrollShifts();
+  showLoadingOverlay('Saving shifts...');
+  for(const id of shiftFormDeletedIds){
+    await sbDelete('shift_log', id);
+    DB.shiftLog = DB.shiftLog.filter(s=>s.id!==id);
+  }
+  let allOk=true;
+  for(const r of validRows){
+    const shift = r.shiftId
+      ? {...DB.shiftLog.find(s=>s.id===r.shiftId), employeeId:r.employeeId, workDate:shiftLogDate, clockIn:r.clockIn, clockOut:r.clockOut||null}
+      : {id:nextSeq('SHFT'), employeeId:r.employeeId, workDate:shiftLogDate, clockIn:r.clockIn, clockOut:r.clockOut||null, source:'manual', notes:null};
+    const ok = await saveShiftToSB(shift);
+    if(!ok) allOk=false;
+  }
+  hideLoadingOverlay();
+  if(!allOk){errEl.textContent='One or more rows failed to save — check your connection and try again.';return}
+  showToast('Shifts saved for '+fmtDate(shiftLogDate));
+  renderPayrollShifts();
 }
 
 function openPayRateModal(employeeId){
