@@ -7023,18 +7023,22 @@ function shiftLogDaySummaries(){
 
 function renderShiftLogSummaryTable(){
   const days = shiftLogDaySummaries();
-  const rows = days.map(d=>`<tr onclick="shiftLogDate='${d.date}';renderPayrollShifts()" style="cursor:pointer">
+  const rows = days.map(d=>{
+    const weekday = new Date(d.date+'T12:00:00').toLocaleDateString('en-US',{weekday:'long'});
+    return `<tr onclick="shiftLogDate='${d.date}';renderPayrollShifts()" style="cursor:pointer">
     <td>${fmtDate(d.date)}</td>
+    <td style="color:var(--ink-mid)">${weekday}</td>
     <td class="text-right mono">${d.employeeCount}</td>
     <td class="text-right mono">${d.hourlyHours.toFixed(2)}</td>
     <td class="text-right mono">${d.salariedHours.toFixed(2)}</td>
     <td class="text-right mono">${fmt(d.hourlyGross)}</td>
-  </tr>`).join('');
+  </tr>`;
+  }).join('');
   return `<div class="card" style="margin-top:16px">
     <div class="card-header"><span class="card-title">Shift Log</span><span style="font-size:12px;color:var(--ink-mid)">${days.length} day${days.length!==1?'s':''} logged</span></div>
     <div class="tbl-wrap"><table>
-      <thead><tr><th>Date</th><th class="text-right"># Employees</th><th class="text-right">Hourly Hrs</th><th class="text-right">Salaried Hrs</th><th class="text-right">Hourly Gross $</th></tr></thead>
-      <tbody>${rows||'<tr><td colspan="5" class="text-center" style="padding:24px;color:var(--ink-lo)">No days logged yet</td></tr>'}</tbody>
+      <thead><tr><th>Date</th><th>Day</th><th class="text-right"># Employees</th><th class="text-right">Hourly Hrs</th><th class="text-right">Salaried Hrs</th><th class="text-right">Hourly Gross $</th></tr></thead>
+      <tbody>${rows||'<tr><td colspan="6" class="text-center" style="padding:24px;color:var(--ink-lo)">No days logged yet</td></tr>'}</tbody>
     </table></div>
   </div>`;
 }
