@@ -531,7 +531,8 @@ let DB = {
   pastrySkus: [],
   employees: [],
   employeePayRates: [],
-  employeeStatusHistory: []
+  employeeStatusHistory: [],
+  shiftLog: []
 };
 
 // Supabase helpers
@@ -573,7 +574,7 @@ async function loadAllData() {
   try {
     const [vendors, invoices, payments, gl, fifo, rules,
            ingredients, recipes, pastryLog, pastrySkus,
-           employees, employeePayRates, employeeStatusHistory] = await Promise.all([
+           employees, employeePayRates, employeeStatusHistory, shiftLog] = await Promise.all([
       sbGet('vendors', {order:'name'}),
       sbGet('invoices', {order:'invoice_date', asc:false}),
       sbGet('payments', {order:'payment_date', asc:false}),
@@ -586,7 +587,8 @@ async function loadAllData() {
       sbGet('pastry_skus', {order:'name'}),
       sbGet('employees', {order:'name'}),
       sbGet('employee_pay_rates', {order:'effective_start_date'}),
-      sbGet('employee_status_history', {order:'effective_start_date'})
+      sbGet('employee_status_history', {order:'effective_start_date'}),
+      sbGet('shift_log', {order:'work_date', asc:false})
     ]);
 
     // Map Supabase column names to app field names
@@ -603,6 +605,7 @@ async function loadAllData() {
     DB.employees = employees.map(mapEmployeeFromDB);
     DB.employeePayRates = employeePayRates.map(mapPayRateFromDB);
     DB.employeeStatusHistory = employeeStatusHistory.map(mapStatusFromDB);
+    DB.shiftLog = shiftLog.map(mapShiftFromDB);
 
     // Load revenue data
     await loadRevData();
@@ -731,6 +734,22 @@ function mapStatusToDB(r) {
     id: r.id, employee_id: r.employeeId, employment_type: r.employmentType,
     tip_classification: r.tipClassification, effective_start_date: r.effectiveStartDate,
     effective_end_date: r.effectiveEndDate || null, reason: r.reason || null
+  };
+}
+
+function mapShiftFromDB(r) {
+  return {
+    id: r.id, employeeId: r.employee_id, workDate: r.work_date,
+    clockIn: r.clock_in, clockOut: r.clock_out,
+    source: r.source || 'manual', notes: r.notes
+  };
+}
+
+function mapShiftToDB(s) {
+  return {
+    id: s.id, employee_id: s.employeeId, work_date: s.workDate,
+    clock_in: s.clockIn, clock_out: s.clockOut || null,
+    source: s.source || 'manual', notes: s.notes || null
   };
 }
 
@@ -918,6 +937,7 @@ function renderSidebar(){
       '</div>' +
       '<div class="sidebar-section">Payroll</div>' +
       '<button class="nav-item active" onclick="showView(\'payroll-employees\')" id="nav-payroll-employees"><span class="nav-icon">&#9679;</span> Employees</button>' +
+      '<button class="nav-item" onclick="showView(\'payroll-shifts\')" id="nav-payroll-shifts"><span class="nav-icon">&#9633;</span> Shift Log</button>' +
       '<div class="sidebar-section">Jump To</div>' +
       '<button class="nav-item" onclick="launchModule(\'ap\')"><span class="nav-icon">&#9632;</span> AP Module</button>' +
       '<button class="nav-item" onclick="launchModule(\'revenue\')"><span class="nav-icon">&#9650;</span> Revenue Module</button>' +
@@ -2588,7 +2608,8 @@ function showView(view){
     'rev-settlement':['Settlement Log','All daily settlements'],
     'rev-cash':['Cash Log','Daily cash revenue'],
     'bank-ledger':['Bank Ledger','Transaction register \xb7 Glacier \xb7 SouthState'],
-    'payroll-employees':['Employees','Employee profiles \xb7 pay rate history']
+    'payroll-employees':['Employees','Employee profiles \xb7 pay rate history'],
+    'payroll-shifts':['Shift Log','Daily clock-in / clock-out entries']
   };
   const[title,sub]=titles[view]||['--',''];
   $('page-title').textContent=title;$('page-sub').textContent=sub;
@@ -2604,7 +2625,8 @@ function showView(view){
     'rev-dashboard':renderRevDashboard,'rev-import':renderRevImport,
     'rev-settlement':renderRevSettlement,'rev-cash':renderRevCash,
     'bank-ledger':renderBankLedger,
-    'payroll-employees':renderPayrollEmployees
+    'payroll-employees':renderPayrollEmployees,
+    'payroll-shifts':renderPayrollShifts
   };
   if(renders[view])renders[view]();
 }
@@ -6905,6 +6927,131 @@ async function saveStatusChange(employeeId){
     await saveEmployeeToSB(emp);
   }
   closeModal();openEmployeeModal(employeeId);
+}
+
+// ═══════════════════════════════════════════════
+// PAYROLL MODULE — DAILY SHIFT LOG
+// ═══════════════════════════════════════════════
+var shiftLogDate = todayStr();
+
+function timeToMinutes(t){
+  if(!t) return null;
+  const parts = t.split(':');
+  return (+parts[0])*60 + (+parts[1]);
+}
+function shiftDurationHours(clockIn, clockOut){
+  if(!clockIn || !clockOut) return null;
+  const mins = timeToMinutes(clockOut) - timeToMinutes(clockIn);
+  if(mins < 0) return null; // clock-out before clock-in -- flagged in the row instead of silently shown
+  return Math.round((mins/60)*100)/100;
+}
+function fmtTime12(t){
+  if(!t) return '—';
+  const parts = t.split(':');
+  let h = +parts[0]; const m = parts[1];
+  const ap = h >= 12 ? 'PM' : 'AM';
+  h = h % 12; if(h === 0) h = 12;
+  return h + ':' + m + ' ' + ap;
+}
+function shiftsForDate(dateStr){
+  return DB.shiftLog.filter(s=>s.workDate===dateStr).sort((a,b)=>(a.clockIn||'').localeCompare(b.clockIn||''));
+}
+
+async function saveShiftToSB(shift){
+  const ok = await sbUpsert('shift_log', mapShiftToDB(shift));
+  if(ok){
+    const idx = DB.shiftLog.findIndex(s=>s.id===shift.id);
+    if(idx>=0) DB.shiftLog[idx]=shift; else DB.shiftLog.push(shift);
+  }
+  return ok;
+}
+
+function renderPayrollShifts(){
+  $('topbar-actions').innerHTML =
+    `<input type="date" id="shift-date-sel" value="${shiftLogDate}" onchange="shiftLogDate=this.value;renderPayrollShifts()" style="padding:6px 10px;border:1px solid var(--border);border-radius:var(--r);font-size:13px">` +
+    `<button class="btn btn-primary" onclick="openShiftModal(null,'${shiftLogDate}')">＋ Add Shift</button>`;
+
+  const shifts = shiftsForDate(shiftLogDate);
+  const activeEmps = DB.employees.filter(e=>e.active!==false).sort((a,b)=>a.name.localeCompare(b.name));
+
+  const rows = shifts.map(s=>{
+    const dur = shiftDurationHours(s.clockIn, s.clockOut);
+    const durHtml = s.clockOut===null||s.clockOut===undefined
+      ? '<span style="color:var(--amber)">Still clocked in</span>'
+      : dur===null
+        ? '<span style="color:var(--red)">Clock-out before clock-in</span>'
+        : dur + ' hrs';
+    return `<tr onclick="openShiftModal('${s.id}','${shiftLogDate}')" style="cursor:pointer">
+      <td>${employeeName(s.employeeId)}</td>
+      <td class="mono">${fmtTime12(s.clockIn)}</td>
+      <td class="mono">${s.clockOut?fmtTime12(s.clockOut):'—'}</td>
+      <td class="mono">${durHtml}</td>
+      <td style="font-size:12px;color:var(--ink-mid)">${s.notes||'—'}</td>
+    </tr>`;
+  }).join('');
+
+  const totalHours = shifts.reduce((sum,s)=>{const d=shiftDurationHours(s.clockIn,s.clockOut);return sum+(d||0)},0);
+
+  $('content').innerHTML = `<div class="card">
+    <div class="card-header"><span class="card-title">${fmtDate(shiftLogDate)}</span><span style="font-size:12px;color:var(--ink-mid)">${shifts.length} shift${shifts.length!==1?'s':''} · ${totalHours.toFixed(2)} total hrs</span></div>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Employee</th><th>Clock In</th><th>Clock Out</th><th>Duration</th><th>Notes</th></tr></thead>
+      <tbody>${rows||'<tr><td colspan="5" class="text-center" style="padding:32px;color:var(--ink-lo)">No shifts logged for this date</td></tr>'}</tbody>
+    </table></div>
+  </div>
+  ${activeEmps.length===0?'<div class="alert alert-info" style="margin-top:12px">No active employees yet — add one in Employees first.</div>':''}`;
+}
+
+function openShiftModal(editId, dateStr){
+  const editing = editId ? DB.shiftLog.find(s=>s.id===editId) : null;
+  const activeEmps = DB.employees.filter(e=>e.active!==false).sort((a,b)=>a.name.localeCompare(b.name));
+  openModal(`<div class="modal" style="max-width:480px">
+    <div class="modal-header">
+      <div><div class="modal-title">${editing?'Edit Shift':'Add Shift'}</div><div class="modal-sub">${editing?fmtDate(editing.workDate):'Manual entry'}</div></div>
+      <button class="close-btn" onclick="closeModal()">×</button>
+    </div>
+    <div class="modal-body"><div class="form-grid">
+      <div class="form-group span-2"><label>Employee *</label><select id="shift-emp">
+        <option value="">Select employee…</option>
+        ${activeEmps.map(e=>`<option value="${e.id}" ${editing?.employeeId===e.id?'selected':''}>${e.name}</option>`).join('')}
+      </select></div>
+      <div class="form-group span-2"><label>Work Date *</label><input type="date" id="shift-date" value="${editing?.workDate||dateStr||todayStr()}"></div>
+      <div class="form-group"><label>Clock In *</label><input type="time" id="shift-in" value="${editing?.clockIn||''}"></div>
+      <div class="form-group"><label>Clock Out</label><input type="time" id="shift-out" value="${editing?.clockOut||''}"><span class="form-hint">Leave blank if still clocked in</span></div>
+      <div class="form-group span-2"><label>Notes</label><input id="shift-notes" value="${editing?.notes||''}" placeholder="Optional"></div>
+    </div></div>
+    <div class="modal-footer">
+      <span id="shift-err" style="color:var(--red);font-size:12px;margin-right:auto"></span>
+      ${editing?`<button class="btn btn-danger" onclick="deleteShift('${editId}')">Delete</button>`:''}
+      <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveShift('${editId||''}')">${editing?'Save':'Add Shift'}</button>
+    </div>
+  </div>`);
+}
+
+async function saveShift(editId){
+  const employeeId=$('shift-emp').value; if(!employeeId){$('shift-err').textContent='Select an employee.';return}
+  const workDate=$('shift-date').value; if(!workDate){$('shift-err').textContent='Work date required.';return}
+  const clockIn=$('shift-in').value; if(!clockIn){$('shift-err').textContent='Clock-in time required.';return}
+  const clockOut=$('shift-out').value||null;
+  const notes=$('shift-notes').value.trim()||null;
+  if(clockOut && timeToMinutes(clockOut) < timeToMinutes(clockIn)){
+    if(!confirm('Clock-out is earlier than clock-in on the same date — save anyway?')) return;
+  }
+  const shift = editId
+    ? {...DB.shiftLog.find(s=>s.id===editId), employeeId, workDate, clockIn, clockOut, notes}
+    : {id:nextSeq('SHFT'), employeeId, workDate, clockIn, clockOut, source:'manual', notes};
+  const ok = await saveShiftToSB(shift);
+  if(!ok){$('shift-err').textContent='Save failed. Check connection.';return}
+  shiftLogDate = workDate;
+  closeModal();renderPayrollShifts();
+}
+
+async function deleteShift(id){
+  if(!confirm('Delete this shift entry?'))return;
+  const ok = await sbDelete('shift_log', id);
+  if(ok) DB.shiftLog = DB.shiftLog.filter(s=>s.id!==id);
+  closeModal();renderPayrollShifts();
 }
 
 function openPayRateModal(employeeId){
