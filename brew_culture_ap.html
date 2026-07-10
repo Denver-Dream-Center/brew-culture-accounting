@@ -6992,6 +6992,84 @@ function activeEmployeesAsOf(dateStr){
   }).sort((a,b)=>a.name.localeCompare(b.name));
 }
 
+// Cache of that day's Clover tip data (sale_time + order_tip_amount),
+// fetched once per date and reused for every recalculation while that date
+// is open -- avoids a network round trip on every row edit.
+var _cloverOrdersCache = {};
+
+async function ensureCloverOrdersLoaded(dateStr){
+  if(!dateStr || _cloverOrdersCache[dateStr]) return;
+  showLoadingOverlay('Loading tip data for this date...');
+  const {data, error} = await _sb.from('clover_orders').select('sale_time,order_tip_amount').eq('sale_date', dateStr);
+  _cloverOrdersCache[dateStr] = (!error && data) ? data : [];
+  hideLoadingOverlay();
+}
+
+// Tip segment engine -- splits a day's Clover tips among the employees who
+// were clocked in together, per the eligibility hierarchy: Hourly present ->
+// only Hourly split it; else Manager/Salaried present -> they split it (even
+// with a Volunteer also clocked in); else Volunteer(s)-only -> routes to
+// Volunteer Tip Revenue instead of any individual. rawRows is any array of
+// {employeeId, clockIn, clockOut}; rows missing a clock-out (still open) or
+// an employee are skipped entirely, same rule as Hours/Pay.
+function computeTipSplitForDay(dateStr, rawRows){
+  const rows = (rawRows||[]).filter(r=>r.employeeId && r.clockIn && r.clockOut && shiftDurationHours(r.clockIn,r.clockOut)!==null);
+  const perEmployee = {}; let volunteerRevenue = 0;
+  if(!rows.length) return {perEmployee, volunteerRevenue};
+  const orderRows = _cloverOrdersCache[dateStr] || [];
+
+  const boundarySet = new Set();
+  rows.forEach(r=>{ boundarySet.add(timeToMinutes(r.clockIn)); boundarySet.add(timeToMinutes(r.clockOut)); });
+  const boundaries = Array.from(boundarySet).sort((a,b)=>a-b);
+
+  let volunteerCents = 0;
+  const perEmployeeCents = {};
+
+  for(let k=0;k<boundaries.length-1;k++){
+    const segStart=boundaries[k], segEnd=boundaries[k+1];
+    if(segEnd<=segStart) continue;
+    const present = rows.filter(r=>timeToMinutes(r.clockIn)<=segStart && timeToMinutes(r.clockOut)>=segEnd);
+    if(!present.length) continue;
+    const presentIds = [...new Set(present.map(r=>r.employeeId))];
+    const classOf = {};
+    presentIds.forEach(id=>{
+      const status = statusAsOf(id, dateStr);
+      const emp = DB.employees.find(e=>e.id===id);
+      classOf[id] = status ? status.tipClassification : (emp?emp.tipClassification:null);
+    });
+    const hourlyIds = presentIds.filter(id=>classOf[id]==='hourly');
+    const managerIds = presentIds.filter(id=>classOf[id]==='manager');
+    let eligible;
+    if(hourlyIds.length) eligible = hourlyIds;
+    else if(managerIds.length) eligible = managerIds;
+    else eligible = []; // volunteer(s)-only segment
+
+    let poolDollars = 0;
+    orderRows.forEach(o=>{
+      if(!o.sale_time) return;
+      const mins = timeToMinutes(o.sale_time);
+      if(mins>=segStart && mins<segEnd) poolDollars += (o.order_tip_amount||0);
+    });
+    const poolCents = Math.round(poolDollars*100);
+    if(poolCents<=0) continue;
+
+    if(!eligible.length){
+      volunteerCents += poolCents;
+    } else {
+      const sorted = [...eligible].sort();
+      const base = Math.floor(poolCents/sorted.length);
+      const leftover = poolCents - base*sorted.length;
+      sorted.forEach((id,idx)=>{
+        perEmployeeCents[id] = (perEmployeeCents[id]||0) + base + (idx<leftover?1:0);
+      });
+    }
+  }
+
+  Object.keys(perEmployeeCents).forEach(id=>{ perEmployee[id] = perEmployeeCents[id]/100; });
+  volunteerRevenue = volunteerCents/100;
+  return {perEmployee, volunteerRevenue};
+}
+
 function shiftLogDaySummaries(){
   const byDate = {};
   DB.shiftLog.forEach(s=>{ if(!byDate[s.workDate]) byDate[s.workDate]=[]; byDate[s.workDate].push(s); });
@@ -7012,11 +7090,20 @@ function shiftLogDaySummaries(){
         salariedHours += dur;
       }
     });
+    // Tips can only be shown once that date's Clover data has been loaded
+    // (happens automatically the first time you open that date in the entry
+    // form above) -- null means "not loaded yet", not "zero".
+    let tipsTotal = null;
+    if(_cloverOrdersCache[d]){
+      const split = computeTipSplitForDay(d, shifts);
+      tipsTotal = Math.round(Object.values(split.perEmployee).reduce((a,b)=>a+b,0)*100)/100;
+    }
     return {
       date:d, employeeCount:employeeIds.length,
       hourlyHours:Math.round(hourlyHours*100)/100,
       salariedHours:Math.round(salariedHours*100)/100,
-      hourlyGross:Math.round(hourlyGross*100)/100
+      hourlyGross:Math.round(hourlyGross*100)/100,
+      tipsTotal
     };
   });
 }
@@ -7032,20 +7119,22 @@ function renderShiftLogSummaryTable(){
     <td class="text-right mono">${d.hourlyHours.toFixed(2)}</td>
     <td class="text-right mono">${d.salariedHours.toFixed(2)}</td>
     <td class="text-right mono">${fmt(d.hourlyGross)}</td>
+    <td class="text-right mono">${d.tipsTotal===null?'<span style="color:var(--ink-lo)">— (click to load)</span>':fmt(d.tipsTotal)}</td>
   </tr>`;
   }).join('');
   return `<div class="card" style="margin-top:16px">
     <div class="card-header"><span class="card-title">Shift Log</span><span style="font-size:12px;color:var(--ink-mid)">${days.length} day${days.length!==1?'s':''} logged</span></div>
     <div class="tbl-wrap"><table>
-      <thead><tr><th>Date</th><th>Day</th><th class="text-right"># Employees</th><th class="text-right">Hourly Hrs</th><th class="text-right">Salaried Hrs</th><th class="text-right">Hourly Gross $</th></tr></thead>
-      <tbody>${rows||'<tr><td colspan="6" class="text-center" style="padding:24px;color:var(--ink-lo)">No days logged yet</td></tr>'}</tbody>
+      <thead><tr><th>Date</th><th>Day</th><th class="text-right"># Employees</th><th class="text-right">Hourly Hrs</th><th class="text-right">Salaried Hrs</th><th class="text-right">Hourly Gross $</th><th class="text-right">Tips $</th></tr></thead>
+      <tbody>${rows||'<tr><td colspan="7" class="text-center" style="padding:24px;color:var(--ink-lo)">No days logged yet</td></tr>'}</tbody>
     </table></div>
   </div>`;
 }
 
-function renderPayrollShifts(){
+async function renderPayrollShifts(){
   $('topbar-actions').innerHTML='';
   loadShiftFormForDate(shiftLogDate);
+  if(shiftLogDate) await ensureCloverOrdersLoaded(shiftLogDate);
   const dateSelected = !!shiftLogDate;
   const activeEmps = activeEmployeesAsOf(shiftLogDate);
   $('content').innerHTML = `<div class="card">
@@ -7054,12 +7143,13 @@ function renderPayrollShifts(){
       <input type="date" id="shift-date-top" value="${shiftLogDate}" onchange="shiftLogDate=this.value;renderPayrollShifts()" style="padding:6px 10px;border:1px solid var(--border);border-radius:var(--r);font-size:13px">
     </div>
     <div class="card-body">
-      <div style="display:grid;grid-template-columns:2fr 1fr 1fr 0.8fr 0.9fr 36px;gap:8px;padding:0 0 6px;font-size:11px;font-weight:600;color:var(--ink-lo);letter-spacing:.06em;text-transform:uppercase">
-        <span>Employee</span><span>Clock In</span><span>Clock Out</span><span style="text-align:right">Hours</span><span style="text-align:right">Pay</span><span></span>
+      <div style="display:grid;grid-template-columns:2fr 1fr 1fr 0.8fr 0.9fr 0.9fr 36px;gap:8px;padding:0 0 6px;font-size:11px;font-weight:600;color:var(--ink-lo);letter-spacing:.06em;text-transform:uppercase">
+        <span>Employee</span><span>Clock In</span><span>Clock Out</span><span style="text-align:right">Hours</span><span style="text-align:right">Pay</span><span style="text-align:right">Tips</span><span></span>
       </div>
       <div id="shift-rows-body"></div>
       <button class="btn btn-ghost btn-sm" onclick="addShiftRow()" style="margin-top:6px">＋ Add row</button>
       ${!dateSelected?'<div class="alert alert-info" style="margin-top:12px">Select a date to enable the employee list.</div>':activeEmps.length===0?'<div class="alert alert-info" style="margin-top:12px">No employees were active on this date.</div>':''}
+      <div id="shift-volunteer-note" style="margin-top:8px;font-size:12px;color:var(--ink-mid)"></div>
       <div style="display:flex;justify-content:space-between;align-items:center;margin-top:16px;padding-top:14px;border-top:1px solid var(--border-lo)">
         <span id="shift-total-hrs" style="font-size:13px;color:var(--ink-mid)"></span>
         <div><span id="shift-save-err" style="color:var(--red);font-size:12px;margin-right:10px"></span>
@@ -7071,48 +7161,47 @@ function renderPayrollShifts(){
   renderShiftRows();
 }
 
-function rowCalcValues(row){
-  const dur = shiftDurationHours(row.clockIn, row.clockOut);
-  if(dur===null || !row.employeeId) return {hoursText:'', payText:''};
-  const hoursText = dur.toFixed(2)+' hrs';
-  const status = statusAsOf(row.employeeId, shiftLogDate);
-  const emp = DB.employees.find(e=>e.id===row.employeeId);
-  const empType = status ? status.employmentType : (emp?emp.employmentType:null);
-  let payText = '';
-  if(empType==='hourly'){
-    const rate = payRateAsOf(row.employeeId, shiftLogDate);
-    if(rate && rate.payRateType==='hourly') payText = fmt(dur*rate.payRate);
-  }
-  return {hoursText, payText};
-}
-
-function updateShiftRowCalc(i){
-  const row = shiftFormRows[i]; if(!row) return;
-  const {hoursText, payText} = rowCalcValues(row);
-  const hrsEl=$('shift-hrs-'+i), payEl=$('shift-pay-'+i);
-  if(hrsEl) hrsEl.textContent = hoursText;
-  if(payEl) payEl.textContent = payText;
-}
-
+// Recalculates on the completion of each clock-in/clock-out entry (onchange,
+// not oninput) -- since a tip split depends on everyone's shifts that day,
+// not just the row being edited, every row's Tips cell is recomputed
+// together whenever any row's employee or times change.
 function renderShiftRows(){
   const body = $('shift-rows-body'); if(!body) return;
   const dateSelected = !!shiftLogDate;
   const activeEmps = activeEmployeesAsOf(shiftLogDate);
+  const dayTips = shiftLogDate ? computeTipSplitForDay(shiftLogDate, shiftFormRows) : {perEmployee:{}, volunteerRevenue:0};
+
   body.innerHTML = shiftFormRows.map((row,i)=>{
-    const {hoursText, payText} = rowCalcValues(row);
-    return `<div style="display:grid;grid-template-columns:2fr 1fr 1fr 0.8fr 0.9fr 36px;gap:8px;margin-bottom:8px;align-items:center">
-    <select ${dateSelected?'':'disabled'} onchange="shiftFormRows[${i}].employeeId=this.value;updateShiftRowCalc(${i})">
+    const dur = shiftDurationHours(row.clockIn, row.clockOut);
+    let hoursText='', payText='', tipsText='';
+    if(dur!==null && row.employeeId){
+      hoursText = dur.toFixed(2)+' hrs';
+      const status = statusAsOf(row.employeeId, shiftLogDate);
+      const emp = DB.employees.find(e=>e.id===row.employeeId);
+      const empType = status ? status.employmentType : (emp?emp.employmentType:null);
+      if(empType==='hourly'){
+        const rate = payRateAsOf(row.employeeId, shiftLogDate);
+        if(rate && rate.payRateType==='hourly') payText = fmt(dur*rate.payRate);
+      }
+      const tipAmt = dayTips.perEmployee[row.employeeId];
+      if(tipAmt!==undefined) tipsText = fmt(tipAmt);
+    }
+    return `<div style="display:grid;grid-template-columns:2fr 1fr 1fr 0.8fr 0.9fr 0.9fr 36px;gap:8px;margin-bottom:8px;align-items:center">
+    <select ${dateSelected?'':'disabled'} onchange="shiftFormRows[${i}].employeeId=this.value;renderShiftRows()">
       <option value="">${dateSelected?'Select employee…':'Select a date first'}</option>
       ${dateSelected?activeEmps.map(e=>`<option value="${e.id}" ${row.employeeId===e.id?'selected':''}>${e.name}</option>`).join(''):''}
     </select>
-    <input type="time" ${dateSelected?'':'disabled'} value="${row.clockIn||''}" oninput="shiftFormRows[${i}].clockIn=this.value;updateShiftTotal();updateShiftRowCalc(${i})">
-    <input type="time" ${dateSelected?'':'disabled'} value="${row.clockOut||''}" oninput="shiftFormRows[${i}].clockOut=this.value;updateShiftTotal();updateShiftRowCalc(${i})">
-    <div id="shift-hrs-${i}" class="mono" style="font-size:12px;color:var(--ink-mid);text-align:right">${hoursText}</div>
-    <div id="shift-pay-${i}" class="mono" style="font-size:12px;color:var(--ink-mid);text-align:right">${payText}</div>
+    <input type="time" ${dateSelected?'':'disabled'} value="${row.clockIn||''}" onchange="shiftFormRows[${i}].clockIn=this.value;renderShiftRows()">
+    <input type="time" ${dateSelected?'':'disabled'} value="${row.clockOut||''}" onchange="shiftFormRows[${i}].clockOut=this.value;renderShiftRows()">
+    <div class="mono" style="font-size:12px;color:var(--ink-mid);text-align:right">${hoursText}</div>
+    <div class="mono" style="font-size:12px;color:var(--ink-mid);text-align:right">${payText}</div>
+    <div class="mono" style="font-size:12px;color:var(--ink-mid);text-align:right">${tipsText}</div>
     <button class="rm-btn" onclick="removeShiftRow(${i})">×</button>
   </div>`;
   }).join('');
   updateShiftTotal();
+  const noteEl = $('shift-volunteer-note');
+  if(noteEl) noteEl.textContent = dayTips.volunteerRevenue>0 ? (fmt(dayTips.volunteerRevenue)+' routed to Volunteer Tip Revenue for this day.') : '';
 }
 
 function addShiftRow(){
