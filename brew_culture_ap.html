@@ -7054,8 +7054,8 @@ function renderPayrollShifts(){
       <input type="date" id="shift-date-top" value="${shiftLogDate}" onchange="shiftLogDate=this.value;renderPayrollShifts()" style="padding:6px 10px;border:1px solid var(--border);border-radius:var(--r);font-size:13px">
     </div>
     <div class="card-body">
-      <div style="display:grid;grid-template-columns:2fr 1fr 1fr 36px;gap:8px;padding:0 0 6px;font-size:11px;font-weight:600;color:var(--ink-lo);letter-spacing:.06em;text-transform:uppercase">
-        <span>Employee</span><span>Clock In</span><span>Clock Out</span><span></span>
+      <div style="display:grid;grid-template-columns:2fr 1fr 1fr 0.8fr 0.9fr 36px;gap:8px;padding:0 0 6px;font-size:11px;font-weight:600;color:var(--ink-lo);letter-spacing:.06em;text-transform:uppercase">
+        <span>Employee</span><span>Clock In</span><span>Clock Out</span><span style="text-align:right">Hours</span><span style="text-align:right">Pay</span><span></span>
       </div>
       <div id="shift-rows-body"></div>
       <button class="btn btn-ghost btn-sm" onclick="addShiftRow()" style="margin-top:6px">＋ Add row</button>
@@ -7071,19 +7071,47 @@ function renderPayrollShifts(){
   renderShiftRows();
 }
 
+function rowCalcValues(row){
+  const dur = shiftDurationHours(row.clockIn, row.clockOut);
+  if(dur===null || !row.employeeId) return {hoursText:'', payText:''};
+  const hoursText = dur.toFixed(2)+' hrs';
+  const status = statusAsOf(row.employeeId, shiftLogDate);
+  const emp = DB.employees.find(e=>e.id===row.employeeId);
+  const empType = status ? status.employmentType : (emp?emp.employmentType:null);
+  let payText = '';
+  if(empType==='hourly'){
+    const rate = payRateAsOf(row.employeeId, shiftLogDate);
+    if(rate && rate.payRateType==='hourly') payText = fmt(dur*rate.payRate);
+  }
+  return {hoursText, payText};
+}
+
+function updateShiftRowCalc(i){
+  const row = shiftFormRows[i]; if(!row) return;
+  const {hoursText, payText} = rowCalcValues(row);
+  const hrsEl=$('shift-hrs-'+i), payEl=$('shift-pay-'+i);
+  if(hrsEl) hrsEl.textContent = hoursText;
+  if(payEl) payEl.textContent = payText;
+}
+
 function renderShiftRows(){
   const body = $('shift-rows-body'); if(!body) return;
   const dateSelected = !!shiftLogDate;
   const activeEmps = activeEmployeesAsOf(shiftLogDate);
-  body.innerHTML = shiftFormRows.map((row,i)=>`<div style="display:grid;grid-template-columns:2fr 1fr 1fr 36px;gap:8px;margin-bottom:8px;align-items:center">
-    <select ${dateSelected?'':'disabled'} onchange="shiftFormRows[${i}].employeeId=this.value">
+  body.innerHTML = shiftFormRows.map((row,i)=>{
+    const {hoursText, payText} = rowCalcValues(row);
+    return `<div style="display:grid;grid-template-columns:2fr 1fr 1fr 0.8fr 0.9fr 36px;gap:8px;margin-bottom:8px;align-items:center">
+    <select ${dateSelected?'':'disabled'} onchange="shiftFormRows[${i}].employeeId=this.value;updateShiftRowCalc(${i})">
       <option value="">${dateSelected?'Select employee…':'Select a date first'}</option>
       ${dateSelected?activeEmps.map(e=>`<option value="${e.id}" ${row.employeeId===e.id?'selected':''}>${e.name}</option>`).join(''):''}
     </select>
-    <input type="time" ${dateSelected?'':'disabled'} value="${row.clockIn||''}" oninput="shiftFormRows[${i}].clockIn=this.value;updateShiftTotal()">
-    <input type="time" ${dateSelected?'':'disabled'} value="${row.clockOut||''}" oninput="shiftFormRows[${i}].clockOut=this.value;updateShiftTotal()">
+    <input type="time" ${dateSelected?'':'disabled'} value="${row.clockIn||''}" oninput="shiftFormRows[${i}].clockIn=this.value;updateShiftTotal();updateShiftRowCalc(${i})">
+    <input type="time" ${dateSelected?'':'disabled'} value="${row.clockOut||''}" oninput="shiftFormRows[${i}].clockOut=this.value;updateShiftTotal();updateShiftRowCalc(${i})">
+    <div id="shift-hrs-${i}" class="mono" style="font-size:12px;color:var(--ink-mid);text-align:right">${hoursText}</div>
+    <div id="shift-pay-${i}" class="mono" style="font-size:12px;color:var(--ink-mid);text-align:right">${payText}</div>
     <button class="rm-btn" onclick="removeShiftRow(${i})">×</button>
-  </div>`).join('');
+  </div>`;
+  }).join('');
   updateShiftTotal();
 }
 
