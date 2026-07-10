@@ -6976,10 +6976,71 @@ function loadShiftFormForDate(dateStr){
   shiftFormDeletedIds = [];
 }
 
+// Employees considered active on a given date: not manually marked inactive,
+// hired on or before that date, and not yet terminated as of that date.
+// Returns [] if no date is given at all.
+function activeEmployeesAsOf(dateStr){
+  if(!dateStr) return [];
+  return DB.employees.filter(e=>{
+    if(e.active===false) return false;
+    if(e.hireDate && e.hireDate>dateStr) return false;
+    if(e.termDate && e.termDate<dateStr) return false;
+    return true;
+  }).sort((a,b)=>a.name.localeCompare(b.name));
+}
+
+function shiftLogDaySummaries(){
+  const byDate = {};
+  DB.shiftLog.forEach(s=>{ if(!byDate[s.workDate]) byDate[s.workDate]=[]; byDate[s.workDate].push(s); });
+  return Object.keys(byDate).sort((a,b)=>b.localeCompare(a)).map(d=>{
+    const shifts = byDate[d];
+    const employeeIds = [...new Set(shifts.map(s=>s.employeeId))];
+    let hourlyHours=0, salariedHours=0, hourlyGross=0;
+    shifts.forEach(s=>{
+      const dur = shiftDurationHours(s.clockIn, s.clockOut) || 0;
+      const status = statusAsOf(s.employeeId, d);
+      const emp = DB.employees.find(e=>e.id===s.employeeId);
+      const empType = status ? status.employmentType : (emp ? emp.employmentType : null);
+      if(empType==='hourly'){
+        hourlyHours += dur;
+        const rate = payRateAsOf(s.employeeId, d);
+        if(rate && rate.payRateType==='hourly') hourlyGross += dur*rate.payRate;
+      } else if(empType==='salaried'){
+        salariedHours += dur;
+      }
+    });
+    return {
+      date:d, employeeCount:employeeIds.length,
+      hourlyHours:Math.round(hourlyHours*100)/100,
+      salariedHours:Math.round(salariedHours*100)/100,
+      hourlyGross:Math.round(hourlyGross*100)/100
+    };
+  });
+}
+
+function renderShiftLogSummaryTable(){
+  const days = shiftLogDaySummaries();
+  const rows = days.map(d=>`<tr onclick="shiftLogDate='${d.date}';renderPayrollShifts()" style="cursor:pointer">
+    <td>${fmtDate(d.date)}</td>
+    <td class="text-right mono">${d.employeeCount}</td>
+    <td class="text-right mono">${d.hourlyHours.toFixed(2)}</td>
+    <td class="text-right mono">${d.salariedHours.toFixed(2)}</td>
+    <td class="text-right mono">${fmt(d.hourlyGross)}</td>
+  </tr>`).join('');
+  return `<div class="card" style="margin-top:16px">
+    <div class="card-header"><span class="card-title">Shift Log</span><span style="font-size:12px;color:var(--ink-mid)">${days.length} day${days.length!==1?'s':''} logged</span></div>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Date</th><th class="text-right"># Employees</th><th class="text-right">Hourly Hrs</th><th class="text-right">Salaried Hrs</th><th class="text-right">Hourly Gross $</th></tr></thead>
+      <tbody>${rows||'<tr><td colspan="5" class="text-center" style="padding:24px;color:var(--ink-lo)">No days logged yet</td></tr>'}</tbody>
+    </table></div>
+  </div>`;
+}
+
 function renderPayrollShifts(){
   $('topbar-actions').innerHTML='';
   loadShiftFormForDate(shiftLogDate);
-  const activeEmps = DB.employees.filter(e=>e.active!==false);
+  const dateSelected = !!shiftLogDate;
+  const activeEmps = activeEmployeesAsOf(shiftLogDate);
   $('content').innerHTML = `<div class="card">
     <div class="card-header">
       <span class="card-title">Daily Shift Entry</span>
@@ -6991,27 +7052,29 @@ function renderPayrollShifts(){
       </div>
       <div id="shift-rows-body"></div>
       <button class="btn btn-ghost btn-sm" onclick="addShiftRow()" style="margin-top:6px">＋ Add row</button>
-      ${activeEmps.length===0?'<div class="alert alert-info" style="margin-top:12px">No active employees yet — add one in Employees first.</div>':''}
+      ${!dateSelected?'<div class="alert alert-info" style="margin-top:12px">Select a date to enable the employee list.</div>':activeEmps.length===0?'<div class="alert alert-info" style="margin-top:12px">No employees were active on this date.</div>':''}
       <div style="display:flex;justify-content:space-between;align-items:center;margin-top:16px;padding-top:14px;border-top:1px solid var(--border-lo)">
         <span id="shift-total-hrs" style="font-size:13px;color:var(--ink-mid)"></span>
         <div><span id="shift-save-err" style="color:var(--red);font-size:12px;margin-right:10px"></span>
         <button class="btn btn-primary" onclick="saveShiftDay()">Save Day</button></div>
       </div>
     </div>
-  </div>`;
+  </div>
+  ${renderShiftLogSummaryTable()}`;
   renderShiftRows();
 }
 
 function renderShiftRows(){
   const body = $('shift-rows-body'); if(!body) return;
-  const activeEmps = DB.employees.filter(e=>e.active!==false).sort((a,b)=>a.name.localeCompare(b.name));
+  const dateSelected = !!shiftLogDate;
+  const activeEmps = activeEmployeesAsOf(shiftLogDate);
   body.innerHTML = shiftFormRows.map((row,i)=>`<div style="display:grid;grid-template-columns:2fr 1fr 1fr 36px;gap:8px;margin-bottom:8px;align-items:center">
-    <select onchange="shiftFormRows[${i}].employeeId=this.value">
-      <option value="">Select employee…</option>
-      ${activeEmps.map(e=>`<option value="${e.id}" ${row.employeeId===e.id?'selected':''}>${e.name}</option>`).join('')}
+    <select ${dateSelected?'':'disabled'} onchange="shiftFormRows[${i}].employeeId=this.value">
+      <option value="">${dateSelected?'Select employee…':'Select a date first'}</option>
+      ${dateSelected?activeEmps.map(e=>`<option value="${e.id}" ${row.employeeId===e.id?'selected':''}>${e.name}</option>`).join(''):''}
     </select>
-    <input type="time" value="${row.clockIn||''}" oninput="shiftFormRows[${i}].clockIn=this.value;updateShiftTotal()">
-    <input type="time" value="${row.clockOut||''}" oninput="shiftFormRows[${i}].clockOut=this.value;updateShiftTotal()">
+    <input type="time" ${dateSelected?'':'disabled'} value="${row.clockIn||''}" oninput="shiftFormRows[${i}].clockIn=this.value;updateShiftTotal()">
+    <input type="time" ${dateSelected?'':'disabled'} value="${row.clockOut||''}" oninput="shiftFormRows[${i}].clockOut=this.value;updateShiftTotal()">
     <button class="rm-btn" onclick="removeShiftRow(${i})">×</button>
   </div>`).join('');
   updateShiftTotal();
@@ -7038,6 +7101,7 @@ function updateShiftTotal(){
 
 async function saveShiftDay(){
   const errEl=$('shift-save-err'); errEl.textContent='';
+  if(!shiftLogDate){errEl.textContent='Select a date first.';return}
   // Only rows with something entered are saved; a leftover blank row is ignored.
   const validRows = shiftFormRows.filter(r=>r.employeeId||r.clockIn||r.clockOut);
   for(const r of validRows){
