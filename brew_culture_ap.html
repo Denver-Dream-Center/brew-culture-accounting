@@ -294,6 +294,12 @@
       <div class="mod-card-sub">Glacier &amp; SouthState transactions, reconciled against AP and Revenue.</div>
       <div class="mod-card-badge blue">Reconciliation</div>
     </div>
+    <div class="mod-card mod-card-payroll" onclick="launchModule('payroll')">
+      <div class="mod-icon">&#9679;</div>
+      <div class="mod-card-title">Payroll</div>
+      <div class="mod-card-sub">Employee profiles, pay rate history, hours, tips, and payroll runs.</div>
+      <div class="mod-card-badge">Payroll Module</div>
+    </div>
   </div>
   <div style="margin-top:28px">
     <button onclick="doSignOut()" style="background:none;border:1px solid var(--border);border-radius:var(--r);padding:8px 20px;font-size:13px;color:var(--ink-mid);cursor:pointer;font-family:inherit;transition:border-color .15s,color .15s" onmouseover="this.style.color='var(--ink)';this.style.borderColor='var(--ink-mid)'" onmouseout="this.style.color='var(--ink-mid)';this.style.borderColor='var(--border)'">Sign out</button>
@@ -522,7 +528,9 @@ let DB = {
   ingredients: [],
   recipes: [],
   pastryLog: [],
-  pastrySkus: []
+  pastrySkus: [],
+  employees: [],
+  employeePayRates: []
 };
 
 // Supabase helpers
@@ -563,7 +571,8 @@ async function loadAllData() {
   showLoadingOverlay('Loading your data...');
   try {
     const [vendors, invoices, payments, gl, fifo, rules,
-           ingredients, recipes, pastryLog, pastrySkus] = await Promise.all([
+           ingredients, recipes, pastryLog, pastrySkus,
+           employees, employeePayRates] = await Promise.all([
       sbGet('vendors', {order:'name'}),
       sbGet('invoices', {order:'invoice_date', asc:false}),
       sbGet('payments', {order:'payment_date', asc:false}),
@@ -573,7 +582,9 @@ async function loadAllData() {
       sbGet('ingredients', {order:'name'}),
       sbGet('recipes', {order:'menu_item'}),
       sbGet('pastry_log', {order:'log_date', asc:false}),
-      sbGet('pastry_skus', {order:'name'})
+      sbGet('pastry_skus', {order:'name'}),
+      sbGet('employees', {order:'name'}),
+      sbGet('employee_pay_rates', {order:'effective_start_date'})
     ]);
 
     // Map Supabase column names to app field names
@@ -587,6 +598,8 @@ async function loadAllData() {
     DB.recipes = recipes.map(function(r){return{menu_item:r.menu_item,category:r.category,sale_price:r.sale_price,ingredient_name:r.ingredient_name,quantity:r.quantity,unit:r.unit}});
     DB.pastryLog = pastryLog.map(mapPastryLogFromDB);
     DB.pastrySkus = pastrySkus.map(function(s){return{name:s.name,code:s.code,unitPrice:s.unit_price,notes:s.notes,active:s.active}});
+    DB.employees = employees.map(mapEmployeeFromDB);
+    DB.employeePayRates = employeePayRates.map(mapPayRateFromDB);
 
     // Load revenue data
     await loadRevData();
@@ -679,6 +692,40 @@ function mapPastryLogToDB(e) {
   return {
     log_date: e.date, sku: e.sku, received: e.received,
     billed: e.billed, unit_price: e.unitPrice, invoice_id: e.invoiceId
+  };
+}
+
+function mapEmployeeFromDB(r) {
+  return {
+    id: r.id, name: r.name, employmentType: r.employment_type,
+    tipClassification: r.tip_classification, hireDate: r.hire_date,
+    termDate: r.term_date, active: r.active !== false,
+    homebaseName: r.homebase_name, notes: r.notes
+  };
+}
+
+function mapEmployeeToDB(e) {
+  return {
+    id: e.id, name: e.name, employment_type: e.employmentType,
+    tip_classification: e.tipClassification, hire_date: e.hireDate || null,
+    term_date: e.termDate || null, active: e.active !== false,
+    homebase_name: e.homebaseName || null, notes: e.notes || null
+  };
+}
+
+function mapPayRateFromDB(r) {
+  return {
+    id: r.id, employeeId: r.employee_id, payRate: r.pay_rate,
+    payRateType: r.pay_rate_type, effectiveStartDate: r.effective_start_date,
+    effectiveEndDate: r.effective_end_date, reason: r.reason
+  };
+}
+
+function mapPayRateToDB(r) {
+  return {
+    id: r.id, employee_id: r.employeeId, pay_rate: r.payRate,
+    pay_rate_type: r.payRateType, effective_start_date: r.effectiveStartDate,
+    effective_end_date: r.effectiveEndDate || null, reason: r.reason || null
   };
 }
 
@@ -841,7 +888,20 @@ let _dataLoaded = false;
 function renderSidebar(){
   var el = document.getElementById('sidebar-root');
   if(!el) return;
-  if(currentModule === 'ledger'){
+  if(currentModule === 'payroll'){
+    el.innerHTML =
+      '<div class="sidebar-header">' +
+        '<div class="sidebar-logo">Brew Culture</div>' +
+        '<div class="sidebar-title">Payroll</div>' +
+        '<div class="sidebar-sub">Employees \xb7 hours \xb7 tips</div>' +
+      '</div>' +
+      '<div class="sidebar-section">Payroll</div>' +
+      '<button class="nav-item active" onclick="showView(\'payroll-employees\')" id="nav-payroll-employees"><span class="nav-icon">&#9679;</span> Employees</button>' +
+      '<div class="sidebar-section">Jump To</div>' +
+      '<button class="nav-item" onclick="launchModule(\'ap\')"><span class="nav-icon">&#9632;</span> AP Module</button>' +
+      '<button class="nav-item" onclick="launchModule(\'revenue\')"><span class="nav-icon">&#9650;</span> Revenue Module</button>' +
+      '<button class="nav-item" onclick="launchModule(\'ledger\')"><span class="nav-icon">&#8942;</span> Bank Ledger</button>';
+  } else if(currentModule === 'ledger'){
     el.innerHTML =
       '<div class="sidebar-header">' +
         '<div class="sidebar-logo">Brew Culture</div>' +
@@ -852,7 +912,8 @@ function renderSidebar(){
       '<button class="nav-item active" onclick="showView(\'bank-ledger\')" id="nav-bank-ledger"><span class="nav-icon">&#8942;</span> Transactions</button>' +
       '<div class="sidebar-section">Jump To</div>' +
       '<button class="nav-item" onclick="launchModule(\'ap\')"><span class="nav-icon">&#9632;</span> AP Module</button>' +
-      '<button class="nav-item" onclick="launchModule(\'revenue\')"><span class="nav-icon">&#9650;</span> Revenue Module</button>';
+      '<button class="nav-item" onclick="launchModule(\'revenue\')"><span class="nav-icon">&#9650;</span> Revenue Module</button>' +
+      '<button class="nav-item" onclick="launchModule(\'payroll\')"><span class="nav-icon">&#9679;</span> Payroll Module</button>';
   } else if(currentModule === 'revenue'){
     var s = revSidebarStats();
     el.innerHTML =
@@ -868,6 +929,7 @@ function renderSidebar(){
       '<button class="nav-item" onclick="showView(\'rev-cash\')" id="nav-rev-cash"><span class="nav-icon">&#9679;</span> Cash Log</button>' +
       '<div class="sidebar-section">Reconciliation</div>' +
       '<button class="nav-item" onclick="launchModule(\'ledger\')"><span class="nav-icon">&#8942;</span> Bank Ledger</button>' +
+      '<button class="nav-item" onclick="launchModule(\'payroll\')"><span class="nav-icon">&#9679;</span> Payroll Module</button>' +
       '<div class="sidebar-section">Data</div>' +
       '<button class="nav-item" onclick="exportData()"><span class="nav-icon">&#8595;</span> Export Backup</button>' +
       '<div class="rev-sidebar-stats">' +
@@ -906,6 +968,7 @@ function renderSidebar(){
       '<button class="nav-item" onclick="showView(\'pastry-skus\')" id="nav-pastry-skus"><span class="nav-icon">&#8801;</span> Pastry SKUs</button>' +
       '<div class="sidebar-section">Reconciliation</div>' +
       '<button class="nav-item" onclick="launchModule(\'ledger\')"><span class="nav-icon">&#8942;</span> Bank Ledger</button>' +
+      '<button class="nav-item" onclick="launchModule(\'payroll\')"><span class="nav-icon">&#9679;</span> Payroll Module</button>' +
       '<div class="sidebar-section">Data</div>' +
       '<button class="nav-item" onclick="exportData()"><span class="nav-icon">&#8595;</span> Export Backup</button>' +
       '<button class="nav-item" onclick="triggerImport()"><span class="nav-icon">&#8593;</span> Restore Backup</button>' +
@@ -925,7 +988,7 @@ async function launchModule(mod){
   currentModule = mod;
   document.getElementById('module-switcher').style.display = 'none';
   document.getElementById('main-app').style.display = 'flex';
-  var labels = {ap:'Accounts Payable', revenue:'Revenue', ledger:'Bank Ledger'};
+  var labels = {ap:'Accounts Payable', revenue:'Revenue', ledger:'Bank Ledger', payroll:'Payroll'};
   document.getElementById('mod-bar-name').textContent = labels[mod] || mod;
   var email = _session && _session.user ? _session.user.email : '';
   document.getElementById('mod-bar-user').textContent = email;
@@ -941,6 +1004,8 @@ async function launchModule(mod){
     showView('rev-dashboard');
   } else if(mod === 'ledger'){
     showView('bank-ledger');
+  } else if(mod === 'payroll'){
+    showView('payroll-employees');
   }
 }
 
@@ -2501,7 +2566,8 @@ function showView(view){
     'rev-import':['Clover Import','Upload and parse Clover export'],
     'rev-settlement':['Settlement Log','All daily settlements'],
     'rev-cash':['Cash Log','Daily cash revenue'],
-    'bank-ledger':['Bank Ledger','Transaction register \xb7 Glacier \xb7 SouthState']
+    'bank-ledger':['Bank Ledger','Transaction register \xb7 Glacier \xb7 SouthState'],
+    'payroll-employees':['Employees','Employee profiles \xb7 pay rate history']
   };
   const[title,sub]=titles[view]||['--',''];
   $('page-title').textContent=title;$('page-sub').textContent=sub;
@@ -2516,7 +2582,8 @@ function showView(view){
     'pastry-skus':renderPastrySkus,
     'rev-dashboard':renderRevDashboard,'rev-import':renderRevImport,
     'rev-settlement':renderRevSettlement,'rev-cash':renderRevCash,
-    'bank-ledger':renderBankLedger
+    'bank-ledger':renderBankLedger,
+    'payroll-employees':renderPayrollEmployees
   };
   if(renders[view])renders[view]();
 }
@@ -6492,6 +6559,230 @@ function importData(input){
 
 // importData defined above
 
+
+// ═══════════════════════════════════════════════
+// PAYROLL MODULE — EMPLOYEES + PAY RATE HISTORY
+// ═══════════════════════════════════════════════
+function addDays(dateStr, days){
+  const d=new Date(dateStr+'T00:00:00');
+  d.setDate(d.getDate()+days);
+  return d.toISOString().slice(0,10);
+}
+
+function employeeName(id){ const e=DB.employees.find(x=>x.id===id); return e?e.name:id; }
+
+// Effective-dated rate lookup -- returns the rate row in effect on dateStr (default: today)
+function payRateAsOf(employeeId, dateStr){
+  const d = dateStr || todayStr();
+  const rates = DB.employeePayRates.filter(r=>r.employeeId===employeeId && r.effectiveStartDate<=d && (!r.effectiveEndDate || r.effectiveEndDate>=d));
+  if(!rates.length) return null;
+  return rates.sort((a,b)=>b.effectiveStartDate.localeCompare(a.effectiveStartDate))[0];
+}
+function currentPayRate(employeeId){ return payRateAsOf(employeeId, todayStr()); }
+function employeePayRateHistory(employeeId){
+  return DB.employeePayRates.filter(r=>r.employeeId===employeeId).sort((a,b)=>b.effectiveStartDate.localeCompare(a.effectiveStartDate));
+}
+
+async function saveEmployeeToSB(emp){
+  const ok = await sbUpsert('employees', mapEmployeeToDB(emp));
+  if(ok){
+    const idx = DB.employees.findIndex(e=>e.id===emp.id);
+    if(idx>=0) DB.employees[idx]=emp; else DB.employees.push(emp);
+    DB.employees.sort((a,b)=>a.name.localeCompare(b.name));
+  }
+  return ok;
+}
+
+async function savePayRateToSB(rate){
+  const ok = await sbUpsert('employee_pay_rates', mapPayRateToDB(rate));
+  if(ok){
+    const idx = DB.employeePayRates.findIndex(r=>r.id===rate.id);
+    if(idx>=0) DB.employeePayRates[idx]=rate; else DB.employeePayRates.push(rate);
+  }
+  return ok;
+}
+
+function renderPayrollEmployees(){
+  $('topbar-actions').innerHTML=`<button class="btn btn-primary" onclick="openEmployeeModal()">＋ New Employee</button>`;
+  const emps=[...DB.employees].sort((a,b)=>a.name.localeCompare(b.name));
+  const rows=emps.map(e=>{
+    const rate=currentPayRate(e.id);
+    const rateStr = rate ? (rate.payRateType==='salary'?fmt(rate.payRate)+'/yr':fmt(rate.payRate)+'/hr') : '—';
+    const typeLabel = {hourly:'Hourly',salaried:'Salaried',volunteer:'Volunteer'}[e.employmentType]||e.employmentType;
+    const tipLabel = {hourly:'Hourly pool',manager:'Manager rule',volunteer:'Volunteer rule'}[e.tipClassification]||e.tipClassification;
+    return `<tr onclick="openEmployeeModal('${e.id}')" style="cursor:pointer">
+      <td>${e.name}</td>
+      <td>${typeLabel}</td>
+      <td>${tipLabel}</td>
+      <td class="mono">${rateStr}</td>
+      <td>${e.active?'<span class="badge badge-paid">Active</span>':'<span class="badge badge-void">Inactive</span>'}</td>
+      <td>${e.hireDate?fmtDate(e.hireDate):'—'}</td>
+    </tr>`;
+  }).join('');
+  $('content').innerHTML = `<div class="card">
+    <div class="card-header"><span class="card-title">Employees</span><span style="font-size:12px;color:var(--ink-mid)">${emps.length} total</span></div>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Name</th><th>Employment Type</th><th>Tip Classification</th><th>Current Rate</th><th>Status</th><th>Hire Date</th></tr></thead>
+      <tbody>${rows||'<tr><td colspan="6" class="text-center" style="padding:32px;color:var(--ink-lo)">No employees yet</td></tr>'}</tbody>
+    </table></div>
+  </div>`;
+}
+
+function onEmpTypeChange(){
+  const t = $('emp-type').value;
+  const tipSel = $('emp-tip');
+  if(tipSel) tipSel.value = t; // default tip classification mirrors employment type; user can still override
+}
+
+function renderPayRateHistoryTable(employeeId){
+  const hist = employeePayRateHistory(employeeId);
+  if(!hist.length) return '<div style="font-size:12px;color:var(--ink-lo)">No pay rate history yet.</div>';
+  const rows = hist.map(r=>`<tr>
+    <td class="mono">${fmtDate(r.effectiveStartDate)}</td>
+    <td class="mono">${r.effectiveEndDate?fmtDate(r.effectiveEndDate):'current'}</td>
+    <td class="mono">${r.payRateType==='salary'?fmt(r.payRate)+'/yr':fmt(r.payRate)+'/hr'}</td>
+    <td style="font-size:12px;color:var(--ink-mid)">${r.reason||'—'}</td>
+  </tr>`).join('');
+  return `<table style="width:100%"><thead><tr>
+    <th style="font-size:10px;text-transform:uppercase;color:var(--ink-lo);text-align:left;padding:4px 8px">Start</th>
+    <th style="font-size:10px;text-transform:uppercase;color:var(--ink-lo);text-align:left;padding:4px 8px">End</th>
+    <th style="font-size:10px;text-transform:uppercase;color:var(--ink-lo);text-align:left;padding:4px 8px">Rate</th>
+    <th style="font-size:10px;text-transform:uppercase;color:var(--ink-lo);text-align:left;padding:4px 8px">Reason</th>
+  </tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function openEmployeeModal(editId){
+  const editing = editId ? DB.employees.find(e=>e.id===editId) : null;
+  openModal(`<div class="modal" style="max-width:600px">
+    <div class="modal-header">
+      <div><div class="modal-title">${editing?'Edit Employee':'New Employee'}</div><div class="modal-sub">${editing?editing.id:'Auto-assigned'}</div></div>
+      <button class="close-btn" onclick="closeModal()">×</button>
+    </div>
+    <div class="modal-body"><div class="form-grid">
+      <div class="form-group span-2"><label>Name *</label><input id="emp-name" value="${editing?.name||''}" placeholder="e.g. Jordan Alvarez"></div>
+      <div class="form-group"><label>Employment Type *</label><select id="emp-type" onchange="onEmpTypeChange()">
+        <option value="hourly" ${editing?.employmentType==='hourly'?'selected':''}>Hourly</option>
+        <option value="salaried" ${editing?.employmentType==='salaried'?'selected':''}>Salaried</option>
+        <option value="volunteer" ${editing?.employmentType==='volunteer'?'selected':''}>Volunteer</option>
+      </select></div>
+      <div class="form-group"><label>Tip Classification *</label><select id="emp-tip">
+        <option value="hourly" ${editing?.tipClassification==='hourly'?'selected':''}>Hourly (tip-pool eligible)</option>
+        <option value="manager" ${editing?.tipClassification==='manager'?'selected':''}>Manager (excluded unless alone)</option>
+        <option value="volunteer" ${editing?.tipClassification==='volunteer'?'selected':''}>Volunteer (Volunteer Tip Revenue rule)</option>
+      </select><span class="form-hint">Usually mirrors Employment Type, but can be overridden</span></div>
+      <div class="form-group"><label>Hire Date</label><input type="date" id="emp-hire" value="${editing?.hireDate||''}"></div>
+      <div class="form-group"><label>Term Date</label><input type="date" id="emp-term" value="${editing?.termDate||''}"></div>
+      <div class="form-group"><label>Homebase Name</label><input id="emp-homebase" value="${editing?.homebaseName||''}" placeholder="Name as it appears in Homebase"></div>
+      <div class="form-group"><label>Status</label><select id="emp-active">
+        <option value="true" ${editing?.active!==false?'selected':''}>Active</option>
+        <option value="false" ${editing?.active===false?'selected':''}>Inactive</option>
+      </select></div>
+      ${editing?'':`
+      <div class="form-group"><label>Starting Pay Rate *</label><input type="number" id="emp-rate" step="0.01" min="0" placeholder="e.g. 18.50"></div>
+      <div class="form-group"><label>Rate Type</label><select id="emp-rate-type">
+        <option value="hourly">Hourly</option><option value="salary">Salary</option>
+      </select></div>
+      <div class="form-group span-2"><label>Rate Effective Date *</label><input type="date" id="emp-rate-start" value="${todayStr()}"></div>
+      `}
+      <div class="form-group span-2"><label>Notes</label><textarea id="emp-notes" rows="2">${editing?.notes||''}</textarea></div>
+    </div>
+    ${editing?`<div style="margin-top:4px;padding-top:14px;border-top:1px solid var(--border-lo)">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <span style="font-size:12px;font-weight:600;color:var(--ink-mid);text-transform:uppercase;letter-spacing:.06em">Pay Rate History</span>
+        <button class="btn btn-secondary btn-sm" onclick="openPayRateModal('${editing.id}')">＋ Add Rate Change</button>
+      </div>
+      ${renderPayRateHistoryTable(editing.id)}
+    </div>`:''}
+    </div>
+    <div class="modal-footer">
+      <span id="emp-err" style="color:var(--red);font-size:12px;margin-right:auto"></span>
+      ${editing?`<button class="btn btn-danger" onclick="deleteEmployee('${editId}')">Deactivate</button>`:''}
+      <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveEmployee('${editId||''}')">${editing?'Save':'Add Employee'}</button>
+    </div>
+  </div>`);
+}
+
+async function saveEmployee(editId){
+  const name=$('emp-name').value.trim(); if(!name){$('emp-err').textContent='Name required.';return}
+  const data={
+    name,
+    employmentType:$('emp-type').value,
+    tipClassification:$('emp-tip').value,
+    hireDate:$('emp-hire').value||null,
+    termDate:$('emp-term').value||null,
+    homebaseName:$('emp-homebase').value.trim()||null,
+    active:$('emp-active').value==='true',
+    notes:$('emp-notes').value.trim()||null
+  };
+  const employee = editId ? {...DB.employees.find(e=>e.id===editId), ...data} : {id:nextSeq('EMP'), ...data};
+  const ok = await saveEmployeeToSB(employee);
+  if(!ok){$('emp-err').textContent='Save failed. Check connection.';return}
+  if(!editId){
+    const rateVal = parseFloat($('emp-rate').value);
+    if(!rateVal){closeModal();renderPayrollEmployees();showToast('Employee saved — add a starting pay rate from the employee record.');return}
+    const rate={
+      id:nextSeq('PYR'), employeeId:employee.id, payRate:rateVal,
+      payRateType:$('emp-rate-type').value, effectiveStartDate:$('emp-rate-start').value||todayStr(),
+      effectiveEndDate:null, reason:'Initial rate'
+    };
+    await savePayRateToSB(rate);
+  }
+  closeModal();renderPayrollEmployees();
+}
+
+async function deleteEmployee(id){
+  const emp=DB.employees.find(e=>e.id===id); if(!emp) return;
+  if(!confirm('Deactivate this employee? (Employees are never deleted, to preserve payroll history.)'))return;
+  emp.active=false;
+  await saveEmployeeToSB(emp);
+  closeModal();renderPayrollEmployees();
+}
+
+function openPayRateModal(employeeId){
+  const current = currentPayRate(employeeId);
+  openModal(`<div class="modal" style="max-width:460px">
+    <div class="modal-header">
+      <div><div class="modal-title">Add Rate Change</div><div class="modal-sub">${employeeName(employeeId)}</div></div>
+      <button class="close-btn" onclick="closeModal()">×</button>
+    </div>
+    <div class="modal-body"><div class="form-grid">
+      ${current?`<div class="form-group span-2"><label>Current Rate</label><div class="line-total">${current.payRateType==='salary'?fmt(current.payRate)+'/yr':fmt(current.payRate)+'/hr'} — effective ${fmtDate(current.effectiveStartDate)}</div></div>`:''}
+      <div class="form-group"><label>New Rate *</label><input type="number" id="pyr-rate" step="0.01" min="0"></div>
+      <div class="form-group"><label>Rate Type</label><select id="pyr-type">
+        <option value="hourly">Hourly</option><option value="salary">Salary</option>
+      </select></div>
+      <div class="form-group span-2"><label>Effective Start Date *</label><input type="date" id="pyr-start" value="${todayStr()}"></div>
+      <div class="form-group span-2"><label>Reason</label><input id="pyr-reason" placeholder="e.g. annual raise, correction, role change"></div>
+    </div></div>
+    <div class="modal-footer">
+      <span id="pyr-err" style="color:var(--red);font-size:12px;margin-right:auto"></span>
+      <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="savePayRate('${employeeId}')">Save Rate Change</button>
+    </div>
+  </div>`);
+}
+
+async function savePayRate(employeeId){
+  const rateVal=parseFloat($('pyr-rate').value); if(!rateVal){$('pyr-err').textContent='Rate required.';return}
+  const startDate=$('pyr-start').value; if(!startDate){$('pyr-err').textContent='Effective date required.';return}
+  // Close out the currently open-ended rate, ending the day before the new rate starts
+  const current = currentPayRate(employeeId);
+  if(current && !current.effectiveEndDate){
+    const endDate = addDays(startDate, -1);
+    if(endDate >= current.effectiveStartDate){
+      current.effectiveEndDate = endDate;
+      await savePayRateToSB(current);
+    }
+  }
+  const rate={
+    id:nextSeq('PYR'), employeeId, payRate:rateVal,
+    payRateType:$('pyr-type').value, effectiveStartDate:startDate,
+    effectiveEndDate:null, reason:$('pyr-reason').value.trim()||null
+  };
+  await savePayRateToSB(rate);
+  closeModal();openEmployeeModal(employeeId);
+}
 
 function showToast(msg){
   const t=document.getElementById('bc-toast');if(t)t.remove();
