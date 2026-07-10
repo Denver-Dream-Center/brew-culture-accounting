@@ -6858,6 +6858,7 @@ async function deleteEmployee(id){
   const emp=DB.employees.find(e=>e.id===id); if(!emp) return;
   if(!confirm('Deactivate this employee? (Employees are never deleted, to preserve payroll history.)'))return;
   emp.active=false;
+  if(!emp.termDate) emp.termDate=todayStr(); // gives date-based lookups (shift entry, etc.) a real cutoff; edit in the employee form if the actual last day was different
   await saveEmployeeToSB(emp);
   closeModal();renderPayrollEmployees();
 }
@@ -6976,13 +6977,15 @@ function loadShiftFormForDate(dateStr){
   shiftFormDeletedIds = [];
 }
 
-// Employees considered active on a given date: not manually marked inactive,
-// hired on or before that date, and not yet terminated as of that date.
-// Returns [] if no date is given at all.
+// Employees considered active on a given date: hired on or before that date,
+// and not yet terminated as of that date. Deliberately ignores the current
+// `active` flag -- that flag reflects today's status, but a shift entry for
+// a past date should still list someone who has since been deactivated, as
+// long as they were actually employed on that date. Returns [] if no date
+// is given at all.
 function activeEmployeesAsOf(dateStr){
   if(!dateStr) return [];
   return DB.employees.filter(e=>{
-    if(e.active===false) return false;
     if(e.hireDate && e.hireDate>dateStr) return false;
     if(e.termDate && e.termDate<dateStr) return false;
     return true;
