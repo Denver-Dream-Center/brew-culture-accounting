@@ -530,7 +530,8 @@ let DB = {
   pastryLog: [],
   pastrySkus: [],
   employees: [],
-  employeePayRates: []
+  employeePayRates: [],
+  employeeStatusHistory: []
 };
 
 // Supabase helpers
@@ -572,7 +573,7 @@ async function loadAllData() {
   try {
     const [vendors, invoices, payments, gl, fifo, rules,
            ingredients, recipes, pastryLog, pastrySkus,
-           employees, employeePayRates] = await Promise.all([
+           employees, employeePayRates, employeeStatusHistory] = await Promise.all([
       sbGet('vendors', {order:'name'}),
       sbGet('invoices', {order:'invoice_date', asc:false}),
       sbGet('payments', {order:'payment_date', asc:false}),
@@ -584,7 +585,8 @@ async function loadAllData() {
       sbGet('pastry_log', {order:'log_date', asc:false}),
       sbGet('pastry_skus', {order:'name'}),
       sbGet('employees', {order:'name'}),
-      sbGet('employee_pay_rates', {order:'effective_start_date'})
+      sbGet('employee_pay_rates', {order:'effective_start_date'}),
+      sbGet('employee_status_history', {order:'effective_start_date'})
     ]);
 
     // Map Supabase column names to app field names
@@ -600,6 +602,7 @@ async function loadAllData() {
     DB.pastrySkus = pastrySkus.map(function(s){return{name:s.name,code:s.code,unitPrice:s.unit_price,notes:s.notes,active:s.active}});
     DB.employees = employees.map(mapEmployeeFromDB);
     DB.employeePayRates = employeePayRates.map(mapPayRateFromDB);
+    DB.employeeStatusHistory = employeeStatusHistory.map(mapStatusFromDB);
 
     // Load revenue data
     await loadRevData();
@@ -700,7 +703,8 @@ function mapEmployeeFromDB(r) {
     id: r.id, name: r.name, employmentType: r.employment_type,
     tipClassification: r.tip_classification, hireDate: r.hire_date,
     termDate: r.term_date, active: r.active !== false,
-    homebaseName: r.homebase_name, notes: r.notes
+    homebaseName: r.homebase_name, notes: r.notes,
+    tipsOffsetSalary: r.tips_offset_salary === true
   };
 }
 
@@ -709,7 +713,24 @@ function mapEmployeeToDB(e) {
     id: e.id, name: e.name, employment_type: e.employmentType,
     tip_classification: e.tipClassification, hire_date: e.hireDate || null,
     term_date: e.termDate || null, active: e.active !== false,
-    homebase_name: e.homebaseName || null, notes: e.notes || null
+    homebase_name: e.homebaseName || null, notes: e.notes || null,
+    tips_offset_salary: e.tipsOffsetSalary === true
+  };
+}
+
+function mapStatusFromDB(r) {
+  return {
+    id: r.id, employeeId: r.employee_id, employmentType: r.employment_type,
+    tipClassification: r.tip_classification, effectiveStartDate: r.effective_start_date,
+    effectiveEndDate: r.effective_end_date, reason: r.reason
+  };
+}
+
+function mapStatusToDB(r) {
+  return {
+    id: r.id, employee_id: r.employeeId, employment_type: r.employmentType,
+    tip_classification: r.tipClassification, effective_start_date: r.effectiveStartDate,
+    effective_end_date: r.effectiveEndDate || null, reason: r.reason || null
   };
 }
 
@@ -6583,6 +6604,31 @@ function employeePayRateHistory(employeeId){
   return DB.employeePayRates.filter(r=>r.employeeId===employeeId).sort((a,b)=>b.effectiveStartDate.localeCompare(a.effectiveStartDate));
 }
 
+// Effective-dated employment status lookup -- same pattern as pay rate.
+// Authoritative source is employee_status_history; employees.employmentType/
+// tipClassification are kept as a denormalized "current" cache for quick
+// display, but any date-specific calculation (tip segments, payroll runs)
+// should use this instead of reading the employee row directly.
+function statusAsOf(employeeId, dateStr){
+  const d = dateStr || todayStr();
+  const rows = DB.employeeStatusHistory.filter(r=>r.employeeId===employeeId && r.effectiveStartDate<=d && (!r.effectiveEndDate || r.effectiveEndDate>=d));
+  if(!rows.length) return null;
+  return rows.sort((a,b)=>b.effectiveStartDate.localeCompare(a.effectiveStartDate))[0];
+}
+function currentEmployeeStatus(employeeId){ return statusAsOf(employeeId, todayStr()); }
+function employeeStatusHistoryList(employeeId){
+  return DB.employeeStatusHistory.filter(r=>r.employeeId===employeeId).sort((a,b)=>b.effectiveStartDate.localeCompare(a.effectiveStartDate));
+}
+
+async function saveStatusToSB(status){
+  const ok = await sbUpsert('employee_status_history', mapStatusToDB(status));
+  if(ok){
+    const idx = DB.employeeStatusHistory.findIndex(r=>r.id===status.id);
+    if(idx>=0) DB.employeeStatusHistory[idx]=status; else DB.employeeStatusHistory.push(status);
+  }
+  return ok;
+}
+
 async function saveEmployeeToSB(emp){
   const ok = await sbUpsert('employees', mapEmployeeToDB(emp));
   if(ok){
@@ -6608,8 +6654,9 @@ function renderPayrollEmployees(){
   const rows=emps.map(e=>{
     const rate=currentPayRate(e.id);
     const rateStr = rate ? (rate.payRateType==='salary'?fmt(rate.payRate)+'/yr':fmt(rate.payRate)+'/hr') : '—';
-    const typeLabel = {hourly:'Hourly',salaried:'Salaried',volunteer:'Volunteer'}[e.employmentType]||e.employmentType;
-    const tipLabel = {hourly:'Hourly pool',manager:'Manager rule',volunteer:'Volunteer rule'}[e.tipClassification]||e.tipClassification;
+    const status=currentEmployeeStatus(e.id);
+    const typeLabel = {hourly:'Hourly',salaried:'Salaried',volunteer:'Volunteer'}[status?.employmentType||e.employmentType]||e.employmentType;
+    const tipLabel = {hourly:'Hourly pool',manager:'Manager rule',volunteer:'Volunteer rule'}[status?.tipClassification||e.tipClassification]||e.tipClassification;
     return `<tr onclick="openEmployeeModal('${e.id}')" style="cursor:pointer">
       <td>${e.name}</td>
       <td>${typeLabel}</td>
@@ -6651,8 +6698,32 @@ function renderPayRateHistoryTable(employeeId){
   </tr></thead><tbody>${rows}</tbody></table>`;
 }
 
+function renderStatusHistoryTable(employeeId){
+  const hist = employeeStatusHistoryList(employeeId);
+  if(!hist.length) return '<div style="font-size:12px;color:var(--ink-lo)">No status history yet.</div>';
+  const typeLabel = {hourly:'Hourly',salaried:'Salaried',volunteer:'Volunteer'};
+  const tipLabel = {hourly:'Hourly pool',manager:'Manager rule',volunteer:'Volunteer rule'};
+  const rows = hist.map(r=>`<tr>
+    <td class="mono">${fmtDate(r.effectiveStartDate)}</td>
+    <td class="mono">${r.effectiveEndDate?fmtDate(r.effectiveEndDate):'current'}</td>
+    <td>${typeLabel[r.employmentType]||r.employmentType}</td>
+    <td>${tipLabel[r.tipClassification]||r.tipClassification}</td>
+    <td style="font-size:12px;color:var(--ink-mid)">${r.reason||'—'}</td>
+  </tr>`).join('');
+  return `<table style="width:100%"><thead><tr>
+    <th style="font-size:10px;text-transform:uppercase;color:var(--ink-lo);text-align:left;padding:4px 8px">Start</th>
+    <th style="font-size:10px;text-transform:uppercase;color:var(--ink-lo);text-align:left;padding:4px 8px">End</th>
+    <th style="font-size:10px;text-transform:uppercase;color:var(--ink-lo);text-align:left;padding:4px 8px">Employment Type</th>
+    <th style="font-size:10px;text-transform:uppercase;color:var(--ink-lo);text-align:left;padding:4px 8px">Tip Classification</th>
+    <th style="font-size:10px;text-transform:uppercase;color:var(--ink-lo);text-align:left;padding:4px 8px">Reason</th>
+  </tr></thead><tbody>${rows}</tbody></table>`;
+}
+
 function openEmployeeModal(editId){
   const editing = editId ? DB.employees.find(e=>e.id===editId) : null;
+  const status = editing ? currentEmployeeStatus(editing.id) : null;
+  const typeLabel = {hourly:'Hourly',salaried:'Salaried',volunteer:'Volunteer'};
+  const tipLabel = {hourly:'Hourly (tip-pool eligible)',manager:'Manager (excluded unless alone)',volunteer:'Volunteer (Volunteer Tip Revenue rule)'};
   openModal(`<div class="modal" style="max-width:600px">
     <div class="modal-header">
       <div><div class="modal-title">${editing?'Edit Employee':'New Employee'}</div><div class="modal-sub">${editing?editing.id:'Auto-assigned'}</div></div>
@@ -6660,16 +6731,24 @@ function openEmployeeModal(editId){
     </div>
     <div class="modal-body"><div class="form-grid">
       <div class="form-group span-2"><label>Name *</label><input id="emp-name" value="${editing?.name||''}" placeholder="e.g. Jordan Alvarez"></div>
+      ${editing?`
+      <div class="form-group span-2">
+        <label>Current Status</label>
+        <div class="line-total">${typeLabel[status?.employmentType]||'—'} · ${tipLabel[status?.tipClassification]||'—'}${status?' — effective '+fmtDate(status.effectiveStartDate):''}</div>
+        <span class="form-hint">To change employment type or tip classification, use "Change Status" below so the effective date is captured.</span>
+      </div>
+      `:`
       <div class="form-group"><label>Employment Type *</label><select id="emp-type" onchange="onEmpTypeChange()">
-        <option value="hourly" ${editing?.employmentType==='hourly'?'selected':''}>Hourly</option>
-        <option value="salaried" ${editing?.employmentType==='salaried'?'selected':''}>Salaried</option>
-        <option value="volunteer" ${editing?.employmentType==='volunteer'?'selected':''}>Volunteer</option>
+        <option value="hourly">Hourly</option>
+        <option value="salaried">Salaried</option>
+        <option value="volunteer">Volunteer</option>
       </select></div>
       <div class="form-group"><label>Tip Classification *</label><select id="emp-tip">
-        <option value="hourly" ${editing?.tipClassification==='hourly'?'selected':''}>Hourly (tip-pool eligible)</option>
-        <option value="manager" ${editing?.tipClassification==='manager'?'selected':''}>Manager (excluded unless alone)</option>
-        <option value="volunteer" ${editing?.tipClassification==='volunteer'?'selected':''}>Volunteer (Volunteer Tip Revenue rule)</option>
+        <option value="hourly">Hourly (tip-pool eligible)</option>
+        <option value="manager">Manager (excluded unless alone)</option>
+        <option value="volunteer">Volunteer (Volunteer Tip Revenue rule)</option>
       </select><span class="form-hint">Usually mirrors Employment Type, but can be overridden</span></div>
+      `}
       <div class="form-group"><label>Hire Date</label><input type="date" id="emp-hire" value="${editing?.hireDate||''}"></div>
       <div class="form-group"><label>Term Date</label><input type="date" id="emp-term" value="${editing?.termDate||''}"></div>
       <div class="form-group"><label>Homebase Name</label><input id="emp-homebase" value="${editing?.homebaseName||''}" placeholder="Name as it appears in Homebase"></div>
@@ -6677,6 +6756,10 @@ function openEmployeeModal(editId){
         <option value="true" ${editing?.active!==false?'selected':''}>Active</option>
         <option value="false" ${editing?.active===false?'selected':''}>Inactive</option>
       </select></div>
+      <div class="form-group span-2" style="flex-direction:row;align-items:center;gap:8px">
+        <input type="checkbox" id="emp-tips-offset" style="width:auto" ${editing?.tipsOffsetSalary?'checked':''}>
+        <label style="margin:0">Tips reduce salary — this person's personal tip earnings are subtracted from their gross salary pay rather than paid on top of it</label>
+      </div>
       ${editing?'':`
       <div class="form-group"><label>Starting Pay Rate *</label><input type="number" id="emp-rate" step="0.01" min="0" placeholder="e.g. 18.50"></div>
       <div class="form-group"><label>Rate Type</label><select id="emp-rate-type">
@@ -6692,6 +6775,13 @@ function openEmployeeModal(editId){
         <button class="btn btn-secondary btn-sm" onclick="openPayRateModal('${editing.id}')">＋ Add Rate Change</button>
       </div>
       ${renderPayRateHistoryTable(editing.id)}
+    </div>
+    <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border-lo)">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <span style="font-size:12px;font-weight:600;color:var(--ink-mid);text-transform:uppercase;letter-spacing:.06em">Status History</span>
+        <button class="btn btn-secondary btn-sm" onclick="openStatusChangeModal('${editing.id}')">＋ Change Status</button>
+      </div>
+      ${renderStatusHistoryTable(editing.id)}
     </div>`:''}
     </div>
     <div class="modal-footer">
@@ -6707,18 +6797,27 @@ async function saveEmployee(editId){
   const name=$('emp-name').value.trim(); if(!name){$('emp-err').textContent='Name required.';return}
   const data={
     name,
-    employmentType:$('emp-type').value,
-    tipClassification:$('emp-tip').value,
     hireDate:$('emp-hire').value||null,
     termDate:$('emp-term').value||null,
     homebaseName:$('emp-homebase').value.trim()||null,
     active:$('emp-active').value==='true',
+    tipsOffsetSalary:$('emp-tips-offset').checked,
     notes:$('emp-notes').value.trim()||null
   };
+  if(!editId){
+    data.employmentType=$('emp-type').value;
+    data.tipClassification=$('emp-tip').value;
+  }
   const employee = editId ? {...DB.employees.find(e=>e.id===editId), ...data} : {id:nextSeq('EMP'), ...data};
   const ok = await saveEmployeeToSB(employee);
   if(!ok){$('emp-err').textContent='Save failed. Check connection.';return}
   if(!editId){
+    const status={
+      id:nextSeq('STAT'), employeeId:employee.id, employmentType:employee.employmentType,
+      tipClassification:employee.tipClassification, effectiveStartDate:employee.hireDate||todayStr(),
+      effectiveEndDate:null, reason:'Initial setup'
+    };
+    await saveStatusToSB(status);
     const rateVal = parseFloat($('emp-rate').value);
     if(!rateVal){closeModal();renderPayrollEmployees();showToast('Employee saved — add a starting pay rate from the employee record.');return}
     const rate={
@@ -6737,6 +6836,73 @@ async function deleteEmployee(id){
   emp.active=false;
   await saveEmployeeToSB(emp);
   closeModal();renderPayrollEmployees();
+}
+
+function openStatusChangeModal(employeeId){
+  const current = currentEmployeeStatus(employeeId);
+  const typeLabel = {hourly:'Hourly',salaried:'Salaried',volunteer:'Volunteer'};
+  const tipLabel = {hourly:'Hourly pool',manager:'Manager rule',volunteer:'Volunteer rule'};
+  openModal(`<div class="modal" style="max-width:480px">
+    <div class="modal-header">
+      <div><div class="modal-title">Change Status</div><div class="modal-sub">${employeeName(employeeId)}</div></div>
+      <button class="close-btn" onclick="closeModal()">×</button>
+    </div>
+    <div class="modal-body"><div class="form-grid">
+      ${current?`<div class="form-group span-2"><label>Current Status</label><div class="line-total">${typeLabel[current.employmentType]||current.employmentType} · ${tipLabel[current.tipClassification]||current.tipClassification} — effective ${fmtDate(current.effectiveStartDate)}</div></div>`:''}
+      <div class="form-group"><label>New Employment Type *</label><select id="stat-type" onchange="onStatTypeChange()">
+        <option value="hourly">Hourly</option>
+        <option value="salaried">Salaried</option>
+        <option value="volunteer">Volunteer</option>
+      </select></div>
+      <div class="form-group"><label>New Tip Classification *</label><select id="stat-tip">
+        <option value="hourly">Hourly (tip-pool eligible)</option>
+        <option value="manager">Manager (excluded unless alone)</option>
+        <option value="volunteer">Volunteer (Volunteer Tip Revenue rule)</option>
+      </select></div>
+      <div class="form-group span-2"><label>Effective Start Date *</label><input type="date" id="stat-start" value="${todayStr()}"></div>
+      <div class="form-group span-2"><label>Reason</label><input id="stat-reason" placeholder="e.g. volunteer moved to paid position"></div>
+    </div></div>
+    <div class="modal-footer">
+      <span id="stat-err" style="color:var(--red);font-size:12px;margin-right:auto"></span>
+      <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveStatusChange('${employeeId}')">Save Status Change</button>
+    </div>
+  </div>`);
+}
+
+function onStatTypeChange(){
+  const t = $('stat-type').value;
+  const tipSel = $('stat-tip');
+  if(tipSel) tipSel.value = t; // default tip classification mirrors employment type; user can still override
+}
+
+async function saveStatusChange(employeeId){
+  const empType=$('stat-type').value, tipClass=$('stat-tip').value;
+  const startDate=$('stat-start').value; if(!startDate){$('stat-err').textContent='Effective date required.';return}
+  // Close out the currently open-ended status, ending the day before the new one starts
+  const current = currentEmployeeStatus(employeeId);
+  if(current && !current.effectiveEndDate){
+    const endDate = addDays(startDate, -1);
+    if(endDate >= current.effectiveStartDate){
+      current.effectiveEndDate = endDate;
+      await saveStatusToSB(current);
+    }
+  }
+  const status={
+    id:nextSeq('STAT'), employeeId, employmentType:empType,
+    tipClassification:tipClass, effectiveStartDate:startDate,
+    effectiveEndDate:null, reason:$('stat-reason').value.trim()||null
+  };
+  await saveStatusToSB(status);
+  // Keep the employees table's denormalized current fields in sync for
+  // quick display/filtering elsewhere
+  const emp = DB.employees.find(e=>e.id===employeeId);
+  if(emp){
+    emp.employmentType = empType;
+    emp.tipClassification = tipClass;
+    await saveEmployeeToSB(emp);
+  }
+  closeModal();openEmployeeModal(employeeId);
 }
 
 function openPayRateModal(employeeId){
