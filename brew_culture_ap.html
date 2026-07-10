@@ -1866,6 +1866,16 @@ async function confirmCloverImport(){
   // contribution would be missing from the very total we're about to compute.
   var detailErr = await saveCloverOrdersAndItems(_cloverParsed.orders, _cloverParsed.items);
 
+  // The Payroll module caches each date's order/tip data in memory the first
+  // time it's viewed, so it doesn't re-fetch on every shift row edit. If any
+  // of these dates were already opened in Shift Log before this import (e.g.
+  // during initial setup, before order-level detail existed for them), that
+  // cache would otherwise keep serving the old (empty) result indefinitely.
+  // Clear it here so the next visit to that date re-fetches the real data.
+  if(typeof _cloverOrdersCache !== 'undefined'){
+    dates.forEach(function(d){ delete _cloverOrdersCache[d]; });
+  }
+
   var errors = [];
   var glErrors = [];
   var depositMismatch = [];
