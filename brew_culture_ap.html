@@ -938,7 +938,8 @@ function renderSidebar(){
       '<div class="sidebar-section">Payroll</div>' +
       '<button class="nav-item active" onclick="showView(\'payroll-employees\')" id="nav-payroll-employees"><span class="nav-icon">&#9679;</span> Employees</button>' +
       '<button class="nav-item" onclick="showView(\'payroll-shifts\')" id="nav-payroll-shifts"><span class="nav-icon">&#9633;</span> Shift Log</button>' +
-      '<button class="nav-item" onclick="showView(\'payroll-timesheets\')" id="nav-payroll-timesheets"><span class="nav-icon">&#9642;</span> Timesheets</button>' +
+      '<button class="nav-item" onclick="showView(\'payroll-timesheets\')" id="nav-payroll-timesheets"><span class="nav-icon">&#9642;</span> Individual Timesheets</button>' +
+      '<button class="nav-item" onclick="showView(\'payroll-timesheet-summary\')" id="nav-payroll-timesheet-summary"><span class="nav-icon">&#9776;</span> Timesheet Summary</button>' +
       '<div class="sidebar-section">Jump To</div>' +
       '<button class="nav-item" onclick="launchModule(\'ap\')"><span class="nav-icon">&#9632;</span> AP Module</button>' +
       '<button class="nav-item" onclick="launchModule(\'revenue\')"><span class="nav-icon">&#9650;</span> Revenue Module</button>' +
@@ -2621,7 +2622,8 @@ function showView(view){
     'bank-ledger':['Bank Ledger','Transaction register \xb7 Glacier \xb7 SouthState'],
     'payroll-employees':['Employees','Employee profiles \xb7 pay rate history'],
     'payroll-shifts':['Shift Log','Daily clock-in / clock-out entries'],
-    'payroll-timesheets':['Timesheets','Pay period review by employee']
+    'payroll-timesheets':['Individual Timesheets','Pay period review by employee'],
+    'payroll-timesheet-summary':['Timesheet Summary','One line per employee for the selected pay period']
   };
   const[title,sub]=titles[view]||['--',''];
   $('page-title').textContent=title;$('page-sub').textContent=sub;
@@ -2639,7 +2641,8 @@ function showView(view){
     'bank-ledger':renderBankLedger,
     'payroll-employees':renderPayrollEmployees,
     'payroll-shifts':renderPayrollShifts,
-    'payroll-timesheets':renderPayrollTimesheets
+    'payroll-timesheets':renderPayrollTimesheets,
+    'payroll-timesheet-summary':renderPayrollTimesheetSummary
   };
   if(renders[view])renders[view]();
 }
@@ -7376,6 +7379,110 @@ async function renderPayrollTimesheets(){
     }).join('');
   }
   $('content').innerHTML = html;
+}
+
+// One line per employee for a pay period: hours, avg rate, gross pay, tips,
+// total pay including tips. Salaried employees whose tips offset salary
+// (e.g. Troy) get a gross pay that's backed into (period salary minus tips,
+// floored at $0) -- their total pay including tips stays constant at the
+// period salary amount, while gross pay and avg rate move with tips earned.
+function computeEmployeePeriodSummary(empId, period){
+  const shifts = DB.shiftLog.filter(s=>s.employeeId===empId && s.workDate>=period.start && s.workDate<=period.end);
+  let hours = 0;
+  shifts.forEach(s=>{ const d=shiftDurationHours(s.clockIn,s.clockOut); if(d!==null) hours+=d; });
+
+  let tips = 0;
+  const datesWorked = [...new Set(shifts.map(s=>s.workDate))];
+  datesWorked.forEach(d=>{
+    const split = computeTipSplitForDay(d, DB.shiftLog.filter(x=>x.workDate===d));
+    const amt = split.perEmployee[empId];
+    if(amt!==undefined) tips += amt;
+  });
+
+  const status = statusAsOf(empId, period.end) || statusAsOf(empId, period.start);
+  const emp = DB.employees.find(e=>e.id===empId);
+  const empType = status ? status.employmentType : (emp?emp.employmentType:null);
+
+  let grossPay=0, totalPay=0, flaggedExceed=false;
+  if(empType==='salaried'){
+    const rate = payRateAsOf(empId, period.end) || payRateAsOf(empId, period.start);
+    const periodSalary = (rate && rate.payRateType==='salary') ? rate.payRate/26 : 0; // 26 biweekly periods/year
+    if(emp && emp.tipsOffsetSalary){
+      grossPay = Math.max(0, periodSalary - tips);
+      flaggedExceed = tips > periodSalary;
+      totalPay = grossPay + tips; // == periodSalary unless floored
+    } else {
+      grossPay = periodSalary;
+      totalPay = grossPay + tips;
+    }
+  } else if(empType==='hourly'){
+    shifts.forEach(s=>{
+      const d = shiftDurationHours(s.clockIn, s.clockOut);
+      if(d!==null){
+        const r = payRateAsOf(empId, s.workDate);
+        if(r && r.payRateType==='hourly') grossPay += d*r.payRate;
+      }
+    });
+    totalPay = grossPay + tips;
+  } else { // volunteer
+    grossPay = 0;
+    totalPay = tips;
+  }
+
+  const avgRate = hours>0 ? grossPay/hours : null;
+  return {hours, avgRate, grossPay, tips, totalPay, flaggedExceed, empType};
+}
+
+async function renderPayrollTimesheetSummary(){
+  const periods = listPayPeriods();
+  if(!timesheetPeriodStart || !periods.find(p=>p.start===timesheetPeriodStart)){
+    timesheetPeriodStart = periods.length ? periods[0].start : payPeriodStartFor(todayStr());
+  }
+  const period = periods.find(p=>p.start===timesheetPeriodStart) || {start:timesheetPeriodStart, end:addDays(timesheetPeriodStart, PAY_PERIOD_LENGTH-1)};
+
+  $('topbar-actions').innerHTML = `<select id="tsp-summary-period-sel" onchange="timesheetPeriodStart=this.value;renderPayrollTimesheetSummary()" style="padding:6px 10px;border:1px solid var(--border);border-radius:var(--r);font-size:13px">
+    ${periods.map(p=>`<option value="${p.start}" ${p.start===period.start?'selected':''}>${fmtDate(p.start)} \u2013 ${fmtDate(p.end)}</option>`).join('')}
+  </select>`;
+
+  showLoadingOverlay('Loading pay period data...');
+  let d = period.start;
+  while(d <= period.end){ await ensureCloverOrdersLoaded(d); d = addDays(d,1); }
+  hideLoadingOverlay();
+
+  const shiftsInPeriod = DB.shiftLog.filter(s=>s.workDate>=period.start && s.workDate<=period.end);
+  const employeeIds = [...new Set(shiftsInPeriod.map(s=>s.employeeId))].sort((a,b)=>employeeName(a).localeCompare(employeeName(b)));
+
+  let totHours=0, totGross=0, totTips=0, totPay=0;
+  const rows = employeeIds.map(id=>{
+    const s = computeEmployeePeriodSummary(id, period);
+    totHours += s.hours; totGross += s.grossPay; totTips += s.tips; totPay += s.totalPay;
+    return `<tr>
+      <td>${employeeName(id)}</td>
+      <td class="text-right mono">${s.hours.toFixed(2)}</td>
+      <td class="text-right mono">${s.avgRate!==null?fmt(s.avgRate)+'/hr':'—'}</td>
+      <td class="text-right mono">${fmt(s.grossPay)}</td>
+      <td class="text-right mono">${fmt(s.tips)}</td>
+      <td class="text-right mono">${fmt(s.totalPay)}${s.flaggedExceed?' <span style="color:var(--red)" title="Tips exceeded period salary -- gross pay floored at $0">\u26a0</span>':''}</td>
+    </tr>`;
+  }).join('');
+  const avgRateTotal = totHours>0 ? totGross/totHours : 0;
+
+  $('content').innerHTML = `<div class="card">
+    <div class="card-header"><span class="card-title">${fmtDate(period.start)} \u2013 ${fmtDate(period.end)}</span><span style="font-size:12px;color:var(--ink-mid)">${employeeIds.length} employee${employeeIds.length!==1?'s':''}</span></div>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Employee</th><th class="text-right">Hours</th><th class="text-right">Avg Rate</th><th class="text-right">Gross Pay</th><th class="text-right">Tips</th><th class="text-right">Total Pay (incl. Tips)</th></tr></thead>
+      <tbody>${rows||'<tr><td colspan="6" class="text-center" style="padding:32px;color:var(--ink-lo)">No shifts logged for this pay period.</td></tr>'}
+      ${employeeIds.length?`<tr style="border-top:2px solid var(--border);font-weight:600">
+        <td>Period Total</td>
+        <td class="text-right mono">${totHours.toFixed(2)}</td>
+        <td class="text-right mono">${fmt(avgRateTotal)}/hr</td>
+        <td class="text-right mono">${fmt(totGross)}</td>
+        <td class="text-right mono">${fmt(totTips)}</td>
+        <td class="text-right mono">${fmt(totPay)}</td>
+      </tr>`:''}
+      </tbody>
+    </table></div>
+  </div>`;
 }
 
 function openPayRateModal(employeeId){
