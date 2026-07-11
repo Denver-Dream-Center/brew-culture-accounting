@@ -938,6 +938,7 @@ function renderSidebar(){
       '<div class="sidebar-section">Payroll</div>' +
       '<button class="nav-item active" onclick="showView(\'payroll-employees\')" id="nav-payroll-employees"><span class="nav-icon">&#9679;</span> Employees</button>' +
       '<button class="nav-item" onclick="showView(\'payroll-shifts\')" id="nav-payroll-shifts"><span class="nav-icon">&#9633;</span> Shift Log</button>' +
+      '<button class="nav-item" onclick="showView(\'payroll-timesheets\')" id="nav-payroll-timesheets"><span class="nav-icon">&#9642;</span> Timesheets</button>' +
       '<div class="sidebar-section">Jump To</div>' +
       '<button class="nav-item" onclick="launchModule(\'ap\')"><span class="nav-icon">&#9632;</span> AP Module</button>' +
       '<button class="nav-item" onclick="launchModule(\'revenue\')"><span class="nav-icon">&#9650;</span> Revenue Module</button>' +
@@ -2619,7 +2620,8 @@ function showView(view){
     'rev-cash':['Cash Log','Daily cash revenue'],
     'bank-ledger':['Bank Ledger','Transaction register \xb7 Glacier \xb7 SouthState'],
     'payroll-employees':['Employees','Employee profiles \xb7 pay rate history'],
-    'payroll-shifts':['Shift Log','Daily clock-in / clock-out entries']
+    'payroll-shifts':['Shift Log','Daily clock-in / clock-out entries'],
+    'payroll-timesheets':['Timesheets','Pay period review by employee']
   };
   const[title,sub]=titles[view]||['--',''];
   $('page-title').textContent=title;$('page-sub').textContent=sub;
@@ -2636,7 +2638,8 @@ function showView(view){
     'rev-settlement':renderRevSettlement,'rev-cash':renderRevCash,
     'bank-ledger':renderBankLedger,
     'payroll-employees':renderPayrollEmployees,
-    'payroll-shifts':renderPayrollShifts
+    'payroll-shifts':renderPayrollShifts,
+    'payroll-timesheets':renderPayrollTimesheets
   };
   if(renders[view])renders[view]();
 }
@@ -7262,6 +7265,117 @@ async function saveShiftDay(){
   if(!allOk){errEl.textContent='One or more rows failed to save — check your connection and try again.';return}
   showToast('Shifts saved for '+fmtDate(shiftLogDate));
   renderPayrollShifts();
+}
+
+// ═══════════════════════════════════════════════
+// PAYROLL MODULE — TIMESHEETS (PAY PERIOD REVIEW)
+// ═══════════════════════════════════════════════
+// Pay periods run Monday-Sunday, 14 days, anchored to a known real period
+// (6/22/26-7/5/26). This anchor also lands exactly on 10/27/25-11/9/25 --
+// the entity's actual first payroll period -- confirming the same 14-day
+// cycle applies retroactively.
+var PAY_PERIOD_ANCHOR = '2026-06-22';
+var PAY_PERIOD_LENGTH = 14;
+var timesheetPeriodStart = null;
+
+function dateDiffDays(a, b){ // b - a, in whole days
+  const da = new Date(a+'T00:00:00Z');
+  const db = new Date(b+'T00:00:00Z');
+  return Math.round((db-da)/86400000);
+}
+
+function payPeriodStartFor(dateStr){
+  const diff = dateDiffDays(PAY_PERIOD_ANCHOR, dateStr);
+  const offset = Math.floor(diff/PAY_PERIOD_LENGTH);
+  return addDays(PAY_PERIOD_ANCHOR, offset*PAY_PERIOD_LENGTH);
+}
+function payPeriodEndFor(dateStr){
+  return addDays(payPeriodStartFor(dateStr), PAY_PERIOD_LENGTH-1);
+}
+
+// Every period from the earliest logged shift (or 10/27/25, whichever is
+// earlier) through today, most recent first.
+function listPayPeriods(){
+  const shiftDates = DB.shiftLog.map(s=>s.workDate);
+  let minDate = shiftDates.length ? shiftDates.reduce((a,b)=>a<b?a:b) : '2025-10-27';
+  if(minDate > '2025-10-27') minDate = '2025-10-27';
+  const firstStart = payPeriodStartFor(minDate);
+  const lastStart = payPeriodStartFor(todayStr());
+  const periods = [];
+  let cursor = firstStart;
+  while(cursor <= lastStart){
+    periods.push({start:cursor, end:addDays(cursor, PAY_PERIOD_LENGTH-1)});
+    cursor = addDays(cursor, PAY_PERIOD_LENGTH);
+  }
+  return periods.reverse();
+}
+
+async function renderPayrollTimesheets(){
+  const periods = listPayPeriods();
+  if(!timesheetPeriodStart || !periods.find(p=>p.start===timesheetPeriodStart)){
+    timesheetPeriodStart = periods.length ? periods[0].start : payPeriodStartFor(todayStr());
+  }
+  const period = periods.find(p=>p.start===timesheetPeriodStart) || {start:timesheetPeriodStart, end:addDays(timesheetPeriodStart, PAY_PERIOD_LENGTH-1)};
+
+  $('topbar-actions').innerHTML = `<select id="tsp-period-sel" onchange="timesheetPeriodStart=this.value;renderPayrollTimesheets()" style="padding:6px 10px;border:1px solid var(--border);border-radius:var(--r);font-size:13px">
+    ${periods.map(p=>`<option value="${p.start}" ${p.start===period.start?'selected':''}>${fmtDate(p.start)} \u2013 ${fmtDate(p.end)}</option>`).join('')}
+  </select>`;
+
+  // Tips need that period's Clover data loaded day by day (cached after first load).
+  showLoadingOverlay('Loading pay period data...');
+  let d = period.start;
+  while(d <= period.end){ await ensureCloverOrdersLoaded(d); d = addDays(d,1); }
+  hideLoadingOverlay();
+
+  const shiftsInPeriod = DB.shiftLog.filter(s=>s.workDate>=period.start && s.workDate<=period.end);
+  const employeeIds = [...new Set(shiftsInPeriod.map(s=>s.employeeId))].sort((a,b)=>employeeName(a).localeCompare(employeeName(b)));
+
+  let html;
+  if(!employeeIds.length){
+    html = `<div class="card"><div class="card-body" style="padding:32px;text-align:center;color:var(--ink-lo)">No shifts logged for this pay period.</div></div>`;
+  } else {
+    html = employeeIds.map(empId=>{
+      const shifts = shiftsInPeriod.filter(s=>s.employeeId===empId).sort((a,b)=>a.workDate.localeCompare(b.workDate)||(a.clockIn||'').localeCompare(b.clockIn||''));
+      let totalHours=0, totalGross=0, totalTips=0;
+      const rows = shifts.map(s=>{
+        const dur = shiftDurationHours(s.clockIn, s.clockOut);
+        const weekday = new Date(s.workDate+'T12:00:00').toLocaleDateString('en-US',{weekday:'short'});
+        const rate = payRateAsOf(empId, s.workDate);
+        const status = statusAsOf(empId, s.workDate);
+        const rateStr = rate ? (rate.payRateType==='salary'?fmt(rate.payRate)+'/yr':fmt(rate.payRate)+'/hr') : '—';
+        let grossStr='—', tipsStr='—';
+        if(dur!==null){
+          totalHours += dur;
+          if(status && status.employmentType==='hourly' && rate && rate.payRateType==='hourly'){
+            const gross = dur*rate.payRate; totalGross += gross; grossStr = fmt(gross);
+          }
+          const daySplit = computeTipSplitForDay(s.workDate, DB.shiftLog.filter(x=>x.workDate===s.workDate));
+          const tipAmt = daySplit.perEmployee[empId];
+          if(tipAmt!==undefined){ totalTips += tipAmt; tipsStr = fmt(tipAmt); }
+        }
+        return `<tr>
+          <td>${fmtDate(s.workDate)}</td>
+          <td style="color:var(--ink-mid)">${weekday}</td>
+          <td class="mono">${rateStr}</td>
+          <td class="mono">${fmtTime12(s.clockIn)}</td>
+          <td class="mono">${s.clockOut?fmtTime12(s.clockOut):'—'}</td>
+          <td class="text-right mono">${dur!==null?dur.toFixed(2):'—'}</td>
+          <td class="text-right mono">${grossStr}</td>
+          <td class="text-right mono">${tipsStr}</td>
+        </tr>`;
+      }).join('');
+      return `<div class="card" style="margin-bottom:16px">
+        <div class="card-header"><span class="card-title">${employeeName(empId)}</span>
+          <span style="font-size:12px;color:var(--ink-mid)">${totalHours.toFixed(2)} hrs \u00b7 ${fmt(totalGross)} gross \u00b7 ${fmt(totalTips)} tips</span>
+        </div>
+        <div class="tbl-wrap"><table>
+          <thead><tr><th>Date</th><th>Day</th><th>Wage Rate</th><th>Clock In</th><th>Clock Out</th><th class="text-right">Hours</th><th class="text-right">Gross Wages</th><th class="text-right">Tips</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table></div>
+      </div>`;
+    }).join('');
+  }
+  $('content').innerHTML = html;
 }
 
 function openPayRateModal(employeeId){
