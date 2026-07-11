@@ -532,7 +532,10 @@ let DB = {
   employees: [],
   employeePayRates: [],
   employeeStatusHistory: [],
-  shiftLog: []
+  shiftLog: [],
+  payrollRuns: [],
+  payrollRunEmployees: [],
+  payrollRunLineItems: []
 };
 
 // Supabase helpers
@@ -574,7 +577,8 @@ async function loadAllData() {
   try {
     const [vendors, invoices, payments, gl, fifo, rules,
            ingredients, recipes, pastryLog, pastrySkus,
-           employees, employeePayRates, employeeStatusHistory, shiftLog] = await Promise.all([
+           employees, employeePayRates, employeeStatusHistory, shiftLog,
+           payrollRuns, payrollRunEmployees, payrollRunLineItems] = await Promise.all([
       sbGet('vendors', {order:'name'}),
       sbGet('invoices', {order:'invoice_date', asc:false}),
       sbGet('payments', {order:'payment_date', asc:false}),
@@ -588,7 +592,10 @@ async function loadAllData() {
       sbGet('employees', {order:'name'}),
       sbGet('employee_pay_rates', {order:'effective_start_date'}),
       sbGet('employee_status_history', {order:'effective_start_date'}),
-      sbGet('shift_log', {order:'work_date', asc:false})
+      sbGet('shift_log', {order:'work_date', asc:false}),
+      sbGet('payroll_runs', {order:'check_date', asc:false}),
+      sbGet('payroll_run_employees'),
+      sbGet('payroll_run_line_items')
     ]);
 
     // Map Supabase column names to app field names
@@ -606,6 +613,9 @@ async function loadAllData() {
     DB.employeePayRates = employeePayRates.map(mapPayRateFromDB);
     DB.employeeStatusHistory = employeeStatusHistory.map(mapStatusFromDB);
     DB.shiftLog = shiftLog.map(mapShiftFromDB);
+    DB.payrollRuns = payrollRuns.map(mapPayrollRunFromDB);
+    DB.payrollRunEmployees = payrollRunEmployees.map(mapPayrollRunEmployeeFromDB);
+    DB.payrollRunLineItems = payrollRunLineItems.map(mapPayrollLineItemFromDB);
 
     // Load revenue data
     await loadRevData();
@@ -750,6 +760,51 @@ function mapShiftToDB(s) {
     id: s.id, employee_id: s.employeeId, work_date: s.workDate,
     clock_in: s.clockIn, clock_out: s.clockOut || null,
     source: s.source || 'manual', notes: s.notes || null
+  };
+}
+
+function mapPayrollRunFromDB(r) {
+  return {
+    id: r.id, runNumber: r.run_number, checkDate: r.check_date,
+    periodStart: r.pay_period_start, periodEnd: r.pay_period_end,
+    frequency: r.pay_frequency, processor: r.processor, runType: r.run_type,
+    totalCashDebited: r.total_cash_debited, notes: r.notes
+  };
+}
+function mapPayrollRunToDB(r) {
+  return {
+    id: r.id, run_number: r.runNumber||null, check_date: r.checkDate,
+    pay_period_start: r.periodStart||null, pay_period_end: r.periodEnd||null,
+    pay_frequency: r.frequency||'biweekly', processor: r.processor||'ADP',
+    run_type: r.runType||'regular',
+    total_cash_debited: (r.totalCashDebited!==''&&r.totalCashDebited!=null) ? r.totalCashDebited : null,
+    notes: r.notes||null
+  };
+}
+function mapPayrollRunEmployeeFromDB(r) {
+  return {
+    id: r.id, payrollRunId: r.payroll_run_id, employeeId: r.employee_id,
+    regularHours: r.regular_hours, regularRate: r.regular_rate, regularAmount: r.regular_amount,
+    tipsOwedAmount: r.tips_owed_amount, grossAmount: r.gross_amount, netPay: r.net_pay
+  };
+}
+function mapPayrollRunEmployeeToDB(r) {
+  return {
+    id: r.id, payroll_run_id: r.payrollRunId, employee_id: r.employeeId,
+    regular_hours: r.regularHours||0, regular_rate: r.regularRate||0, regular_amount: r.regularAmount||0,
+    tips_owed_amount: r.tipsOwedAmount||0, gross_amount: r.grossAmount||0, net_pay: r.netPay||0
+  };
+}
+function mapPayrollLineItemFromDB(r) {
+  return {
+    id: r.id, payrollRunId: r.payroll_run_id, employeeId: r.employee_id,
+    category: r.category, code: r.code, eeOrEr: r.ee_or_er, amount: r.amount
+  };
+}
+function mapPayrollLineItemToDB(r) {
+  return {
+    id: r.id, payroll_run_id: r.payrollRunId, employee_id: r.employeeId||null,
+    category: r.category, code: r.code, ee_or_er: r.eeOrEr||null, amount: r.amount
   };
 }
 
@@ -940,6 +995,7 @@ function renderSidebar(){
       '<button class="nav-item" onclick="showView(\'payroll-shifts\')" id="nav-payroll-shifts"><span class="nav-icon">&#9633;</span> Shift Log</button>' +
       '<button class="nav-item" onclick="showView(\'payroll-timesheets\')" id="nav-payroll-timesheets"><span class="nav-icon">&#9642;</span> Individual Timesheets</button>' +
       '<button class="nav-item" onclick="showView(\'payroll-timesheet-summary\')" id="nav-payroll-timesheet-summary"><span class="nav-icon">&#9776;</span> Timesheet Summary</button>' +
+      '<button class="nav-item" onclick="showView(\'payroll-runs\')" id="nav-payroll-runs"><span class="nav-icon">&#9998;</span> Payroll Runs</button>' +
       '<div class="sidebar-section">Jump To</div>' +
       '<button class="nav-item" onclick="launchModule(\'ap\')"><span class="nav-icon">&#9632;</span> AP Module</button>' +
       '<button class="nav-item" onclick="launchModule(\'revenue\')"><span class="nav-icon">&#9650;</span> Revenue Module</button>' +
@@ -2623,7 +2679,8 @@ function showView(view){
     'payroll-employees':['Employees','Employee profiles \xb7 pay rate history'],
     'payroll-shifts':['Shift Log','Daily clock-in / clock-out entries'],
     'payroll-timesheets':['Individual Timesheets','Pay period review by employee'],
-    'payroll-timesheet-summary':['Timesheet Summary','One line per employee for the selected pay period']
+    'payroll-timesheet-summary':['Timesheet Summary','One line per employee for the selected pay period'],
+    'payroll-runs':['Payroll Runs','Actual payroll as reported by ADP / BBSI']
   };
   const[title,sub]=titles[view]||['--',''];
   $('page-title').textContent=title;$('page-sub').textContent=sub;
@@ -2642,7 +2699,8 @@ function showView(view){
     'payroll-employees':renderPayrollEmployees,
     'payroll-shifts':renderPayrollShifts,
     'payroll-timesheets':renderPayrollTimesheets,
-    'payroll-timesheet-summary':renderPayrollTimesheetSummary
+    'payroll-timesheet-summary':renderPayrollTimesheetSummary,
+    'payroll-runs':renderPayrollRuns
   };
   if(renders[view])renders[view]();
 }
@@ -7484,6 +7542,308 @@ async function renderPayrollTimesheetSummary(){
     </table></div>
   </div>`;
 }
+
+// ═══════════════════════════════════════════════
+// PAYROLL MODULE — ACTUAL PAYROLL RUNS (ADP / BBSI)
+// ═══════════════════════════════════════════════
+var prState = null; // in-progress add/edit state for a payroll run
+
+function newPayrollRunState(){
+  return {
+    runId: null,
+    header: {runNumber:'', checkDate:todayStr(), periodStart:'', periodEnd:'', frequency:'biweekly', processor:'ADP', runType:'regular', totalCashDebited:'', notes:''},
+    employees: [],
+    otherItems: []
+  };
+}
+
+function loadPayrollRunState(runId){
+  const run = DB.payrollRuns.find(r=>r.id===runId);
+  const empLines = DB.payrollRunEmployees.filter(e=>e.payrollRunId===runId);
+  const lineItems = DB.payrollRunLineItems.filter(l=>l.payrollRunId===runId);
+  const employees = empLines.map(e=>({
+    localId:e.id, employeeId:e.employeeId, regHours:e.regularHours, regRate:e.regularRate,
+    regAmount:e.regularAmount, tipsAmount:e.tipsOwedAmount, grossAmount:e.grossAmount, netPay:e.netPay,
+    taxLines: lineItems.filter(l=>l.employeeId===e.employeeId).map(l=>({localId:l.id, category:l.category, code:l.code, eeOrEr:l.eeOrEr, amount:l.amount}))
+  }));
+  const otherItems = lineItems.filter(l=>!l.employeeId).map(l=>({localId:l.id, category:l.category, code:l.code, eeOrEr:l.eeOrEr, amount:l.amount}));
+  return {
+    runId,
+    header: {runNumber:run.runNumber||'', checkDate:run.checkDate||todayStr(), periodStart:run.periodStart||'', periodEnd:run.periodEnd||'', frequency:run.frequency||'biweekly', processor:run.processor||'ADP', runType:run.runType||'regular', totalCashDebited:run.totalCashDebited!=null?run.totalCashDebited:'', notes:run.notes||''},
+    employees, otherItems
+  };
+}
+
+function payrollRunSummaryFor(runId){
+  const empLines = DB.payrollRunEmployees.filter(e=>e.payrollRunId===runId);
+  const lineItems = DB.payrollRunLineItems.filter(l=>l.payrollRunId===runId);
+  const netPayTotal = empLines.reduce((s,e)=>s+(e.netPay||0),0);
+  const eeTotal = lineItems.filter(l=>l.eeOrEr==='EE').reduce((s,l)=>s+(l.amount||0),0);
+  const erTotal = lineItems.filter(l=>l.eeOrEr==='ER').reduce((s,l)=>s+(l.amount||0),0);
+  const otherTotal = lineItems.filter(l=>!l.eeOrEr).reduce((s,l)=>s+(l.amount||0),0);
+  return {employeeCount:empLines.length, netPayTotal, eeTotal, erTotal, otherTotal};
+}
+
+function renderPayrollRuns(){
+  $('topbar-actions').innerHTML = `<button class="btn btn-primary" onclick="startNewPayrollRun()">＋ New Payroll Run</button>`;
+  const runs = [...DB.payrollRuns].sort((a,b)=>(b.checkDate||'').localeCompare(a.checkDate||''));
+  const rows = runs.map(r=>{
+    const sum = payrollRunSummaryFor(r.id);
+    const calcTotal = sum.netPayTotal + sum.eeTotal + sum.erTotal + sum.otherTotal;
+    const enteredTotal = r.totalCashDebited;
+    let varianceHtml = '<span style="color:var(--ink-lo)">—</span>';
+    if(enteredTotal!=null){
+      const diff = Math.round((calcTotal-enteredTotal)*100)/100;
+      varianceHtml = Math.abs(diff)<0.01
+        ? '<span style="color:var(--green)">Matches</span>'
+        : `<span style="color:var(--red)">${fmt(diff)}</span>`;
+    }
+    return `<tr onclick="startEditPayrollRun('${r.id}')" style="cursor:pointer">
+      <td>${fmtDate(r.checkDate)}</td>
+      <td>${r.runNumber||'—'}</td>
+      <td>${r.periodStart&&r.periodEnd?fmtDate(r.periodStart)+' \u2013 '+fmtDate(r.periodEnd):'—'}</td>
+      <td>${r.processor}</td>
+      <td>${sum.employeeCount}</td>
+      <td class="text-right mono">${fmt(sum.netPayTotal)}</td>
+      <td class="text-right mono">${fmt(sum.eeTotal)}</td>
+      <td class="text-right mono">${fmt(sum.erTotal)}</td>
+      <td class="text-right mono">${fmt(calcTotal)}</td>
+      <td class="text-right">${varianceHtml}</td>
+    </tr>`;
+  }).join('');
+  $('content').innerHTML = `<div class="card">
+    <div class="card-header"><span class="card-title">Payroll Runs</span><span style="font-size:12px;color:var(--ink-mid)">${runs.length} run${runs.length!==1?'s':''}</span></div>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Check Date</th><th>Run #</th><th>Pay Period</th><th>Processor</th><th># Emp</th><th class="text-right">Net Pay</th><th class="text-right">EE Withholding</th><th class="text-right">ER Withholding</th><th class="text-right">Calc. Total</th><th class="text-right">vs. Entered Total</th></tr></thead>
+      <tbody>${rows||'<tr><td colspan="10" class="text-center" style="padding:32px;color:var(--ink-lo)">No payroll runs entered yet</td></tr>'}</tbody>
+    </table></div>
+  </div>`;
+}
+
+function startNewPayrollRun(){
+  prState = newPayrollRunState();
+  renderPayrollRunEntry();
+}
+function startEditPayrollRun(runId){
+  prState = loadPayrollRunState(runId);
+  renderPayrollRunEntry();
+}
+
+function prAddEmployee(){
+  prState.employees.push({localId:null, employeeId:'', regHours:'', regRate:'', regAmount:'', tipsAmount:'', grossAmount:'', netPay:'', taxLines:[]});
+  renderPayrollRunEntry();
+}
+function prRemoveEmployee(i){
+  prState.employees.splice(i,1);
+  renderPayrollRunEntry();
+}
+function prAddTaxLine(empIdx){
+  prState.employees[empIdx].taxLines.push({localId:null, category:'tax', code:'', eeOrEr:'EE', amount:''});
+  renderPayrollRunEntry();
+}
+function prRemoveTaxLine(empIdx, lineIdx){
+  prState.employees[empIdx].taxLines.splice(lineIdx,1);
+  renderPayrollRunEntry();
+}
+function prAddOtherItem(){
+  prState.otherItems.push({localId:null, category:'fee', code:'', eeOrEr:'', amount:''});
+  renderPayrollRunEntry();
+}
+function prRemoveOtherItem(i){
+  prState.otherItems.splice(i,1);
+  renderPayrollRunEntry();
+}
+
+function prRecalcEmployee(i){
+  const e = prState.employees[i];
+  const hrs = parseFloat(e.regHours)||0, rate = parseFloat(e.regRate)||0;
+  if(e.regAmount==='' || e.regAmount==null) e.regAmount = ''; // leave user override alone unless blank
+  renderPayrollRunEntry();
+}
+
+function prNum(v){ const n=parseFloat(v); return isNaN(n)?0:n; }
+
+function renderPayrollRunEntry(){
+  const h = prState.header;
+  const empOptions = DB.employees.filter(e=>e.active!==false || prState.employees.some(x=>x.employeeId===e.id)).sort((a,b)=>a.name.localeCompare(b.name));
+
+  let sumNet=0, sumEE=0, sumER=0, sumOther=0;
+
+  const empRowsHtml = prState.employees.map((e,i)=>{
+    sumNet += prNum(e.netPay);
+    const taxRows = e.taxLines.map((t,j)=>{
+      if(t.eeOrEr==='EE') sumEE += prNum(t.amount);
+      if(t.eeOrEr==='ER') sumER += prNum(t.amount);
+      return `<div style="display:grid;grid-template-columns:1fr 1.6fr 0.8fr 1fr 32px;gap:6px;margin:4px 0 4px 24px">
+        <select onchange="prState.employees[${i}].taxLines[${j}].category=this.value">
+          <option value="tax" ${t.category==='tax'?'selected':''}>Tax</option>
+          <option value="deduction" ${t.category==='deduction'?'selected':''}>Deduction</option>
+          <option value="benefit" ${t.category==='benefit'?'selected':''}>Benefit</option>
+          <option value="other" ${t.category==='other'?'selected':''}>Other</option>
+        </select>
+        <input placeholder="e.g. FED FIT, CO SIT" value="${t.code||''}" oninput="prState.employees[${i}].taxLines[${j}].code=this.value">
+        <select onchange="prState.employees[${i}].taxLines[${j}].eeOrEr=this.value;renderPayrollRunEntry()">
+          <option value="EE" ${t.eeOrEr==='EE'?'selected':''}>EE</option>
+          <option value="ER" ${t.eeOrEr==='ER'?'selected':''}>ER</option>
+        </select>
+        <input type="number" step="0.01" placeholder="0.00" value="${t.amount}" oninput="prState.employees[${i}].taxLines[${j}].amount=this.value;renderPayrollRunEntry()">
+        <button class="rm-btn" onclick="prRemoveTaxLine(${i},${j})">×</button>
+      </div>`;
+    }).join('');
+    return `<div style="border:1px solid var(--border-lo);border-radius:var(--r);padding:12px;margin-bottom:10px">
+      <div style="display:grid;grid-template-columns:2fr 0.8fr 0.8fr 1fr 1fr 1fr 1fr 32px;gap:6px;align-items:center">
+        <select onchange="prState.employees[${i}].employeeId=this.value">
+          <option value="">Select employee…</option>
+          ${empOptions.map(emp=>`<option value="${emp.id}" ${e.employeeId===emp.id?'selected':''}>${emp.name}</option>`).join('')}
+        </select>
+        <input type="number" step="0.01" placeholder="Hrs" value="${e.regHours}" oninput="prState.employees[${i}].regHours=this.value">
+        <input type="number" step="0.0001" placeholder="Rate" value="${e.regRate}" oninput="prState.employees[${i}].regRate=this.value">
+        <input type="number" step="0.01" placeholder="Regular $" value="${e.regAmount}" oninput="prState.employees[${i}].regAmount=this.value">
+        <input type="number" step="0.01" placeholder="Tips $" value="${e.tipsAmount}" oninput="prState.employees[${i}].tipsAmount=this.value">
+        <input type="number" step="0.01" placeholder="Gross $" value="${e.grossAmount}" oninput="prState.employees[${i}].grossAmount=this.value">
+        <input type="number" step="0.01" placeholder="Net Pay $" value="${e.netPay}" oninput="prState.employees[${i}].netPay=this.value;renderPayrollRunEntry()">
+        <button class="rm-btn" onclick="prRemoveEmployee(${i})">×</button>
+      </div>
+      <div style="font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--ink-lo);margin:8px 0 2px 24px">Taxes / Deductions</div>
+      ${taxRows}
+      <button class="btn btn-ghost btn-sm" style="margin-left:24px;margin-top:4px" onclick="prAddTaxLine(${i})">＋ Add tax/deduction line</button>
+    </div>`;
+  }).join('');
+
+  const otherRowsHtml = prState.otherItems.map((o,i)=>{
+    if(o.eeOrEr==='EE') sumEE += prNum(o.amount);
+    else if(o.eeOrEr==='ER') sumER += prNum(o.amount);
+    else sumOther += prNum(o.amount);
+    return `<div style="display:grid;grid-template-columns:1fr 1.6fr 0.8fr 1fr 32px;gap:6px;margin-bottom:6px">
+      <select onchange="prState.otherItems[${i}].category=this.value">
+        <option value="fee" ${o.category==='fee'?'selected':''}>Fee</option>
+        <option value="tax" ${o.category==='tax'?'selected':''}>Tax</option>
+        <option value="benefit" ${o.category==='benefit'?'selected':''}>Benefit</option>
+        <option value="other" ${o.category==='other'?'selected':''}>Other</option>
+      </select>
+      <input placeholder="e.g. Pay-by-Pay Insurance" value="${o.code||''}" oninput="prState.otherItems[${i}].code=this.value">
+      <select onchange="prState.otherItems[${i}].eeOrEr=this.value;renderPayrollRunEntry()">
+        <option value="" ${!o.eeOrEr?'selected':''}>—</option>
+        <option value="EE" ${o.eeOrEr==='EE'?'selected':''}>EE</option>
+        <option value="ER" ${o.eeOrEr==='ER'?'selected':''}>ER</option>
+      </select>
+      <input type="number" step="0.01" placeholder="0.00" value="${o.amount}" oninput="prState.otherItems[${i}].amount=this.value;renderPayrollRunEntry()">
+      <button class="rm-btn" onclick="prRemoveOtherItem(${i})">×</button>
+    </div>`;
+  }).join('');
+
+  const calcTotal = sumNet + sumEE + sumER + sumOther;
+  const enteredTotal = prNum(h.totalCashDebited);
+  const variance = enteredTotal ? Math.round((calcTotal-enteredTotal)*100)/100 : null;
+
+  $('topbar-actions').innerHTML = `<button class="btn btn-ghost" onclick="renderPayrollRuns()">\u2190 Back to Payroll Runs</button>`;
+  $('content').innerHTML = `<div class="card">
+    <div class="card-header"><span class="card-title">${prState.runId?'Edit Payroll Run':'New Payroll Run'}</span></div>
+    <div class="card-body">
+      <div class="form-grid">
+        <div class="form-group"><label>Run Number</label><input value="${h.runNumber}" oninput="prState.header.runNumber=this.value"></div>
+        <div class="form-group"><label>Check Date *</label><input type="date" value="${h.checkDate}" onchange="prState.header.checkDate=this.value"></div>
+        <div class="form-group"><label>Pay Period Start</label><input type="date" value="${h.periodStart}" onchange="prState.header.periodStart=this.value"><span class="form-hint">Actual worked dates, per the Payroll Details report — not the stub's printed header</span></div>
+        <div class="form-group"><label>Pay Period End</label><input type="date" value="${h.periodEnd}" onchange="prState.header.periodEnd=this.value"></div>
+        <div class="form-group"><label>Processor</label><select onchange="prState.header.processor=this.value">
+          <option value="ADP" ${h.processor==='ADP'?'selected':''}>ADP</option>
+          <option value="BBSI" ${h.processor==='BBSI'?'selected':''}>BBSI</option>
+        </select></div>
+        <div class="form-group"><label>Run Type</label><select onchange="prState.header.runType=this.value">
+          <option value="regular" ${h.runType==='regular'?'selected':''}>Regular</option>
+          <option value="off_cycle_termination" ${h.runType==='off_cycle_termination'?'selected':''}>Off-Cycle: Termination</option>
+          <option value="off_cycle_correction" ${h.runType==='off_cycle_correction'?'selected':''}>Off-Cycle: Correction</option>
+        </select></div>
+        <div class="form-group"><label>Total Cash Debited</label><input type="number" step="0.01" value="${h.totalCashDebited}" oninput="prState.header.totalCashDebited=this.value;renderPayrollRunEntry()"><span class="form-hint">From the processor's "Total Cash Required" summary — for cross-check only</span></div>
+        <div class="form-group span-2"><label>Notes</label><input value="${h.notes}" oninput="prState.header.notes=this.value"></div>
+      </div>
+
+      <div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--border-lo)">
+        <div style="font-size:12px;font-weight:600;color:var(--ink-mid);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">Employees</div>
+        ${empRowsHtml}
+        <button class="btn btn-ghost btn-sm" onclick="prAddEmployee()">＋ Add employee</button>
+      </div>
+
+      <div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--border-lo)">
+        <div style="font-size:12px;font-weight:600;color:var(--ink-mid);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">Other Items (run-level, not tied to an employee — e.g. Pay-by-Pay Insurance)</div>
+        ${otherRowsHtml}
+        <button class="btn btn-ghost btn-sm" onclick="prAddOtherItem()">＋ Add item</button>
+      </div>
+
+      <div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--border-lo);display:flex;justify-content:space-between;align-items:flex-start">
+        <div style="font-size:13px;color:var(--ink-mid);line-height:1.8">
+          Net Pay total: <b class="mono">${fmt(sumNet)}</b><br>
+          EE Withholding total: <b class="mono">${fmt(sumEE)}</b><br>
+          ER Withholding total: <b class="mono">${fmt(sumER)}</b><br>
+          Other total: <b class="mono">${fmt(sumOther)}</b><br>
+          <b>Calculated Grand Total: <span class="mono">${fmt(calcTotal)}</span></b>
+          ${variance!==null?`<br>vs. Entered Total Cash Debited: <span class="mono" style="color:${Math.abs(variance)<0.01?'var(--green)':'var(--red)'}">${Math.abs(variance)<0.01?'Matches':fmt(variance)+' difference'}</span>`:''}
+        </div>
+        <div>
+          <span id="pr-save-err" style="color:var(--red);font-size:12px;margin-right:10px"></span>
+          <button class="btn btn-primary" onclick="savePayrollRun()">Save Payroll Run</button>
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
+async function savePayrollRun(){
+  const errEl = $('pr-save-err'); errEl.textContent='';
+  const h = prState.header;
+  if(!h.checkDate){errEl.textContent='Check date is required.';return}
+  for(const e of prState.employees){
+    if(!e.employeeId){errEl.textContent='Every employee row needs an employee selected.';return}
+  }
+  showLoadingOverlay('Saving payroll run...');
+  const runId = prState.runId || nextSeq('PYRUN');
+  const runRow = mapPayrollRunToDB({...h, id:runId});
+  const okRun = await sbUpsert('payroll_runs', runRow);
+  if(!okRun){ hideLoadingOverlay(); errEl.textContent='Failed to save run header.'; return; }
+
+  // Replace-on-save for child rows: delete everything under this run, then
+  // reinsert current state -- simplest way to keep employee lines and
+  // itemized tax lines in sync without diffing add/remove/edit separately.
+  const existingEmpLines = DB.payrollRunEmployees.filter(e=>e.payrollRunId===runId);
+  const existingLineItems = DB.payrollRunLineItems.filter(l=>l.payrollRunId===runId);
+  for(const e of existingEmpLines) await sbDelete('payroll_run_employees', e.id);
+  for(const l of existingLineItems) await sbDelete('payroll_run_line_items', l.id);
+  DB.payrollRunEmployees = DB.payrollRunEmployees.filter(e=>e.payrollRunId!==runId);
+  DB.payrollRunLineItems = DB.payrollRunLineItems.filter(l=>l.payrollRunId!==runId);
+
+  for(const e of prState.employees){
+    const empLineId = nextSeq('PRE');
+    const empRow = {
+      id:empLineId, payrollRunId:runId, employeeId:e.employeeId,
+      regularHours:prNum(e.regHours), regularRate:prNum(e.regRate), regularAmount:prNum(e.regAmount),
+      tipsOwedAmount:prNum(e.tipsAmount), grossAmount:prNum(e.grossAmount), netPay:prNum(e.netPay)
+    };
+    await sbUpsert('payroll_run_employees', mapPayrollRunEmployeeToDB(empRow));
+    DB.payrollRunEmployees.push(empRow);
+    for(const t of e.taxLines){
+      if(!t.code && !prNum(t.amount)) continue; // skip fully-blank rows
+      const lineRow = {id:nextSeq('PRLI'), payrollRunId:runId, employeeId:e.employeeId, category:t.category||'tax', code:t.code||'', eeOrEr:t.eeOrEr||null, amount:prNum(t.amount)};
+      await sbUpsert('payroll_run_line_items', mapPayrollLineItemToDB(lineRow));
+      DB.payrollRunLineItems.push(lineRow);
+    }
+  }
+  for(const o of prState.otherItems){
+    if(!o.code && !prNum(o.amount)) continue;
+    const lineRow = {id:nextSeq('PRLI'), payrollRunId:runId, employeeId:null, category:o.category||'other', code:o.code||'', eeOrEr:o.eeOrEr||null, amount:prNum(o.amount)};
+    await sbUpsert('payroll_run_line_items', mapPayrollLineItemToDB(lineRow));
+    DB.payrollRunLineItems.push(lineRow);
+  }
+
+  DB.payrollRuns = DB.payrollRuns.filter(r=>r.id!==runId);
+  DB.payrollRuns.push(mapPayrollRunFromDB(mapPayrollRunToDB({...h, id:runId})));
+
+  hideLoadingOverlay();
+  showToast('Payroll run saved.');
+  prState = null;
+  renderPayrollRuns();
+}
+
+
 
 function openPayRateModal(employeeId){
   const current = currentPayRate(employeeId);
