@@ -7654,12 +7654,15 @@ function prRemoveOtherItem(i){
   renderPayrollRunEntry();
 }
 
-// Employee's pay rate is looked up, not typed -- avoids keying errors and
-// always reflects the effective-dated rate as of the run's pay period.
+// Rate is derived from what's actually being entered (Regular $ / Hours),
+// not looked up from the employee profile -- this matches the "Rate" column
+// on the ADP report itself (which is Amount/Hours for that check), and
+// catches a transcription error in either Regular $ or Hours immediately
+// rather than silently trusting the profile's stored rate.
 function prEmployeeRate(e){
-  if(!e.employeeId) return null;
-  const asOf = prState.header.periodEnd || prState.header.checkDate || todayStr();
-  return payRateAsOf(e.employeeId, asOf);
+  const hours = prNum(e.regHours);
+  if(hours<=0) return null;
+  return {payRate: prNum(e.regAmount)/hours, payRateType:'hourly'};
 }
 function prEmployeeGross(e){
   return prNum(e.regAmount) + prNum(e.tipsAmount) + prNum(e.peerspaceAmount);
@@ -7670,7 +7673,9 @@ function prEmployeeNet(e){
 }
 function prUpdateEmployeeRow(i){
   const e = prState.employees[i];
-  const gEl = $('pr-emp-gross-'+i), nEl = $('pr-emp-net-'+i);
+  const rate = prEmployeeRate(e);
+  const rEl = $('pr-emp-rate-'+i), gEl = $('pr-emp-gross-'+i), nEl = $('pr-emp-net-'+i);
+  if(rEl) rEl.textContent = rate ? fmt(rate.payRate)+'/hr' : '—';
   if(gEl) gEl.textContent = fmt(prEmployeeGross(e));
   if(nEl) nEl.textContent = fmt(prEmployeeNet(e));
   prUpdateSummary();
@@ -7779,8 +7784,8 @@ function renderPayrollRunEntry(){
           <option value="">Select employee…</option>
           ${empOptions.map(emp=>`<option value="${emp.id}" ${e.employeeId===emp.id?'selected':''}>${emp.name}</option>`).join('')}
         </select>
-        <input type="number" step="0.01" value="${e.regHours}" oninput="prState.employees[${i}].regHours=this.value">
-        <div class="mono" style="font-size:13px;color:var(--ink-mid)">${rateStr}</div>
+        <input type="number" step="0.01" value="${e.regHours}" oninput="prState.employees[${i}].regHours=this.value;prUpdateEmployeeRow(${i})">
+        <div id="pr-emp-rate-${i}" class="mono" style="font-size:13px;color:var(--ink-mid)">${rateStr}</div>
         <input type="number" step="0.01" value="${e.regAmount}" oninput="prState.employees[${i}].regAmount=this.value;prUpdateEmployeeRow(${i})">
         <input type="number" step="0.01" value="${e.tipsAmount}" oninput="prState.employees[${i}].tipsAmount=this.value;prUpdateEmployeeRow(${i})">
         <input type="number" step="0.01" value="${e.peerspaceAmount}" oninput="prState.employees[${i}].peerspaceAmount=this.value;prUpdateEmployeeRow(${i})">
