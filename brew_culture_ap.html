@@ -7664,6 +7664,33 @@ function prEmployeeRate(e){
   if(hours<=0) return null;
   return {payRate: prNum(e.regAmount)/hours, payRateType:'hourly'};
 }
+// The rate on file in the employee's profile, as of this run's pay period --
+// used only as a comparison check against the calculated rate, never as the
+// displayed value itself.
+function prProfileRate(e){
+  if(!e.employeeId) return null;
+  const asOf = prState.header.periodEnd || prState.header.checkDate || todayStr();
+  return payRateAsOf(e.employeeId, asOf);
+}
+// Returns the profile rate if it disagrees with the calculated rate by more
+// than a penny (rounding slack), else null.
+function prRateMismatch(e){
+  const calc = prEmployeeRate(e);
+  if(!calc) return null;
+  const profile = prProfileRate(e);
+  if(!profile || profile.payRateType!=='hourly') return null;
+  return Math.abs(calc.payRate - profile.payRate) > 0.005 ? profile : null;
+}
+function prRateCellHtml(e){
+  const rate = prEmployeeRate(e);
+  if(!rate) return '<span class="mono" style="color:var(--ink-mid)">—</span>';
+  const mismatch = prRateMismatch(e);
+  if(mismatch){
+    return `<span class="mono" style="color:var(--red);font-weight:600">${fmt(rate.payRate)}/hr</span>`
+      + `<div style="font-size:10px;color:var(--red);line-height:1.3">Pay rate incorrect — profile rate is ${fmt(mismatch.payRate)}/hr</div>`;
+  }
+  return `<span class="mono" style="color:var(--ink-mid)">${fmt(rate.payRate)}/hr</span>`;
+}
 function prEmployeeGross(e){
   return prNum(e.regAmount) + prNum(e.tipsAmount) + prNum(e.peerspaceAmount);
 }
@@ -7673,9 +7700,8 @@ function prEmployeeNet(e){
 }
 function prUpdateEmployeeRow(i){
   const e = prState.employees[i];
-  const rate = prEmployeeRate(e);
   const rEl = $('pr-emp-rate-'+i), gEl = $('pr-emp-gross-'+i), nEl = $('pr-emp-net-'+i);
-  if(rEl) rEl.textContent = rate ? fmt(rate.payRate)+'/hr' : '—';
+  if(rEl) rEl.innerHTML = prRateCellHtml(e);
   if(gEl) gEl.textContent = fmt(prEmployeeGross(e));
   if(nEl) nEl.textContent = fmt(prEmployeeNet(e));
   prUpdateSummary();
@@ -7761,8 +7787,6 @@ function renderPayrollRunEntry(){
   </div>`;
 
   const empRowsHtml = prState.employees.map((e,i)=>{
-    const rate = prEmployeeRate(e);
-    const rateStr = rate ? (rate.payRateType==='salary'?fmt(rate.payRate)+'/yr':fmt(rate.payRate)+'/hr') : '—';
     const taxRows = e.taxLines.map((t,j)=>`<div style="display:grid;grid-template-columns:${taxGridCols};gap:6px;margin:4px 0 4px 24px">
         <select onchange="prState.employees[${i}].taxLines[${j}].category=this.value">
           <option value="tax" ${t.category==='tax'?'selected':''}>Tax</option>
@@ -7785,7 +7809,7 @@ function renderPayrollRunEntry(){
           ${empOptions.map(emp=>`<option value="${emp.id}" ${e.employeeId===emp.id?'selected':''}>${emp.name}</option>`).join('')}
         </select>
         <input type="number" step="0.01" value="${e.regHours}" oninput="prState.employees[${i}].regHours=this.value;prUpdateEmployeeRow(${i})">
-        <div id="pr-emp-rate-${i}" class="mono" style="font-size:13px;color:var(--ink-mid)">${rateStr}</div>
+        <div id="pr-emp-rate-${i}" style="font-size:13px">${prRateCellHtml(e)}</div>
         <input type="number" step="0.01" value="${e.regAmount}" oninput="prState.employees[${i}].regAmount=this.value;prUpdateEmployeeRow(${i})">
         <input type="number" step="0.01" value="${e.tipsAmount}" oninput="prState.employees[${i}].tipsAmount=this.value;prUpdateEmployeeRow(${i})">
         <input type="number" step="0.01" value="${e.peerspaceAmount}" oninput="prState.employees[${i}].peerspaceAmount=this.value;prUpdateEmployeeRow(${i})">
