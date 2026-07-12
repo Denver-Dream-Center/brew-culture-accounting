@@ -7584,8 +7584,150 @@ function payrollRunSummaryFor(runId){
   return {employeeCount:empLines.length, netPayTotal, eeTotal, erTotal, otherTotal};
 }
 
+// ── Import from ADP "Payroll Detail" Excel export ──
+// The export is one row per employee with a variable, named column set
+// (whatever tax/deduction/liability codes actually applied that run), plus
+// repeating "Earning N" blocks (Regular / Tips Owed / Peerspace, each with
+// its own Hours/Rate/Amount) and repeating "Payment N" blocks (for a split
+// check like a manual check + direct deposit in the same run). Header row
+// isn't row 1 -- there are report title/filter lines above it -- so we
+// locate it by scanning for "Employee Name".
+function matchEmployeeByAdpName(adpName){
+  if(!adpName) return null;
+  const parts = adpName.split(',');
+  if(parts.length<2) return null;
+  const last = parts[0].trim().toLowerCase();
+  const firstPart = parts[1].trim().split(/\s+/)[0].toLowerCase(); // drop middle initial
+  const match = DB.employees.find(e=>{
+    const nameParts = e.name.trim().split(/\s+/);
+    const efirst = nameParts[0].toLowerCase();
+    const elast = nameParts[nameParts.length-1].toLowerCase();
+    return efirst===firstPart && elast===last;
+  });
+  return match ? match.id : null;
+}
+
+function parsePayrollDetailXLSX(ab){
+  const wb = XLSX.read(ab, {type:'array', cellDates:false});
+  const ws = wb.Sheets[wb.SheetNames.find(n=>/payroll detail/i.test(n)) || wb.SheetNames[0]];
+  const rows = XLSX.utils.sheet_to_json(ws, {header:1, raw:true, defval:''});
+
+  const headerRowIdx = rows.findIndex(r=>r[0]==='Employee Name');
+  if(headerRowIdx<0) throw new Error('Could not find the "Employee Name" header row -- is this a Payroll Detail export?');
+  const header = rows[headerRowIdx];
+
+  const nameIdx = header.indexOf('Employee Name');
+  const totalHoursIdx = header.indexOf('Total Hours');
+  const totalEarningsIdx = header.indexOf('Total Earnings');
+  const totalTaxesIdx = header.indexOf('Total Taxes');
+  const deductionTotalIdx = header.indexOf('Deduction Total');
+  const netPayIdx = header.indexOf('Net Pay');
+  const totalErLiabIdx = header.indexOf('Total Employer Liability');
+
+  const earningBlocks = [];
+  header.forEach((h,idx)=>{ if(/^Earning\s*\d+/.test(String(h))) earningBlocks.push({nameIdx:idx, hoursIdx:idx+1, rateIdx:idx+2, amountIdx:idx+3}); });
+
+  const taxCols = [];
+  for(let i=totalEarningsIdx+1; i<totalTaxesIdx; i++){ if(header[i] && i!==totalHoursIdx) taxCols.push(i); }
+  const deductionCols = [];
+  for(let i=totalTaxesIdx+1; i<deductionTotalIdx; i++){ if(header[i]) deductionCols.push(i); }
+  const erCols = [];
+  for(let i=netPayIdx+1; i<totalErLiabIdx; i++){ if(header[i]) erCols.push(i); }
+
+  const paymentBlocks = [];
+  header.forEach((h,idx)=>{ if(/^Payment\s*\d+$/.test(String(h))) paymentBlocks.push({methodIdx:idx, dateIdx:idx+1, refIdx:idx+2, amountIdx:idx+3}); });
+
+  const employees = [];
+  const warnings = [];
+  let checkDateGuess = null;
+
+  for(let r=headerRowIdx+1; r<rows.length; r++){
+    const row = rows[r];
+    const name = row[nameIdx];
+    if(!name) continue;
+    if(/^Company Total/.test(name) || /^Pay Frequency Total/.test(name)) break;
+
+    const emp = {employeeId: matchEmployeeByAdpName(name), adpName:name, regHours:'', regAmount:'', tipsAmount:'', peerspaceAmount:'', taxLines:[], reportedNetPay:null, paymentDates:[]};
+    if(!emp.employeeId) warnings.push(`"${name}" did not match any employee profile -- assign manually.`);
+
+    earningBlocks.forEach(b=>{
+      const label = String(row[b.nameIdx]||'').trim().toLowerCase();
+      const hours = row[b.hoursIdx], amount = row[b.amountIdx];
+      if(!label) return;
+      if(label.startsWith('regular')){ emp.regHours = hours!==''?hours:''; emp.regAmount = amount!==''?amount:''; }
+      else if(label.startsWith('tips')){ emp.tipsAmount = amount!==''?amount:''; }
+      else if(label.startsWith('peerspace')){ emp.peerspaceAmount = amount!==''?amount:''; }
+      else if(amount!=='' && amount!=null){ warnings.push(`${name}: unrecognized earning type "${row[b.nameIdx]}" ($${amount}) was not imported.`); }
+    });
+
+    taxCols.forEach(idx=>{
+      const v = row[idx];
+      if(v!=='' && v!=null) emp.taxLines.push({category:'tax', code:String(header[idx]).replace(/\s+/g,' ').trim(), eeOrEr:'EE', amount:v});
+    });
+    deductionCols.forEach(idx=>{
+      const v = row[idx];
+      if(v!=='' && v!=null) emp.taxLines.push({category:'deduction', code:String(header[idx]).replace(/\s+/g,' ').trim(), eeOrEr:'EE', amount:v});
+    });
+    erCols.forEach(idx=>{
+      const v = row[idx];
+      if(v!=='' && v!=null) emp.taxLines.push({category:'tax', code:String(header[idx]).replace(/\s+/g,' ').trim(), eeOrEr:'ER', amount:v});
+    });
+
+    if(netPayIdx>=0 && row[netPayIdx]!=='') emp.reportedNetPay = row[netPayIdx];
+
+    paymentBlocks.forEach(b=>{
+      const dateVal = row[b.dateIdx];
+      if(dateVal){
+        emp.paymentDates.push(String(dateVal));
+        if(!checkDateGuess) checkDateGuess = String(dateVal);
+      }
+    });
+    if(new Set(emp.paymentDates).size>1) warnings.push(`${name}: paid across ${emp.paymentDates.length} different check dates (${emp.paymentDates.join(', ')}) -- this run may need to be split.`);
+
+    employees.push(emp);
+  }
+
+  return {employees, warnings, checkDateGuess};
+}
+
+function handlePayrollImportFile(input){
+  const file = input.files && input.files[0];
+  if(!file) return;
+  const reader = new FileReader();
+  reader.onload = function(e){
+    let parsed;
+    try{
+      parsed = parsePayrollDetailXLSX(e.target.result);
+    } catch(err){
+      showToast('Import failed: '+err.message);
+      return;
+    }
+    prState = newPayrollRunState();
+    if(parsed.checkDateGuess){
+      const m = parsed.checkDateGuess.match(/(\d{2})\/(\d{2})\/(\d{4})/);
+      if(m) prState.header.checkDate = m[3]+'-'+m[1]+'-'+m[2];
+    }
+    prState.employees = parsed.employees.map(e=>({
+      localId:null, employeeId:e.employeeId||'', regHours:e.regHours, regAmount:e.regAmount,
+      tipsAmount:e.tipsAmount, peerspaceAmount:e.peerspaceAmount, taxLines:e.taxLines,
+      reportedNetPay: e.reportedNetPay, _adpName: e.employeeId?null:e.adpName
+    }));
+    renderPayrollRunEntry();
+    const unmatched = parsed.employees.filter(e=>!e.employeeId).length;
+    let msg = `Imported ${parsed.employees.length} employee${parsed.employees.length!==1?'s':''}. Review Rate warnings and Net Pay checks below, confirm Run Number / Pay Period, then save.`;
+    if(unmatched) msg += ` ${unmatched} name${unmatched!==1?'s':''} need manual employee assignment.`;
+    showToast(msg);
+    if(parsed.warnings.length) console.warn('Payroll import warnings:', parsed.warnings);
+  };
+  reader.readAsArrayBuffer(file);
+  input.value = '';
+}
+
+
 function renderPayrollRuns(){
-  $('topbar-actions').innerHTML = `<button class="btn btn-primary" onclick="startNewPayrollRun()">＋ New Payroll Run</button>`;
+  $('topbar-actions').innerHTML = `<button class="btn btn-ghost" onclick="$('pr-import-file').click()">&#8593; Import from ADP Excel</button>
+    <input type="file" id="pr-import-file" accept=".xlsx" style="display:none" onchange="handlePayrollImportFile(this)">
+    <button class="btn btn-primary" onclick="startNewPayrollRun()">＋ New Payroll Run</button>`;
   const runs = [...DB.payrollRuns].sort((a,b)=>(b.checkDate||'').localeCompare(a.checkDate||''));
   const rows = runs.map(r=>{
     const sum = payrollRunSummaryFor(r.id);
@@ -7698,12 +7840,22 @@ function prEmployeeNet(e){
   const eeSum = e.taxLines.filter(t=>t.eeOrEr==='EE').reduce((s,t)=>s+prNum(t.amount),0);
   return prEmployeeGross(e) - eeSum;
 }
+// Cross-check against an imported "Net Pay" figure (from an ADP import),
+// when one exists -- purely informational, never persisted.
+function prNetCellHtml(e){
+  const net = prEmployeeNet(e);
+  const netStr = `<span class="mono" style="font-weight:600">${fmt(net)}</span>`;
+  if(e.reportedNetPay==null || e.reportedNetPay==='') return netStr;
+  const diff = Math.abs(net - prNum(e.reportedNetPay));
+  if(diff<=0.01) return netStr;
+  return netStr + `<div style="font-size:10px;color:var(--red);line-height:1.3">Imported Net Pay was ${fmt(prNum(e.reportedNetPay))} -- check tax/deduction lines</div>`;
+}
 function prUpdateEmployeeRow(i){
   const e = prState.employees[i];
   const rEl = $('pr-emp-rate-'+i), gEl = $('pr-emp-gross-'+i), nEl = $('pr-emp-net-'+i);
   if(rEl) rEl.innerHTML = prRateCellHtml(e);
   if(gEl) gEl.textContent = fmt(prEmployeeGross(e));
-  if(nEl) nEl.textContent = fmt(prEmployeeNet(e));
+  if(nEl) nEl.innerHTML = prNetCellHtml(e);
   prUpdateSummary();
 }
 
@@ -7804,17 +7956,20 @@ function renderPayrollRunEntry(){
       </div>`).join('');
     return `<div style="border:1px solid var(--border-lo);border-radius:var(--r);padding:12px;margin-bottom:10px">
       <div style="display:grid;grid-template-columns:${empGridCols};gap:6px;align-items:center">
-        <select onchange="prState.employees[${i}].employeeId=this.value;renderPayrollRunEntry()">
-          <option value="">Select employee…</option>
-          ${empOptions.map(emp=>`<option value="${emp.id}" ${e.employeeId===emp.id?'selected':''}>${emp.name}</option>`).join('')}
-        </select>
+        <div>
+          <select onchange="prState.employees[${i}].employeeId=this.value;renderPayrollRunEntry()">
+            <option value="">Select employee…</option>
+            ${empOptions.map(emp=>`<option value="${emp.id}" ${e.employeeId===emp.id?'selected':''}>${emp.name}</option>`).join('')}
+          </select>
+          ${(!e.employeeId && e._adpName)?`<div style="font-size:10px;color:var(--red)">Imported as "${e._adpName}" -- no match, assign manually</div>`:''}
+        </div>
         <input type="number" step="0.01" value="${e.regHours}" oninput="prState.employees[${i}].regHours=this.value;prUpdateEmployeeRow(${i})">
         <div id="pr-emp-rate-${i}" style="font-size:13px">${prRateCellHtml(e)}</div>
         <input type="number" step="0.01" value="${e.regAmount}" oninput="prState.employees[${i}].regAmount=this.value;prUpdateEmployeeRow(${i})">
         <input type="number" step="0.01" value="${e.tipsAmount}" oninput="prState.employees[${i}].tipsAmount=this.value;prUpdateEmployeeRow(${i})">
         <input type="number" step="0.01" value="${e.peerspaceAmount}" oninput="prState.employees[${i}].peerspaceAmount=this.value;prUpdateEmployeeRow(${i})">
         <div id="pr-emp-gross-${i}" class="mono" style="font-size:13px;font-weight:600">${fmt(prEmployeeGross(e))}</div>
-        <div id="pr-emp-net-${i}" class="mono" style="font-size:13px;font-weight:600">${fmt(prEmployeeNet(e))}</div>
+        <div id="pr-emp-net-${i}" style="font-size:13px">${prNetCellHtml(e)}</div>
         <button class="rm-btn" onclick="prRemoveEmployee(${i})">×</button>
       </div>
       ${taxHeaderHtml}
