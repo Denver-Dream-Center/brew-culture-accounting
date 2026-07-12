@@ -7663,18 +7663,75 @@ function prRecalcEmployee(i){
 
 function prNum(v){ const n=parseFloat(v); return isNaN(n)?0:n; }
 
-function renderPayrollRunEntry(){
-  const h = prState.header;
-  const empOptions = DB.employees.filter(e=>e.active!==false || prState.employees.some(x=>x.employeeId===e.id)).sort((a,b)=>a.name.localeCompare(b.name));
+// Employees eligible for this run's dropdown: active during the pay period
+// (hire/term window, same convention as Shift Log), plus anyone already
+// selected in this run even if they fall outside that window.
+function employeesActiveInRange(startDate, endDate){
+  const s = startDate, e = endDate || startDate;
+  const filtered = DB.employees.filter(emp=>{
+    if(!s) return true; // no period entered yet -- can't filter, show everyone
+    if(emp.hireDate && emp.hireDate>e) return false;
+    if(emp.termDate && emp.termDate<s) return false;
+    return true;
+  });
+  const usedIds = (prState.employees||[]).map(x=>x.employeeId).filter(Boolean);
+  usedIds.forEach(id=>{
+    if(!filtered.find(x=>x.id===id)){
+      const emp = DB.employees.find(x=>x.id===id);
+      if(emp) filtered.push(emp);
+    }
+  });
+  return filtered.sort((a,b)=>a.name.localeCompare(b.name));
+}
 
+// Pure totals calculation, no HTML -- used both for the initial render and
+// for the lightweight summary-only refresh on every keystroke, so typing in
+// Total Cash Debited (or any amount field) never triggers a full re-render
+// and never steals focus mid-entry.
+function computePayrollRunTotals(){
   let sumNet=0, sumEE=0, sumER=0, sumOther=0;
-
-  const empRowsHtml = prState.employees.map((e,i)=>{
+  prState.employees.forEach(e=>{
     sumNet += prNum(e.netPay);
-    const taxRows = e.taxLines.map((t,j)=>{
+    e.taxLines.forEach(t=>{
       if(t.eeOrEr==='EE') sumEE += prNum(t.amount);
       if(t.eeOrEr==='ER') sumER += prNum(t.amount);
-      return `<div style="display:grid;grid-template-columns:1fr 1.6fr 0.8fr 1fr 32px;gap:6px;margin:4px 0 4px 24px">
+    });
+  });
+  prState.otherItems.forEach(o=>{
+    if(o.eeOrEr==='EE') sumEE += prNum(o.amount);
+    else if(o.eeOrEr==='ER') sumER += prNum(o.amount);
+    else sumOther += prNum(o.amount);
+  });
+  const calcTotal = sumNet+sumEE+sumER+sumOther;
+  const h = prState.header;
+  const hasEntered = h.totalCashDebited!=='' && h.totalCashDebited!=null;
+  const enteredTotal = prNum(h.totalCashDebited);
+  const variance = hasEntered ? Math.round((calcTotal-enteredTotal)*100)/100 : null;
+  return {sumNet, sumEE, sumER, sumOther, calcTotal, variance};
+}
+
+function prSummaryHtml(){
+  const t = computePayrollRunTotals();
+  return `
+    Net Pay total: <b class="mono">${fmt(t.sumNet)}</b><br>
+    EE Withholding total: <b class="mono">${fmt(t.sumEE)}</b><br>
+    ER Withholding total: <b class="mono">${fmt(t.sumER)}</b><br>
+    Other total: <b class="mono">${fmt(t.sumOther)}</b><br>
+    <b>Calculated Grand Total: <span class="mono">${fmt(t.calcTotal)}</span></b>
+    ${t.variance!==null?`<br>vs. Entered Total Cash Debited: <span class="mono" style="color:${Math.abs(t.variance)<0.01?'var(--green)':'var(--red)'}">${Math.abs(t.variance)<0.01?'Matches':fmt(t.variance)+' difference'}</span>`:''}
+  `;
+}
+function prUpdateSummary(){
+  const el = $('pr-summary');
+  if(el) el.innerHTML = prSummaryHtml();
+}
+
+function renderPayrollRunEntry(){
+  const h = prState.header;
+  const empOptions = employeesActiveInRange(h.periodStart, h.periodEnd);
+
+  const empRowsHtml = prState.employees.map((e,i)=>{
+    const taxRows = e.taxLines.map((t,j)=>`<div style="display:grid;grid-template-columns:1fr 1.6fr 0.8fr 1fr 32px;gap:6px;margin:4px 0 4px 24px">
         <select onchange="prState.employees[${i}].taxLines[${j}].category=this.value">
           <option value="tax" ${t.category==='tax'?'selected':''}>Tax</option>
           <option value="deduction" ${t.category==='deduction'?'selected':''}>Deduction</option>
@@ -7682,14 +7739,13 @@ function renderPayrollRunEntry(){
           <option value="other" ${t.category==='other'?'selected':''}>Other</option>
         </select>
         <input placeholder="e.g. FED FIT, CO SIT" value="${t.code||''}" oninput="prState.employees[${i}].taxLines[${j}].code=this.value">
-        <select onchange="prState.employees[${i}].taxLines[${j}].eeOrEr=this.value;renderPayrollRunEntry()">
+        <select onchange="prState.employees[${i}].taxLines[${j}].eeOrEr=this.value;prUpdateSummary()">
           <option value="EE" ${t.eeOrEr==='EE'?'selected':''}>EE</option>
           <option value="ER" ${t.eeOrEr==='ER'?'selected':''}>ER</option>
         </select>
-        <input type="number" step="0.01" placeholder="0.00" value="${t.amount}" oninput="prState.employees[${i}].taxLines[${j}].amount=this.value;renderPayrollRunEntry()">
+        <input type="number" step="0.01" placeholder="0.00" value="${t.amount}" oninput="prState.employees[${i}].taxLines[${j}].amount=this.value;prUpdateSummary()">
         <button class="rm-btn" onclick="prRemoveTaxLine(${i},${j})">×</button>
-      </div>`;
-    }).join('');
+      </div>`).join('');
     return `<div style="border:1px solid var(--border-lo);border-radius:var(--r);padding:12px;margin-bottom:10px">
       <div style="display:grid;grid-template-columns:2fr 0.8fr 0.8fr 1fr 1fr 1fr 1fr 32px;gap:6px;align-items:center">
         <select onchange="prState.employees[${i}].employeeId=this.value">
@@ -7701,7 +7757,7 @@ function renderPayrollRunEntry(){
         <input type="number" step="0.01" placeholder="Regular $" value="${e.regAmount}" oninput="prState.employees[${i}].regAmount=this.value">
         <input type="number" step="0.01" placeholder="Tips $" value="${e.tipsAmount}" oninput="prState.employees[${i}].tipsAmount=this.value">
         <input type="number" step="0.01" placeholder="Gross $" value="${e.grossAmount}" oninput="prState.employees[${i}].grossAmount=this.value">
-        <input type="number" step="0.01" placeholder="Net Pay $" value="${e.netPay}" oninput="prState.employees[${i}].netPay=this.value;renderPayrollRunEntry()">
+        <input type="number" step="0.01" placeholder="Net Pay $" value="${e.netPay}" oninput="prState.employees[${i}].netPay=this.value;prUpdateSummary()">
         <button class="rm-btn" onclick="prRemoveEmployee(${i})">×</button>
       </div>
       <div style="font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--ink-lo);margin:8px 0 2px 24px">Taxes / Deductions</div>
@@ -7710,11 +7766,7 @@ function renderPayrollRunEntry(){
     </div>`;
   }).join('');
 
-  const otherRowsHtml = prState.otherItems.map((o,i)=>{
-    if(o.eeOrEr==='EE') sumEE += prNum(o.amount);
-    else if(o.eeOrEr==='ER') sumER += prNum(o.amount);
-    else sumOther += prNum(o.amount);
-    return `<div style="display:grid;grid-template-columns:1fr 1.6fr 0.8fr 1fr 32px;gap:6px;margin-bottom:6px">
+  const otherRowsHtml = prState.otherItems.map((o,i)=>`<div style="display:grid;grid-template-columns:1fr 1.6fr 0.8fr 1fr 32px;gap:6px;margin-bottom:6px">
       <select onchange="prState.otherItems[${i}].category=this.value">
         <option value="fee" ${o.category==='fee'?'selected':''}>Fee</option>
         <option value="tax" ${o.category==='tax'?'selected':''}>Tax</option>
@@ -7722,19 +7774,14 @@ function renderPayrollRunEntry(){
         <option value="other" ${o.category==='other'?'selected':''}>Other</option>
       </select>
       <input placeholder="e.g. Pay-by-Pay Insurance" value="${o.code||''}" oninput="prState.otherItems[${i}].code=this.value">
-      <select onchange="prState.otherItems[${i}].eeOrEr=this.value;renderPayrollRunEntry()">
+      <select onchange="prState.otherItems[${i}].eeOrEr=this.value;prUpdateSummary()">
         <option value="" ${!o.eeOrEr?'selected':''}>—</option>
         <option value="EE" ${o.eeOrEr==='EE'?'selected':''}>EE</option>
         <option value="ER" ${o.eeOrEr==='ER'?'selected':''}>ER</option>
       </select>
-      <input type="number" step="0.01" placeholder="0.00" value="${o.amount}" oninput="prState.otherItems[${i}].amount=this.value;renderPayrollRunEntry()">
+      <input type="number" step="0.01" placeholder="0.00" value="${o.amount}" oninput="prState.otherItems[${i}].amount=this.value;prUpdateSummary()">
       <button class="rm-btn" onclick="prRemoveOtherItem(${i})">×</button>
-    </div>`;
-  }).join('');
-
-  const calcTotal = sumNet + sumEE + sumER + sumOther;
-  const enteredTotal = prNum(h.totalCashDebited);
-  const variance = enteredTotal ? Math.round((calcTotal-enteredTotal)*100)/100 : null;
+    </div>`).join('');
 
   $('topbar-actions').innerHTML = `<button class="btn btn-ghost" onclick="renderPayrollRuns()">\u2190 Back to Payroll Runs</button>`;
   $('content').innerHTML = `<div class="card">
@@ -7743,8 +7790,8 @@ function renderPayrollRunEntry(){
       <div class="form-grid">
         <div class="form-group"><label>Run Number</label><input value="${h.runNumber}" oninput="prState.header.runNumber=this.value"></div>
         <div class="form-group"><label>Check Date *</label><input type="date" value="${h.checkDate}" onchange="prState.header.checkDate=this.value"></div>
-        <div class="form-group"><label>Pay Period Start</label><input type="date" value="${h.periodStart}" onchange="prState.header.periodStart=this.value"><span class="form-hint">Actual worked dates, per the Payroll Details report — not the stub's printed header</span></div>
-        <div class="form-group"><label>Pay Period End</label><input type="date" value="${h.periodEnd}" onchange="prState.header.periodEnd=this.value"></div>
+        <div class="form-group"><label>Pay Period Start</label><input type="date" value="${h.periodStart}" onchange="prState.header.periodStart=this.value;renderPayrollRunEntry()"><span class="form-hint">Actual worked dates, per the Payroll Details report — not the stub's printed header. Also filters the employee list below.</span></div>
+        <div class="form-group"><label>Pay Period End</label><input type="date" value="${h.periodEnd}" onchange="prState.header.periodEnd=this.value;renderPayrollRunEntry()"></div>
         <div class="form-group"><label>Processor</label><select onchange="prState.header.processor=this.value">
           <option value="ADP" ${h.processor==='ADP'?'selected':''}>ADP</option>
           <option value="BBSI" ${h.processor==='BBSI'?'selected':''}>BBSI</option>
@@ -7754,7 +7801,7 @@ function renderPayrollRunEntry(){
           <option value="off_cycle_termination" ${h.runType==='off_cycle_termination'?'selected':''}>Off-Cycle: Termination</option>
           <option value="off_cycle_correction" ${h.runType==='off_cycle_correction'?'selected':''}>Off-Cycle: Correction</option>
         </select></div>
-        <div class="form-group"><label>Total Cash Debited</label><input type="number" step="0.01" value="${h.totalCashDebited}" oninput="prState.header.totalCashDebited=this.value;renderPayrollRunEntry()"><span class="form-hint">From the processor's "Total Cash Required" summary — for cross-check only</span></div>
+        <div class="form-group"><label>Total Cash Debited</label><input type="number" step="0.01" value="${h.totalCashDebited}" oninput="prState.header.totalCashDebited=this.value;prUpdateSummary()"><span class="form-hint">From the processor's "Total Cash Required" summary — for cross-check only</span></div>
         <div class="form-group span-2"><label>Notes</label><input value="${h.notes}" oninput="prState.header.notes=this.value"></div>
       </div>
 
@@ -7771,14 +7818,7 @@ function renderPayrollRunEntry(){
       </div>
 
       <div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--border-lo);display:flex;justify-content:space-between;align-items:flex-start">
-        <div style="font-size:13px;color:var(--ink-mid);line-height:1.8">
-          Net Pay total: <b class="mono">${fmt(sumNet)}</b><br>
-          EE Withholding total: <b class="mono">${fmt(sumEE)}</b><br>
-          ER Withholding total: <b class="mono">${fmt(sumER)}</b><br>
-          Other total: <b class="mono">${fmt(sumOther)}</b><br>
-          <b>Calculated Grand Total: <span class="mono">${fmt(calcTotal)}</span></b>
-          ${variance!==null?`<br>vs. Entered Total Cash Debited: <span class="mono" style="color:${Math.abs(variance)<0.01?'var(--green)':'var(--red)'}">${Math.abs(variance)<0.01?'Matches':fmt(variance)+' difference'}</span>`:''}
-        </div>
+        <div id="pr-summary" style="font-size:13px;color:var(--ink-mid);line-height:1.8">${prSummaryHtml()}</div>
         <div>
           <span id="pr-save-err" style="color:var(--red);font-size:12px;margin-right:10px"></span>
           <button class="btn btn-primary" onclick="savePayrollRun()">Save Payroll Run</button>
