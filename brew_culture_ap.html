@@ -5168,6 +5168,8 @@ function renderBankLedger(){
       actionBtn = '<button class="btn btn-ghost btn-sm" style="color:var(--amber)" onclick="openAPMatchModal(\'' + r.id + '\')">Match</button>';
     } else if(status === 'open' && mType === 'revenue'){
       actionBtn = '<button class="btn btn-ghost btn-sm" style="color:var(--amber)" onclick="openRevMatchModal(\'' + r.id + '\')">Match</button>';
+    } else if(status === 'open' && mType === 'payroll_run'){
+      actionBtn = '<button class="btn btn-ghost btn-sm" style="color:var(--amber)" onclick="openPayrollMatchModal(\'' + r.id + '\')">Match</button>';
     } else if(status === 'open' && mType === 'direct'){
       actionBtn = '<button class="btn btn-ghost btn-sm" style="color:var(--amber)" onclick="openDirectPostModal(\'' + r.id + '\')">Code to GL</button>';
     } else if(status === 'matched' || status === 'direct'){
@@ -5490,12 +5492,20 @@ var BL_DIRECT_ACCT_MAP = {
 // historical 'Pre Transfer' marker, which isn't a postable transaction type)
 var BL_DIRECT_ELIGIBLE = Object.keys(BL_DIRECT_ACCT_MAP);
 
+// Account values that route to payroll-run Net Pay matching (checked
+// before the generic "direct" path, so 'Payroll' bank rows now link to a
+// specific payroll run's Net Pay rather than a plain expense posting).
+// Taxes and 401k Contribution still go through direct posting for now --
+// only the Net Pay bucket is wired up to payroll_runs at this point.
+var BL_PAYROLL_NETPAY_ACCOUNTS = ['Payroll'];
+
 function blMatchType(row){
   // Era does NOT gate matching. Pre-transfer (Troy) bank transactions can
   // be intentionally matched to Troy-era invoices loaded into AP — era is
   // derived FROM the match, never a precondition for it.
   if(BL_AP_ACCOUNTS.indexOf(row.account) !== -1) return 'ap';
   if(BL_REV_ACCOUNTS.indexOf(row.account) !== -1) return 'revenue';
+  if(BL_PAYROLL_NETPAY_ACCOUNTS.indexOf(row.account) !== -1) return 'payroll_run';
   if(BL_DIRECT_ELIGIBLE.indexOf(row.account) !== -1) return 'direct';
   return null;
 }
@@ -6123,11 +6133,173 @@ async function postRevMatchTransferGL(row, s, matchId){
   return await saveGLToSB(je);
 }
 
+// ── PAYROLL NET PAY MATCHING ─────────────────────────────────────────────
+// Same many-to-many shape as AP/Clover matching: one bank row can cover
+// several payroll runs, and one payroll run's Net Pay can be split across
+// several bank rows (e.g. the main ACH batch plus a separate manual-check
+// correction for one employee's under-paid tips). "Remaining balance" per
+// run works exactly like an invoice balance after a partial payment.
+function payrollRunNetPayTotal(runId){
+  return DB.payrollRunEmployees.filter(function(e){ return e.payrollRunId===runId; })
+    .reduce(function(s,e){ return s+(e.netPay||0); }, 0);
+}
+function payrollRunMatchedNetPay(runId){
+  return REV.bankMatches.filter(function(m){ return m.match_kind==='payroll_run' && m.payroll_run_id===runId; })
+    .reduce(function(s,m){ return s+(m.amount||0); }, 0);
+}
+function payrollRunRemainingNetPay(runId){
+  return Math.round((payrollRunNetPayTotal(runId) - payrollRunMatchedNetPay(runId))*100)/100;
+}
+
+var _payrollMatchState = { rowId:null, selectedRuns:{} };
+
+function openPayrollMatchModal(rowId){
+  var row = REV.bankLedger.find(function(r){ return r.id === rowId; });
+  if(!row) return;
+  _payrollMatchState = { rowId: rowId, selectedRuns:{} };
+
+  var amtAbs = Math.abs(parseFloat(row.gross_amount)||0);
+  var candidates = DB.payrollRuns
+    .filter(function(r){ return payrollRunRemainingNetPay(r.id) > 0.005; })
+    .sort(function(a,b){ return (b.checkDate||'').localeCompare(a.checkDate||''); });
+
+  openModal(
+    '<div class="modal" style="max-width:560px">' +
+      '<div class="modal-header">' +
+        '<div><div class="modal-title">Match to Payroll Run(s)</div>' +
+        '<div class="modal-sub">' + fmtDate(row.pmnt_date) + ' \u2014 ' + fmt(amtAbs) + ' \u2014 ' + (row.customer_vendor||'') + '</div></div>' +
+        '<button class="close-btn" onclick="closeModal()">&#215;</button>' +
+      '</div>' +
+      '<div class="modal-body">' +
+        '<label>Select Payroll Run(s) — showing unmatched Net Pay remaining</label>' +
+        (candidates.length === 0
+          ? '<div class="empty-state" style="padding:24px"><div>No payroll runs with unmatched Net Pay available.</div></div>'
+          : '<div class="match-row-list">' +
+            candidates.map(function(r){
+              var remaining = payrollRunRemainingNetPay(r.id);
+              var period = (r.periodStart && r.periodEnd) ? (fmtDate(r.periodStart)+' \u2013 '+fmtDate(r.periodEnd)) : 'Pay period not set';
+              return '<div class="match-row-item" id="pr-match-' + r.id + '" onclick="togglePayrollRunSelect(\'' + r.id + '\')">' +
+                '<div class="match-row-check">&#10003;</div>' +
+                '<div style="flex:1">' +
+                  '<div style="font-weight:600;font-size:13px">' + fmtDate(r.checkDate) + (r.runNumber?' \u2014 Run '+r.runNumber:'') + '</div>' +
+                  '<div style="font-size:11px;color:var(--ink-lo)">' + period + '</div>' +
+                '</div>' +
+                '<div class="mono fw600">' + fmt(remaining) + '</div>' +
+              '</div>';
+            }).join('') +
+            '</div>'
+        ) +
+        '<div id="payroll-match-summary"></div>' +
+      '</div>' +
+      '<div class="modal-footer">' +
+        '<button class="btn btn-ghost" onclick="closeModal()">Cancel</button>' +
+        '<button class="btn btn-primary" id="payroll-match-confirm" onclick="confirmPayrollMatch()" disabled>Confirm Match</button>' +
+      '</div>' +
+    '</div>'
+  );
+}
+
+function togglePayrollRunSelect(runId){
+  var el = $('pr-match-' + runId);
+  if(_payrollMatchState.selectedRuns[runId]){
+    delete _payrollMatchState.selectedRuns[runId];
+    el.classList.remove('selected');
+  } else {
+    _payrollMatchState.selectedRuns[runId] = true;
+    el.classList.add('selected');
+  }
+  updatePayrollMatchSummary();
+}
+
+function updatePayrollMatchSummary(){
+  var row = REV.bankLedger.find(function(r){ return r.id === _payrollMatchState.rowId; });
+  var amtAbs = Math.abs(parseFloat(row.gross_amount)||0);
+  var selectedIds = Object.keys(_payrollMatchState.selectedRuns);
+  var sumEl = $('payroll-match-summary');
+  var btnEl = $('payroll-match-confirm');
+
+  if(selectedIds.length === 0){ sumEl.innerHTML=''; btnEl.disabled=true; return; }
+
+  var total = selectedIds.reduce(function(sum, id){ return sum + payrollRunRemainingNetPay(id); }, 0);
+  var variance = Math.round((amtAbs - total) * 100) / 100;
+
+  sumEl.innerHTML =
+    '<div class="match-summary-bar">' +
+      '<span>Bank Transaction: <strong class="mono">' + fmt(amtAbs) + '</strong></span>' +
+      '<span>Selected Run(s): <strong class="mono">' + fmt(total) + '</strong></span>' +
+      '<span>Variance: <strong class="mono ' + (Math.abs(variance)<0.01?'match-variance-ok':'match-variance-bad') + '">' + (variance>=0?'+':'') + fmt(variance) + '</strong></span>' +
+    '</div>';
+
+  btnEl.disabled = false;
+}
+
+async function confirmPayrollMatch(){
+  var row = REV.bankLedger.find(function(r){ return r.id === _payrollMatchState.rowId; });
+  if(!row) return;
+  var selectedIds = Object.keys(_payrollMatchState.selectedRuns);
+  if(selectedIds.length === 0) return;
+
+  var btnEl = $('payroll-match-confirm');
+  if(btnEl){
+    if(btnEl.disabled && btnEl.dataset.submitting === '1') return;
+    btnEl.disabled = true;
+    btnEl.dataset.submitting = '1';
+    btnEl.textContent = 'Recording...';
+  }
+
+  var amtAbs = Math.abs(parseFloat(row.gross_amount)||0);
+  // Same variance-absorption rule as AP matching: any difference between
+  // the bank amount and the sum of selected runs' remaining balances gets
+  // absorbed into the last selected run's applied amount, rather than
+  // leaving a fractional unmatched residue.
+  var appliedAmounts = selectedIds.map(function(id){ return payrollRunRemainingNetPay(id); });
+  var sumApplied = appliedAmounts.reduce(function(a,b){ return a+b; }, 0);
+  var variance = Math.round((amtAbs - sumApplied) * 100) / 100;
+  if(Math.abs(variance) > 0.001) appliedAmounts[appliedAmounts.length-1] += variance;
+
+  showLoadingOverlay('Recording match...');
+  for(var i = 0; i < selectedIds.length; i++){
+    var matchId = 'BLM-' + Date.now() + '-' + i;
+    var matchRow = {
+      id: matchId, bank_ledger_id: row.id, match_kind: 'payroll_run',
+      payment_id: null, invoice_id: null, settlement_date: null,
+      payroll_run_id: selectedIds[i], amount: Math.round(appliedAmounts[i]*100)/100,
+      created_at: new Date().toISOString()
+    };
+    await saveBankMatch(matchRow);
+    REV.bankMatches.push(matchRow);
+  }
+
+  // One aggregate GL entry per bank row, same shape as direct posting:
+  // Dr 6060 Payroll (wage expense) / Cr bank cash. This is a known
+  // simplification for now -- it doesn't yet split out Tips Payable
+  // relief or a wage variance vs. Shift Log, since that reconciliation
+  // hasn't been built yet. ref 'PAYROLL-'+rowId lets unmatch reverse it.
+  var cashAcct = row.bank === 'Glacier Bank' ? '1010' : '1011';
+  var cashName = row.bank === 'Glacier Bank' ? 'Glacier Bank' : 'SouthState Bank';
+  var je = {id:await nextGLId(), date:row.pmnt_date, ref:'PAYROLL-'+row.id, era:ERA.DC,
+    memo:'Payroll Net Pay — '+(row.customer_vendor||'')+' ('+selectedIds.length+' run'+(selectedIds.length!==1?'s':'')+')',
+    entries:[{acct:'6060',name:'Payroll',dr:amtAbs,cr:0},{acct:cashAcct,name:cashName,dr:0,cr:amtAbs}]};
+  var glOk = await saveGLToSB(je);
+
+  hideLoadingOverlay();
+  closeModal();
+  if(!glOk){
+    showToast('Matched, but the GL entry failed to post — check Trial Balance and post a manual correcting Journal Entry.', 'warn');
+  } else {
+    showToast('Matched to ' + selectedIds.length + ' payroll run(s)');
+  }
+  if(currentView === 'bank-ledger') renderBankLedger();
+  else if(currentView === 'payroll-runs') renderPayrollRuns();
+}
+
+
 async function unmatchBankRow(rowId){
   var matches = blRowMatches(rowId);
   var apMatches = matches.filter(function(m){ return m.match_kind === 'ap_payment'; });
   var revMatches = matches.filter(function(m){ return m.match_kind === 'clover_revenue'; });
   var directMatches = matches.filter(function(m){ return m.match_kind === 'direct'; });
+  var payrollMatches = matches.filter(function(m){ return m.match_kind === 'payroll_run'; });
 
   var reverseToo = false;
   if(apMatches.length > 0){
@@ -6151,6 +6323,11 @@ async function unmatchBankRow(rowId){
     if(!confirm(
       'This transaction was coded directly to a GL account.\n\n' +
       'Removing the match will also delete that GL entry, so the amount is no longer recorded anywhere until you re-code it.'
+    )) return;
+  } else if(payrollMatches.length > 0){
+    if(!confirm(
+      'This transaction is matched to ' + payrollMatches.length + ' payroll run(s).\n\n' +
+      'Removing the match will also delete the associated GL entry, and those payroll runs will show their Net Pay as unmatched again.'
     )) return;
   } else {
     if(!confirm('Remove match(es) for this transaction?')) return;
@@ -6211,6 +6388,14 @@ async function unmatchBankRow(rowId){
     DB.gl = DB.gl.filter(function(x){ return x.ref !== ('DIRECT-'+rowId); });
   }
 
+  // Payroll Net Pay matches post one aggregate GL entry per bank row
+  // (ref 'PAYROLL-'+rowId), same one-entry-covers-everything shape as
+  // direct posting -- deleting it and the match links is a full reversal.
+  if(payrollMatches.length > 0){
+    await _sb.from('gl_entries').delete().eq('ref', 'PAYROLL-'+rowId);
+    DB.gl = DB.gl.filter(function(x){ return x.ref !== ('PAYROLL-'+rowId); });
+  }
+
   var ok = await deleteBankMatchesForRow(rowId);
   hideLoadingOverlay();
   if(!ok){ showToast('Failed to remove match','warn'); return; }
@@ -6233,7 +6418,7 @@ async function unmatchBankRow(rowId){
     }
   }
 
-  showToast(reverseToo ? 'Match removed and payment(s) reversed' : (revMatches.length>0 ? 'Match removed and deposit transfer reversed' : (directMatches.length>0 ? 'Match removed and GL entry deleted' : 'Match removed')));
+  showToast(reverseToo ? 'Match removed and payment(s) reversed' : (revMatches.length>0 ? 'Match removed and deposit transfer reversed' : (directMatches.length>0 ? 'Match removed and GL entry deleted' : (payrollMatches.length>0 ? 'Match removed and GL entry deleted' : 'Match removed'))));
   updateSidebarStats();
   if(currentView === 'bank-ledger') renderBankLedger();
   else if(currentView === 'rev-dashboard') renderRevDashboard();
