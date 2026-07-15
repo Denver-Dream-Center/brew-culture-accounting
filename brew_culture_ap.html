@@ -2324,25 +2324,49 @@ function buildSweepPrepWorkbook(ab){
 
   var newWs = XLSX.utils.aoa_to_sheet(aoa);
 
-  // Now overwrite the Unique_* cells with live dedup formulas. Dedup logic:
-  // if this row's order ID matches the row directly above it, output 0
-  // (already counted); otherwise output the real per-order value. Row 2's
-  // "row above" is the header row, so the comparison is never true there —
-  // no special-casing needed, every data row uses the same formula shape.
+  // Now overwrite the Unique_* cells with live dedup formulas AND a real
+  // pre-computed value cached alongside each one. SheetJS only writes the
+  // formula text by default, with no cached result — Excel recalculates on
+  // open, but plenty of other viewers (quick-look previews, some online
+  // spreadsheet tools) show a formula-only cell as blank until something
+  // actually triggers a recalculation. Computing the value here means the
+  // totals (and every per-row cell) display correctly everywhere, not just
+  // in Excel with default settings, while the formula stays live and
+  // correct if records get moved between files afterward.
+  //
+  // Dedup logic: if this row's order ID matches the row directly above it,
+  // the real value is 0 (already counted); otherwise it's the real
+  // per-order figure. Row 2's "row above" is the header row, so the
+  // comparison is never true there — no special-casing needed.
+  var runningSums = {};
+  TOTALED_COLS.forEach(function(h){ runningSums[h] = 0; });
+
   for(var i = 0; i < rows.length; i++){
     var excelRow = i + 2;
     var prevRow = excelRow - 1;
     var oCol = colLetter['order'];
     var dedupCond = oCol + excelRow + '=' + oCol + prevRow;
+    var isDup = i > 0 && rows[i]['order'] === rows[i-1]['order'];
+
+    var orderNetVal = parseFloat(rows[i]['Order_Net']) || 0;
+    var orderTaxVal = parseFloat(rows[i]['Order_Tax']) || 0;
+    var orderTipVal = parseFloat(rows[i]['Order_Tip_Amount']) || 0;
+    var orderAmtVal = parseFloat(rows[i]['Order_Amount_collected']) || 0;
+
+    var uNet = isDup ? 0 : orderNetVal;
+    var uTax = isDup ? 0 : orderTaxVal;
+    var uTip = isDup ? 0 : orderTipVal;
+    var uAmt = isDup ? 0 : orderAmtVal;
 
     newWs[colLetter['Unique_Order_Net'] + excelRow] =
-      {t:'n', f:'IF(' + dedupCond + ',0,' + colLetter['Order_Net'] + excelRow + ')'};
+      {t:'n', f:'IF(' + dedupCond + ',0,' + colLetter['Order_Net'] + excelRow + ')', v:uNet};
     newWs[colLetter['Unique_Order_Tax'] + excelRow] =
-      {t:'n', f:'IF(' + dedupCond + ',0,' + colLetter['Order_Tax'] + excelRow + ')'};
+      {t:'n', f:'IF(' + dedupCond + ',0,' + colLetter['Order_Tax'] + excelRow + ')', v:uTax};
     newWs[colLetter['Unique_Order_Tip'] + excelRow] =
-      {t:'n', f:'IF(' + dedupCond + ',0,' + colLetter['Order_Tip_Amount'] + excelRow + ')'};
+      {t:'n', f:'IF(' + dedupCond + ',0,' + colLetter['Order_Tip_Amount'] + excelRow + ')', v:uTip};
     newWs[colLetter['Unique_Order_Amt_Collected'] + excelRow] =
-      {t:'n', f:'IF(' + dedupCond + ',0,' + colLetter['Order_Amount_collected'] + excelRow + ')'};
+      {t:'n', f:'IF(' + dedupCond + ',0,' + colLetter['Order_Amount_collected'] + excelRow + ')', v:uAmt};
+
     // Credit/debit only, net of any gift card portion. Uses SEARCH (a
     // substring check) rather than an exact match, since Clover reports
     // split-tender orders as a combined string like "Gift Cards, Credit
@@ -2354,15 +2378,29 @@ function buildSweepPrepWorkbook(ab){
     var pCol = colLetter['payment_type'];
     var uAmtCell = colLetter['Unique_Order_Amt_Collected'] + excelRow;
     var gcCell = colLetter['Gift_Card_Redeemed'] + excelRow;
+    var paymentType = String(rows[i]['payment_type'] || '');
+    var isCardPayment = /credit card/i.test(paymentType) || /debit card/i.test(paymentType);
+    var giftCardVal = 0; // Gift_Card_Redeemed starts blank on every fresh file
+    var uCredit = isCardPayment ? (uAmt - giftCardVal) : 0;
     newWs[colLetter['Unique_Credit_Amt_Collected'] + excelRow] =
       {t:'n', f:'IF(OR(ISNUMBER(SEARCH("Credit Card",' + pCol + excelRow + ')),ISNUMBER(SEARCH("Debit Card",' + pCol + excelRow + ')))' +
-        ',' + uAmtCell + '-IF(' + gcCell + '="",0,' + gcCell + '),0)'};
+        ',' + uAmtCell + '-IF(' + gcCell + '="",0,' + gcCell + '),0)', v:uCredit};
+
+    runningSums['Unique_Order_Net'] += uNet;
+    runningSums['Unique_Order_Tax'] += uTax;
+    runningSums['Unique_Order_Tip'] += uTip;
+    runningSums['Unique_Order_Amt_Collected'] += uAmt;
+    runningSums['Unique_Credit_Amt_Collected'] += uCredit;
+    runningSums['Gift_Card_Redeemed'] += giftCardVal;
   }
 
-  // Totals row — SUM every inserted column, explicitly excluding Bank_Sweep_Date.
+  // Totals row — SUM every inserted column, explicitly excluding
+  // Bank_Sweep_Date, with the real computed total cached alongside the
+  // formula for the same reason as above.
   TOTALED_COLS.forEach(function(h){
     var col = colLetter[h];
-    newWs[col + totalsRowNum] = {t:'n', f:'SUM(' + col + '2:' + col + lastDataRow + ')'};
+    var total = Math.round(runningSums[h] * 100) / 100;
+    newWs[col + totalsRowNum] = {t:'n', f:'SUM(' + col + '2:' + col + lastDataRow + ')', v: total};
   });
 
   // Date/time display formatting, matching the format the owner applies by
@@ -2391,6 +2429,10 @@ function buildSweepPrepWorkbook(ab){
 
   var newWb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(newWb, newWs, 'FullOrdersDetails_prepped');
+  // Cached values above mean every viewer shows correct numbers immediately;
+  // this additionally tells Excel specifically to recalculate on open too,
+  // so the formulas stay the source of truth once real editing starts.
+  newWb.Workbook = {CalcPr: {fullCalcOnLoad: true}};
   return newWb;
 }
 
