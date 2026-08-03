@@ -480,6 +480,7 @@ const COA=[
   {acct:'6200',name:'General & Administrative',type:'Expense'},
   {acct:'6210',name:'Software & Subscriptions',type:'Expense'},
   {acct:'6220',name:'Repairs & Maintenance',type:'Expense'},
+  {acct:'6900',name:'Rounding Variance',type:'Expense'},
 ];
 
 // GL account suggestions by ingredient category
@@ -6105,10 +6106,48 @@ async function confirmRevMatch(){
 
   hideLoadingOverlay();
   closeModal();
+
+  // Post a rounding variance GL entry if the bank deposit differs from
+  // the sum of matched settlement card portions by >= $0.01.
+  var bankAmt = Math.abs(parseFloat(row.gross_amount) || 0);
+  var totalMatched = selectedIds.reduce(function(sum, id){
+    var ss = REV.settlements.find(function(x){ return x.id === id; });
+    return sum + (ss ? settlementCardPortion(ss) : 0);
+  }, 0);
+  var variance = Math.round((bankAmt - totalMatched) * 100) / 100;
+
+  if(Math.abs(variance) >= 0.005){
+    var cashAcct = row.bank === 'Glacier Bank' ? '1010' : '1011';
+    var cashName = row.bank === 'Glacier Bank' ? 'Glacier Bank' : 'SouthState Bank';
+    var varDates = selectedIds.map(function(id){
+      var ss = REV.settlements.find(function(x){ return x.id === id; });
+      return ss ? ss.date : '';
+    }).filter(Boolean).join(', ');
+    // Positive variance: bank paid more than expected → CR 6900 (reduces expense)
+    // Negative variance: bank paid less than expected → DR 6900 (records shortfall)
+    var varJe = {
+      id: await nextGLId(),
+      date: row.pmnt_date,
+      ref: 'REV-VAR-' + row.id,
+      era: ERA.DC,
+      memo: 'Revenue match rounding variance \u2014 settlement ' + varDates + ' vs bank deposit ' + fmt(bankAmt),
+      entries: variance > 0
+        ? [{acct:cashAcct,name:cashName,dr:variance,cr:0},
+           {acct:'6900',name:'Rounding Variance',dr:0,cr:variance}]
+        : [{acct:'6900',name:'Rounding Variance',dr:Math.abs(variance),cr:0},
+           {acct:cashAcct,name:cashName,dr:0,cr:Math.abs(variance)}]
+    };
+    var varOk = await saveGLToSB(varJe);
+    if(varOk) DB.gl.push(varJe);
+  }
+
   if(glFailures.length){
     showToast('Matched, but the deposit-transfer GL entry failed for: ' + glFailures.join(', ') + ' — check Trial Balance and post a manual correcting Journal Entry.', 'warn');
   } else {
-    showToast('Matched ' + selectedIds.length + ' settlement date(s)');
+    var varMsg = Math.abs(variance) >= 0.005
+      ? ' \u2014 ' + fmt(Math.abs(variance)) + ' rounding variance posted to 6900'
+      : '';
+    showToast('Matched ' + selectedIds.length + ' settlement date(s)' + varMsg);
   }
   if(currentView === 'bank-ledger') renderBankLedger();
   else if(currentView === 'rev-dashboard') renderRevDashboard();
