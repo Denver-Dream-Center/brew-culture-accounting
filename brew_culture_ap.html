@@ -7689,50 +7689,68 @@ async function renderPayrollTimesheets(){
 // (e.g. Troy) get a gross pay that's backed into (period salary minus tips,
 // floored at $0) -- their total pay including tips stays constant at the
 // period salary amount, while gross pay and avg rate move with tips earned.
+// Walks the period day-by-day rather than assuming one employment
+// classification for the whole period -- needed for a mid-period
+// transition (e.g. salaried through 8/19, hourly starting 8/20). Each
+// day's own status/rate is looked up independently, so this naturally
+// reduces to the old single-classification behavior for anyone who
+// didn't change classification during the period.
 function computeEmployeePeriodSummary(empId, period){
+  const emp = DB.employees.find(e=>e.id===empId);
   const shifts = DB.shiftLog.filter(s=>s.employeeId===empId && s.workDate>=period.start && s.workDate<=period.end);
+
+  // Total hours worked in the period, regardless of classification that
+  // day -- a salaried employee can still have Shift Log entries (e.g. for
+  // tip-segment purposes), and those hours still feed the "backed into"
+  // average rate below, same as a pure-salaried period always has.
   let hours = 0;
   shifts.forEach(s=>{ const d=shiftDurationHours(s.clockIn,s.clockOut); if(d!==null) hours+=d; });
 
-  let tips = 0;
-  const datesWorked = [...new Set(shifts.map(s=>s.workDate))];
-  datesWorked.forEach(d=>{
-    const split = computeTipSplitForDay(d, DB.shiftLog.filter(x=>x.workDate===d));
-    const amt = split.perEmployee[empId];
-    if(amt!==undefined) tips += amt;
-  });
+  let salariedDailyTotal = 0;  // sum of (annual salary / 26 / 14) for each salaried calendar day in the period
+  let hourlyWages = 0;         // sum of hours x effective rate for each hourly-classified day
+  let tipsSalaried = 0, tipsHourly = 0;
+  let sawSalariedDay = false, sawHourlyDay = false;
 
-  const status = statusAsOf(empId, period.end) || statusAsOf(empId, period.start);
-  const emp = DB.employees.find(e=>e.id===empId);
-  const empType = status ? status.employmentType : (emp?emp.employmentType:null);
+  let d = period.start;
+  while(d <= period.end){
+    const status = statusAsOf(empId, d);
+    const empType = status ? status.employmentType : (emp?emp.employmentType:null);
+    const dayShifts = DB.shiftLog.filter(x=>x.workDate===d);
+    const split = computeTipSplitForDay(d, dayShifts);
+    const tipAmt = split.perEmployee[empId] || 0;
 
-  let grossPay=0, totalPay=0, flaggedExceed=false;
-  if(empType==='salaried'){
-    const rate = payRateAsOf(empId, period.end) || payRateAsOf(empId, period.start);
-    const periodSalary = (rate && rate.payRateType==='salary') ? rate.payRate/26 : 0; // 26 biweekly periods/year
-    if(emp && emp.tipsOffsetSalary){
-      grossPay = Math.max(0, periodSalary - tips);
-      flaggedExceed = tips > periodSalary;
-      totalPay = grossPay + tips; // == periodSalary unless floored
-    } else {
-      grossPay = periodSalary;
-      totalPay = grossPay + tips;
+    if(empType==='salaried'){
+      sawSalariedDay = true;
+      const rate = payRateAsOf(empId, d);
+      if(rate && rate.payRateType==='salary') salariedDailyTotal += rate.payRate/26/PAY_PERIOD_LENGTH;
+      tipsSalaried += tipAmt;
+    } else if(empType==='hourly'){
+      sawHourlyDay = true;
+      dayShifts.filter(s=>s.employeeId===empId).forEach(s=>{
+        const dur = shiftDurationHours(s.clockIn, s.clockOut);
+        if(dur!==null){
+          const r = payRateAsOf(empId, d);
+          if(r && r.payRateType==='hourly') hourlyWages += dur*r.payRate;
+        }
+      });
+      tipsHourly += tipAmt;
     }
-  } else if(empType==='hourly'){
-    shifts.forEach(s=>{
-      const d = shiftDurationHours(s.clockIn, s.clockOut);
-      if(d!==null){
-        const r = payRateAsOf(empId, s.workDate);
-        if(r && r.payRateType==='hourly') grossPay += d*r.payRate;
-      }
-    });
-    totalPay = grossPay + tips;
-  } else { // volunteer
-    grossPay = 0;
-    totalPay = tips;
+    // volunteer days contribute no wages and (per policy) no personal tips
+    d = addDays(d,1);
   }
 
+  const tips = tipsSalaried + tipsHourly;
+  let grossPay, flaggedExceed = false;
+  if(emp && emp.tipsOffsetSalary && salariedDailyTotal>0){
+    grossPay = Math.max(0, salariedDailyTotal - tipsSalaried) + hourlyWages;
+    flaggedExceed = tipsSalaried > salariedDailyTotal;
+  } else {
+    grossPay = salariedDailyTotal + hourlyWages;
+  }
+  const totalPay = grossPay + tips;
   const avgRate = hours>0 ? grossPay/hours : null;
+  const empType = (sawSalariedDay && sawHourlyDay) ? 'mixed' : (sawHourlyDay ? 'hourly' : (sawSalariedDay ? 'salaried' : null));
+
   return {hours, avgRate, grossPay, tips, totalPay, flaggedExceed, empType};
 }
 
