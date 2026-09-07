@@ -854,6 +854,29 @@ async function nextGLId(){
   }
 }
 
+// Same fix as nextGLId, same reason: nextSeq('INV') was a per-browser
+// localStorage counter, so a cleared cache, a second device, or simply
+// opening the app somewhere new would restart the count from wherever that
+// browser last left off -- independent of what invoice ids already exist in
+// the shared database. That handed out an id (e.g. INV-0002) that was
+// already in use, which is what happened with Ref# 129903. Query the
+// table's actual max id instead, so it can't drift out of sync.
+async function nextInvId(){
+  try{
+    const {data,error}=await _sb.from('invoices').select('id').order('id',{ascending:false}).limit(1);
+    let maxNum=0;
+    if(!error&&data&&data.length){
+      const m=String(data[0].id).match(/^INV-(\d+)/);
+      if(m)maxNum=parseInt(m[1],10);
+    }
+    if(error)maxNum=Math.max(maxNum,DB.invoices.length); // fall back rather than hard-fail on a transient network issue
+    return`INV-${String(maxNum+1).padStart(4,'0')}`;
+  }catch(e){
+    console.error('nextInvId error',e);
+    return`INV-${String(DB.invoices.length+1).padStart(4,'0')}`; // last-resort fallback, same old behavior
+  }
+}
+
 // persist() -- now saves to Supabase (called after bulk operations)
 // Individual saves use sbUpsert directly
 const persist=()=>{
@@ -3659,7 +3682,7 @@ async function saveInvoice(editId){
     glOk=await postInvoiceGL(inv);
     fifoOk=await writeFIFOLayers(inv);
   }else{
-    const id=nextSeq('INV');
+    const id=await nextInvId();
     const inv={id,vendorId,invoiceNum,date,dueDate,memo,era,lines,subtotal,tax:0,total:subtotal,amountPaid:0,balance:subtotal,status:'open',glPosted:true};
     await saveInvoiceToSB(inv);
     glOk=await postInvoiceGL(inv);
