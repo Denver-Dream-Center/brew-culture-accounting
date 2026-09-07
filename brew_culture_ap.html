@@ -6465,6 +6465,13 @@ async function unmatchBankRow(rowId){
   else if(currentView === 'rev-settlement') renderRevSettlement();
 }
 
+async function loadAnthropicApiKey(){
+  try{
+    const {data:cfg} = await _sb.from('config').select('value').eq('key','anthropic_api_key').single();
+    if(cfg?.value){ ANTHROPIC_API_KEY = cfg.value; }
+  }catch(e){ console.warn('Could not load API key from config:', e.message); }
+}
+
 async function doLogin(){
   const email = document.getElementById('login-email').value.trim();
   const password = document.getElementById('login-password').value;
@@ -6474,11 +6481,7 @@ async function doLogin(){
   if(error){errEl.textContent = error.message;return}
   _session = data.session;
   _userRole = data.user?.user_metadata?.role || 'admin';
-  // Load Anthropic API key from Supabase config table
-  try{
-    const {data:cfg} = await _sb.from('config').select('value').eq('key','anthropic_api_key').single();
-    if(cfg?.value){ ANTHROPIC_API_KEY = cfg.value; }
-  }catch(e){ console.warn('Could not load API key from config:', e.message); }
+  await loadAnthropicApiKey();
   document.getElementById('login-screen').style.display = 'none';
   document.getElementById('module-switcher').style.display = 'flex';
   document.getElementById('mod-user-name').textContent = data.user?.email || '';
@@ -8434,6 +8437,7 @@ function showToast(msg){
   if(session){
     _session = session;
     _userRole = session.user?.user_metadata?.role || 'admin';
+    await loadAnthropicApiKey();
     document.getElementById('login-screen').style.display = 'none';
     document.getElementById('module-switcher').style.display = 'flex';
     document.getElementById('mod-user-name').textContent = session.user?.email || '';
