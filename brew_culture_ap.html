@@ -3441,7 +3441,7 @@ async function runInvoiceExtraction(file){
     ?[{type:'document',source:{type:'base64',media_type:'application/pdf',data:b64}},{type:'text',text:'Extract invoice data as JSON.'}]
     :[{type:'image',source:{type:'base64',media_type:mediaType,data:b64}},{type:'text',text:'Extract invoice data as JSON.'}];
 
-  const sysPrompt='You are an invoice parser for a coffee shop. Extract all line items and return ONLY valid JSON (no markdown, no backticks) with this structure: {"invoice_date":"YYYY-MM-DD","vendor":"string","invoice_number":"string","lines":[{"raw_description":"string","matched_ingredient":"string or null","match_confidence":"exact|fuzzy|none","quantity":number,"unit":"string","unit_price":number,"line_total":number,"notes":"string or null"}]}. Known ingredients: '+loadIngredients().map(i=>i.name).join(', ')+'. Match each line to the closest ingredient. exact=close name match, fuzzy=partial, none=no match. Return ONLY the JSON object.';
+  const sysPrompt='You are an invoice parser for a coffee shop. Extract all line items and return ONLY valid JSON (no markdown, no backticks) with this structure: {"invoice_date":"YYYY-MM-DD","vendor":"string","invoice_number":"string","invoice_tax_total":number,"lines":[{"raw_description":"string","matched_ingredient":"string or null","match_confidence":"exact|fuzzy|none","quantity":number,"unit":"string","unit_price":number,"line_total":number,"tax":number,"notes":"string or null"}]}. "quantity" is the actual number of units/cases received, as a plain number — some invoices show it as a single count, others as "cases / units" (e.g. "0 / 1" means 0 cases + 1 unit = 1 total); always sum to one number, never return the raw string. "unit_price" and "line_total" are the PRE-TAX price and quantity×price for that line, even if the invoice\'s printed total column for that line includes tax. "tax" is the tax amount charged on that specific line as printed (0 if none, or if tax is not broken out per line). "invoice_tax_total" is the total tax shown for the whole invoice near its subtotal/total (0 if none shown). Known ingredients: '+loadIngredients().map(i=>i.name).join(', ')+'. Match each line to the closest ingredient. exact=close name match, fuzzy=partial, none=no match. Return ONLY the JSON object.';
 
   try{
     const resp=await fetch(ANTHROPIC_ENDPOINT,{
@@ -3477,9 +3477,38 @@ async function runInvoiceExtraction(file){
       const ingredient=rule?rule.ingredient:(l.matched_ingredient&&l.match_confidence!=='none'?l.matched_ingredient:'');
       const ing=ingredient?loadIngredients().find(i=>i.name===ingredient):null;
       const suggestedAcct=ing?CAT_GL[ing.cat]||'1440':'';
-      return{description:l.raw_description||'',acct:suggestedAcct,ingredient:ingredient||'',unit:l.unit||'',qty:l.quantity||1,unitCost:l.unit_price||0,total:l.line_total||((l.quantity||1)*(l.unit_price||0))};
+      return{description:l.raw_description||'',acct:suggestedAcct,ingredient:ingredient||'',unit:l.unit||'',qty:l.quantity||1,unitCost:l.unit_price||0,total:l.line_total||((l.quantity||1)*(l.unit_price||0)),lineTax:Math.round((l.tax||0)*100)/100};
     });
     if(lineItems.length===0)lineItems=[{description:'',acct:'',ingredient:'',qty:1,unitCost:0,total:0}];
+
+    // unit_price/line_total above are pre-tax, so break any per-line tax out
+    // into its own expense line right after the item it taxed (no ingredient,
+    // since tax itself isn't inventory). Reconcile to the invoice's printed
+    // tax total when given, so rounding on the last taxed line ties the
+    // entered lines out to the invoice total exactly.
+    const invoiceTaxTotal=Math.round((parsed.invoice_tax_total||0)*100)/100;
+    const taxedIdxs=[];
+    let taxSum=0;
+    lineItems.forEach((l,i)=>{ if(l.lineTax>0){taxSum=Math.round((taxSum+l.lineTax)*100)/100; taxedIdxs.push(i)} });
+    if(taxedIdxs.length){
+      const lastTaxedIdx=taxedIdxs[taxedIdxs.length-1];
+      const needsTrueUp=invoiceTaxTotal>0 && Math.abs(invoiceTaxTotal-taxSum)>=0.005 && Math.abs(invoiceTaxTotal-taxSum)<1;
+      const merged=[];
+      lineItems.forEach((l,i)=>{
+        const lineTax=l.lineTax; delete l.lineTax;
+        merged.push(l);
+        if(lineTax>0){
+          const amt=(i===lastTaxedIdx&&needsTrueUp)?Math.round((lineTax+(invoiceTaxTotal-taxSum))*100)/100:lineTax;
+          merged.push({description:(l.description||'Item')+' — Sales Tax',acct:l.acct||'',ingredient:'',unit:'',qty:1,unitCost:amt,total:amt});
+        }
+      });
+      lineItems=merged;
+    }else{
+      lineItems.forEach(l=>{delete l.lineTax});
+      if(invoiceTaxTotal>0){
+        lineItems.push({description:'Sales Tax',acct:'',ingredient:'',unit:'',qty:1,unitCost:invoiceTaxTotal,total:invoiceTaxTotal});
+      }
+    }
     renderLineItems();
     showToast('Extracted '+lineItems.length+' line item'+(lineItems.length!==1?'s':'')+' — review and save');
     const dz=$('autoload-zone');
