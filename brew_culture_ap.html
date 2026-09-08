@@ -5655,8 +5655,13 @@ function loadAPMatchInvoices(){
   var listEl = $('ap-match-invoices');
   if(!vendorId){ listEl.innerHTML=''; updateAPMatchSummary(); return; }
 
+  // Includes credit memos (negative balance) alongside regular open
+  // invoices, so a vendor credit can be selected in the same match as the
+  // invoices it offsets \u2014 see confirmAPMatch for how a selected credit's
+  // balance gets folded into the settlement JE rather than being silently
+  // excluded.
   var openInvoices = DB.invoices.filter(function(inv){
-    return inv.vendorId === vendorId && inv.balance > 0.005;
+    return inv.vendorId === vendorId && Math.abs(inv.balance) > 0.005;
   }).sort(function(a,b){ return (a.date||'').localeCompare(b.date||''); });
 
   if(openInvoices.length === 0){
@@ -5669,13 +5674,14 @@ function loadAPMatchInvoices(){
     '<label style="margin-top:10px;display:block">Step 2 \u2014 Select Invoice(s)</label>' +
     '<div class="match-row-list">' +
       openInvoices.map(function(inv){
+        var isCredit = inv.balance < -0.005;
         return '<div class="match-row-item" id="ap-inv-' + inv.id + '" onclick="toggleAPInvoiceSelect(\'' + inv.id + '\')">' +
           '<div class="match-row-check">&#10003;</div>' +
           '<div style="flex:1">' +
-            '<div style="font-weight:600;font-size:13px">' + (inv.invoiceNum||inv.id) + '</div>' +
-            '<div style="font-size:11px;color:var(--ink-lo)">' + fmtDate(inv.date) + ' \u2014 Balance: ' + fmt(inv.balance) + '</div>' +
+            '<div style="font-weight:600;font-size:13px">' + (inv.invoiceNum||inv.id) + (isCredit?' <span style="font-weight:600;font-size:10px;color:var(--troy);background:var(--troy-lo);padding:1px 6px;border-radius:4px;margin-left:4px">CREDIT</span>':'') + '</div>' +
+            '<div style="font-size:11px;color:var(--ink-lo)">' + fmtDate(inv.date) + ' \u2014 ' + (isCredit?'Available: '+fmt(Math.abs(inv.balance)):'Balance: '+fmt(inv.balance)) + '</div>' +
           '</div>' +
-          '<div class="mono fw600">' + fmt(inv.balance) + '</div>' +
+          '<div class="mono fw600"' + (isCredit?' style="color:var(--troy)"':'') + '>' + (isCredit?'\u2212':'') + fmt(Math.abs(inv.balance)) + '</div>' +
         '</div>';
       }).join('') +
     '</div>';
@@ -5706,10 +5712,10 @@ function updateAPMatchSummary(){
     return;
   }
 
-  var total = selectedIds.reduce(function(sum, id){
-    var inv = DB.invoices.find(function(i){ return i.id === id; });
-    return sum + (inv ? inv.balance : 0);
-  }, 0);
+  var selectedInvs = selectedIds.map(function(id){ return DB.invoices.find(function(i){ return i.id === id; }); }).filter(Boolean);
+  var total = selectedInvs.reduce(function(sum, inv){ return sum + inv.balance; }, 0);
+  var creditsSelected = selectedInvs.filter(function(inv){ return inv.balance < -0.005; });
+  var creditTotal = creditsSelected.reduce(function(s,inv){ return s+Math.abs(inv.balance); }, 0);
   var variance = Math.round((amtAbs - total) * 100) / 100;
   _apMatchState.variance = variance;
   if(Math.abs(variance) < 0.01) _apMatchState.varianceLines = [];
@@ -5720,6 +5726,9 @@ function updateAPMatchSummary(){
       '<span>Selected Invoices: <strong class="mono">' + fmt(total) + '</strong></span>' +
       '<span>Variance: <strong class="mono ' + (Math.abs(variance)<0.01?'match-variance-ok':'match-variance-bad') + '">' + (variance>=0?'+':'') + fmt(variance) + '</strong></span>' +
     '</div>' +
+    (creditsSelected.length
+      ? '<div style="font-size:12px;color:var(--troy);margin-top:6px">Includes ' + fmt(creditTotal) + ' credit from ' + creditsSelected.map(function(inv){ return inv.invoiceNum||inv.id; }).join(', ') + ' — will be cleared against this match, not booked as a variance.</div>'
+      : '') +
     '<div id="ap-variance-block"></div>';
 
   btnEl.disabled = false;
@@ -5809,6 +5818,24 @@ async function confirmAPMatch(){
   var totalBalance = invoices.reduce(function(s,inv){ return s + inv.balance; }, 0);
   var variance = Math.round((amtAbs - totalBalance) * 100) / 100;
 
+  // Credit memos (negative balance) selected alongside real invoices don't
+  // get their own cash leg -- there's no cash movement for a credit. Their
+  // combined amount instead gets folded into the LAST real invoice's JE as
+  // its own Accounts Payable credit line (clearing the debit that was
+  // posted when the credit was originally entered), reducing that same
+  // JE's cash line by the same amount. This is kept separate from any true
+  // fee/rounding variance below.
+  var payInvoices = invoices.filter(function(inv){ return inv.balance > 0.005; });
+  var creditInvoices = invoices.filter(function(inv){ return inv.balance < -0.005; });
+  var creditTotal = Math.round(creditInvoices.reduce(function(s,inv){ return s+Math.abs(inv.balance); },0)*100)/100;
+  if(creditInvoices.length && payInvoices.length === 0){
+    hideLoadingOverlay();
+    var errEl0 = $('ap-match-err');
+    if(errEl0) errEl0.textContent = 'A credit can only be applied together with at least one real invoice in the same match.';
+    if(btnEl){ btnEl.disabled = false; btnEl.dataset.submitting=''; btnEl.textContent='Confirm Match'; }
+    return;
+  }
+
   // User-allocated variance lines, plus whatever's left over booked to
   // 5080 (Unknown Variance Expense) so the match always balances even if
   // nothing was allocated.
@@ -5821,15 +5848,17 @@ async function confirmAPMatch(){
 
   var erasUsed = {};
   var pmtFailures = [], invFailures = [], glFailures = [];
+  var lastPmtId = '';
 
-  // Pay each invoice its own balance first (standard payment flow), then apply variance to the LAST invoice
-  for(var i = 0; i < invoices.length; i++){
-    var inv = invoices[i];
-    var isLast = (i === invoices.length - 1);
+  // Pay each real invoice its own balance first (standard payment flow), then apply fee/rounding variance and any selected credit to the LAST invoice
+  for(var i = 0; i < payInvoices.length; i++){
+    var inv = payInvoices[i];
+    var isLast = (i === payInvoices.length - 1);
     var apPortion = inv.balance; // the actual invoice liability being settled
-    var feeVariance = isLast ? variance : 0; // only the last invoice absorbs the variance
-    var payAmt = Math.max(0, apPortion + feeVariance);
-    if(payAmt <= 0) continue;
+    var feeVariance = isLast ? variance : 0; // only the last invoice absorbs the fee/rounding variance
+    var creditPortion = isLast ? creditTotal : 0; // ...and any selected credit
+    var payAmt = Math.max(0, apPortion + feeVariance - creditPortion);
+    if(payAmt <= 0 && Math.abs(feeVariance) < 0.005 && creditPortion < 0.005) continue;
 
     // Era is derived from the invoice being paid, not hardcoded — a bank
     // payment that settles a Troy-era invoice produces a Troy-era payment.
@@ -5839,7 +5868,7 @@ async function confirmAPMatch(){
     var pmtId = nextSeq('PMT');
     var pmt = {id:pmtId, era:invEra, invoiceId:inv.id, vendorId:inv.vendorId, date:row.pmnt_date,
                amount:payAmt, method:'ACH/Bank', ref:row.ck_num||'', memo:'Matched from bank ledger \u2014 ' + (row.customer_vendor||''), glPosted:true};
-    inv.amountPaid = (inv.amountPaid||0) + payAmt;
+    inv.amountPaid = (inv.amountPaid||0) + apPortion;
     inv.balance = Math.max(0, inv.total - inv.amountPaid);
     if(inv.balance < 0.005){ inv.balance = 0; inv.status = 'paid'; } else inv.status = 'partial';
 
@@ -5849,7 +5878,7 @@ async function confirmAPMatch(){
     // (a vendor transaction fee, etc.) is booked to the accounts the user
     // chose in the variance-allocation panel, with whatever's left over
     // going to 5080 -- rather than being folded into the Accounts Payable
-    // debit.
+    // debit. A selected credit clears separately below.
     var jeEntries = [{acct:'2000',name:'Accounts Payable',dr:apPortion,cr:0}];
     if(isLast && Math.abs(feeVariance) >= 0.005){
       varLines.forEach(function(l){
@@ -5865,10 +5894,16 @@ async function confirmAPMatch(){
           : {acct:'5080',name:'COGS — Unknown Variance Expense',dr:0,cr:unallocated});
       }
     }
+    if(isLast && creditTotal >= 0.005){
+      creditInvoices.forEach(function(c){
+        jeEntries.push({acct:'2000',name:'Accounts Payable',dr:0,cr:Math.abs(c.balance)});
+      });
+    }
     jeEntries.push({acct:cashAcct,name:cashName,dr:0,cr:payAmt});
     var je = {id:await nextGLId(), date:row.pmnt_date, ref:pmtId, era:invEra,
-      memo:'Bank-matched payment'+(invEra==='troy'?' (Troy-era)':invEra==='dc-paid'?' (DC paid for Troy)':'')+' \u2014 ' + vendorName(inv.vendorId) + ' ' + (row.ck_num||pmtId)+(Math.abs(feeVariance)>=0.005?' (incl. '+fmt(Math.abs(feeVariance))+' variance)':''),
+      memo:'Bank-matched payment'+(invEra==='troy'?' (Troy-era)':invEra==='dc-paid'?' (DC paid for Troy)':'')+' \u2014 ' + vendorName(inv.vendorId) + ' ' + (row.ck_num||pmtId)+(Math.abs(feeVariance)>=0.005?' (incl. '+fmt(Math.abs(feeVariance))+' variance)':'')+(creditTotal>=0.005&&isLast?' (incl. '+fmt(creditTotal)+' credit applied from '+creditInvoices.map(function(c){return c.invoiceNum||c.id;}).join(', ')+')':''),
       entries:jeEntries};
+    if(isLast){ lastPmtId = pmtId; }
 
     var pmtOk=await savePaymentToSB(pmt);
     if(!pmtOk)pmtFailures.push(inv.id);
@@ -5889,6 +5924,39 @@ async function confirmAPMatch(){
       created_at: new Date().toISOString()
     });
     REV.bankMatches.push({id:'BLM-'+Date.now()+'-'+i, bank_ledger_id:row.id, match_kind:'ap_payment', payment_id:pmtId, invoice_id:inv.id, amount:payAmt});
+  }
+
+  // Close out any selected credit invoices. Their GL effect is already
+  // embedded in the last real invoice's JE above (the 2000 credit line),
+  // and their own original GL entry was already posted when the credit was
+  // first entered -- so this is a subledger-only close (same pattern as
+  // confirmApplyCredit's manual credit-application flow), not a new GL
+  // entry, to avoid double-posting.
+  for(var j = 0; j < creditInvoices.length; j++){
+    var credit = creditInvoices[j];
+    var creditAmt = Math.abs(credit.balance);
+    credit.balance = 0;
+    credit.status = 'paid';
+    var creditInvOk = await saveInvoiceToSB(credit);
+    if(!creditInvOk) invFailures.push(credit.id);
+
+    var creditPmtId = nextSeq('PMT');
+    var creditPmt = {id:creditPmtId, era:credit.era||ERA.DC, invoiceId:credit.id, vendorId:credit.vendorId, date:row.pmnt_date,
+      amount:creditAmt, method:'Credit Applied', ref:lastPmtId||row.ck_num||'', memo:'Credit applied via bank-matched payment '+(lastPmtId||''), glPosted:false};
+    var creditPmtOk = await savePaymentToSB(creditPmt);
+    if(!creditPmtOk) pmtFailures.push(credit.id);
+    DB.payments.push(creditPmt);
+
+    await saveBankMatch({
+      id: 'BLM-' + Date.now() + '-credit-' + j,
+      bank_ledger_id: row.id,
+      match_kind: 'ap_payment',
+      payment_id: creditPmtId,
+      invoice_id: credit.id,
+      amount: creditAmt,
+      created_at: new Date().toISOString()
+    });
+    REV.bankMatches.push({id:'BLM-'+Date.now()+'-credit-'+j, bank_ledger_id:row.id, match_kind:'ap_payment', payment_id:creditPmtId, invoice_id:credit.id, amount:creditAmt});
   }
 
   // Derive the bank ledger row's own era from the era(s) of invoices it paid.
