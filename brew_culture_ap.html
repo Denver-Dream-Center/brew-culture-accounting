@@ -466,6 +466,7 @@ const COA=[
   {acct:'5040',name:'COGS — Supplies',type:'Expense'},
   {acct:'5050',name:'COGS — Cold Brew Inputs',type:'Expense'},
   {acct:'5060',name:'COGS — Tax Expense',type:'Expense'},
+  {acct:'5070',name:'COGS — Transaction Fee Expense',type:'Expense'},
   {acct:'6010',name:'Rent',type:'Expense'},
   {acct:'6020',name:'Utilities',type:'Expense'},
   {acct:'6030',name:'Equipment Leases',type:'Expense'},
@@ -5716,7 +5717,7 @@ function updateAPMatchSummary(){
       '<span>Variance: <strong class="mono ' + (Math.abs(variance)<0.01?'match-variance-ok':'match-variance-bad') + '">' + (variance>=0?'+':'') + fmt(variance) + '</strong></span>' +
     '</div>' +
     (Math.abs(variance) >= 0.01
-      ? '<div style="font-size:12px;color:var(--ink-mid);margin-top:8px">A variance of ' + fmt(Math.abs(variance)) + ' will be booked as an expense ' + (variance>0?'credit':'debit') + ' in ' + fmtDate(row.pmnt_date) + '.</div>'
+      ? '<div style="font-size:12px;color:var(--ink-mid);margin-top:8px">A variance of ' + fmt(Math.abs(variance)) + ' will be booked to 5070 · COGS — Transaction Fee Expense as a ' + (variance>0?'debit':'credit') + ' in ' + fmtDate(row.pmnt_date) + '.</div>'
       : '');
 
   btnEl.disabled = false;
@@ -5750,8 +5751,9 @@ async function confirmAPMatch(){
   for(var i = 0; i < invoices.length; i++){
     var inv = invoices[i];
     var isLast = (i === invoices.length - 1);
-    var payAmt = inv.balance;
-    if(isLast) payAmt = Math.max(0, inv.balance + variance); // absorb variance on last invoice
+    var apPortion = inv.balance; // the actual invoice liability being settled
+    var feeVariance = isLast ? variance : 0; // only the last invoice absorbs the variance
+    var payAmt = Math.max(0, apPortion + feeVariance);
     if(payAmt <= 0) continue;
 
     // Era is derived from the invoice being paid, not hardcoded — a bank
@@ -5768,9 +5770,19 @@ async function confirmAPMatch(){
 
     var cashAcct = row.bank === 'Glacier Bank' ? '1010' : '1011';
     var cashName = row.bank === 'Glacier Bank' ? 'Glacier Bank' : 'SouthState Bank';
+    // The AP debit is capped at the invoice's own balance; any leftover
+    // (a vendor transaction fee, etc.) gets its own line on 5070 rather
+    // than being silently folded into the Accounts Payable debit.
+    var jeEntries = [{acct:'2000',name:'Accounts Payable',dr:apPortion,cr:0}];
+    if(Math.abs(feeVariance) >= 0.005){
+      jeEntries.push(feeVariance>0
+        ? {acct:'5070',name:'COGS — Transaction Fee Expense',dr:feeVariance,cr:0}
+        : {acct:'5070',name:'COGS — Transaction Fee Expense',dr:0,cr:Math.abs(feeVariance)});
+    }
+    jeEntries.push({acct:cashAcct,name:cashName,dr:0,cr:payAmt});
     var je = {id:await nextGLId(), date:row.pmnt_date, ref:pmtId, era:invEra,
-      memo:'Bank-matched payment'+(invEra==='troy'?' (Troy-era)':invEra==='dc-paid'?' (DC paid for Troy)':'')+' \u2014 ' + vendorName(inv.vendorId) + ' ' + (row.ck_num||pmtId),
-      entries:[{acct:'2000',name:'Accounts Payable',dr:payAmt,cr:0},{acct:cashAcct,name:cashName,dr:0,cr:payAmt}]};
+      memo:'Bank-matched payment'+(invEra==='troy'?' (Troy-era)':invEra==='dc-paid'?' (DC paid for Troy)':'')+' \u2014 ' + vendorName(inv.vendorId) + ' ' + (row.ck_num||pmtId)+(Math.abs(feeVariance)>=0.005?' (incl. '+fmt(Math.abs(feeVariance))+' fee variance)':''),
+      entries:jeEntries};
 
     var pmtOk=await savePaymentToSB(pmt);
     if(!pmtOk)pmtFailures.push(inv.id);
