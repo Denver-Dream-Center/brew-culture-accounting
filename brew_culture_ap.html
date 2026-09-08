@@ -467,6 +467,7 @@ const COA=[
   {acct:'5050',name:'COGS — Cold Brew Inputs',type:'Expense'},
   {acct:'5060',name:'COGS — Tax Expense',type:'Expense'},
   {acct:'5070',name:'COGS — Transaction Fee Expense',type:'Expense'},
+  {acct:'5080',name:'COGS — Unknown Variance Expense',type:'Expense'},
   {acct:'6010',name:'Rent',type:'Expense'},
   {acct:'6020',name:'Utilities',type:'Expense'},
   {acct:'6030',name:'Equipment Leases',type:'Expense'},
@@ -5613,7 +5614,7 @@ var _apMatchState = { rowId:null, vendorId:null, selectedInvoices:{} };
 function openAPMatchModal(rowId){
   var row = REV.bankLedger.find(function(r){ return r.id === rowId; });
   if(!row) return;
-  _apMatchState = { rowId: rowId, vendorId:null, selectedInvoices:{} };
+  _apMatchState = { rowId: rowId, vendorId:null, selectedInvoices:{}, varianceLines:[], variance:0 };
 
   var amtAbs = Math.abs(parseFloat(row.gross_amount)||0);
   openModal(
@@ -5650,6 +5651,7 @@ function loadAPMatchInvoices(){
   var vendorId = $('ap-match-vendor').value;
   _apMatchState.vendorId = vendorId;
   _apMatchState.selectedInvoices = {};
+  _apMatchState.varianceLines = [];
   var listEl = $('ap-match-invoices');
   if(!vendorId){ listEl.innerHTML=''; updateAPMatchSummary(); return; }
 
@@ -5709,6 +5711,8 @@ function updateAPMatchSummary(){
     return sum + (inv ? inv.balance : 0);
   }, 0);
   var variance = Math.round((amtAbs - total) * 100) / 100;
+  _apMatchState.variance = variance;
+  if(Math.abs(variance) < 0.01) _apMatchState.varianceLines = [];
 
   sumEl.innerHTML =
     '<div class="match-summary-bar">' +
@@ -5716,11 +5720,74 @@ function updateAPMatchSummary(){
       '<span>Selected Invoices: <strong class="mono">' + fmt(total) + '</strong></span>' +
       '<span>Variance: <strong class="mono ' + (Math.abs(variance)<0.01?'match-variance-ok':'match-variance-bad') + '">' + (variance>=0?'+':'') + fmt(variance) + '</strong></span>' +
     '</div>' +
-    (Math.abs(variance) >= 0.01
-      ? '<div style="font-size:12px;color:var(--ink-mid);margin-top:8px">A variance of ' + fmt(Math.abs(variance)) + ' will be booked to 5070 · COGS — Transaction Fee Expense as a ' + (variance>0?'debit':'credit') + ' in ' + fmtDate(row.pmnt_date) + '.</div>'
-      : '');
+    '<div id="ap-variance-block"></div>';
 
   btnEl.disabled = false;
+  if(Math.abs(variance) >= 0.01) renderVarianceBlock(); else refreshVarianceRemaining();
+}
+
+// Options list for the variance-allocation account picker (same account
+// filter used elsewhere for GL-postable accounts).
+function varAcctOptions(selected){
+  return '<option value="">Account…</option>' +
+    COA.filter(function(a){ return a.type!=='Liability' && a.type!=='Equity' && a.type!=='Revenue'; })
+      .map(function(a){ return '<option value="'+a.acct+'"'+(a.acct===selected?' selected':'')+'>'+a.acct+' · '+a.name+'</option>'; }).join('');
+}
+
+function renderVarianceBlock(){
+  var block = $('ap-variance-block'); if(!block) return;
+  var lines = _apMatchState.varianceLines || (_apMatchState.varianceLines = []);
+  block.innerHTML =
+    '<div style="margin-top:10px;padding:10px;background:var(--bg);border:1px solid var(--border);border-radius:var(--r)">' +
+      '<div style="font-size:12px;font-weight:600;margin-bottom:6px">Apply variance to account(s)</div>' +
+      '<div id="var-lines">' +
+        lines.map(function(l,i){
+          return '<div style="display:grid;grid-template-columns:2fr 1fr 28px;gap:6px;margin-bottom:6px;align-items:center">' +
+            '<select onchange="_apMatchState.varianceLines['+i+'].acct=this.value;refreshVarianceRemaining()">' + varAcctOptions(l.acct) + '</select>' +
+            '<input type="number" min="0" step="0.01" placeholder="0.00" value="'+(l.amount||'')+'" oninput="_apMatchState.varianceLines['+i+'].amount=+this.value;refreshVarianceRemaining()">' +
+            '<button class="rm-btn" onclick="removeVarianceLine('+i+')">×</button>' +
+          '</div>';
+        }).join('') +
+      '</div>' +
+      '<button class="btn btn-ghost btn-sm" onclick="addVarianceLine()">＋ Add line</button>' +
+      '<div id="var-remaining" style="font-size:12px;margin-top:8px"></div>' +
+    '</div>';
+  refreshVarianceRemaining();
+}
+
+function addVarianceLine(){
+  _apMatchState.varianceLines.push({acct:'', amount:0});
+  renderVarianceBlock();
+}
+
+function removeVarianceLine(i){
+  _apMatchState.varianceLines.splice(i,1);
+  renderVarianceBlock();
+}
+
+function refreshVarianceRemaining(){
+  var variance = _apMatchState.variance||0;
+  var lines = _apMatchState.varianceLines||[];
+  var allocated = Math.round(lines.reduce(function(s,l){ return s+(Math.abs(l.amount)||0); },0)*100)/100;
+  var remaining = Math.round((Math.abs(variance)-allocated)*100)/100;
+  var overAllocated = remaining < -0.004;
+  var badLine = lines.some(function(l){ return (Math.abs(l.amount)||0) > 0.004 && !l.acct; });
+  var remEl = $('var-remaining');
+  if(remEl){
+    if(Math.abs(variance) < 0.01){
+      remEl.innerHTML = '';
+    } else if(overAllocated){
+      remEl.innerHTML = '<span style="color:var(--red)">Allocated ('+fmt(allocated)+') exceeds the variance ('+fmt(Math.abs(variance))+') — reduce a line amount.</span>';
+    } else if(badLine){
+      remEl.innerHTML = '<span style="color:var(--red)">Select an account for every line with an amount.</span>';
+    } else if(remaining >= 0.005){
+      remEl.innerHTML = 'Remaining ' + fmt(remaining) + ' will be booked to 5080 · COGS — Unknown Variance Expense.';
+    } else {
+      remEl.innerHTML = '<span style="color:var(--green)">Fully allocated.</span>';
+    }
+  }
+  var btnEl = $('ap-match-confirm');
+  if(btnEl && !btnEl.dataset.submitting) btnEl.disabled = overAllocated || badLine;
 }
 
 async function confirmAPMatch(){
@@ -5741,6 +5808,14 @@ async function confirmAPMatch(){
   var invoices = selectedIds.map(function(id){ return DB.invoices.find(function(i){ return i.id === id; }); }).filter(Boolean);
   var totalBalance = invoices.reduce(function(s,inv){ return s + inv.balance; }, 0);
   var variance = Math.round((amtAbs - totalBalance) * 100) / 100;
+
+  // User-allocated variance lines, plus whatever's left over booked to
+  // 5080 (Unknown Variance Expense) so the match always balances even if
+  // nothing was allocated.
+  var varSign = variance > 0 ? 1 : -1;
+  var varLines = (_apMatchState.varianceLines||[]).filter(function(l){ return l.acct && Math.abs(l.amount||0) >= 0.005; });
+  var allocated = Math.round(varLines.reduce(function(s,l){ return s+Math.abs(l.amount); },0)*100)/100;
+  var unallocated = Math.max(0, Math.round((Math.abs(variance)-allocated)*100)/100);
 
   showLoadingOverlay('Recording payment(s)...');
 
@@ -5771,17 +5846,28 @@ async function confirmAPMatch(){
     var cashAcct = row.bank === 'Glacier Bank' ? '1010' : '1011';
     var cashName = row.bank === 'Glacier Bank' ? 'Glacier Bank' : 'SouthState Bank';
     // The AP debit is capped at the invoice's own balance; any leftover
-    // (a vendor transaction fee, etc.) gets its own line on 5070 rather
-    // than being silently folded into the Accounts Payable debit.
+    // (a vendor transaction fee, etc.) is booked to the accounts the user
+    // chose in the variance-allocation panel, with whatever's left over
+    // going to 5080 -- rather than being folded into the Accounts Payable
+    // debit.
     var jeEntries = [{acct:'2000',name:'Accounts Payable',dr:apPortion,cr:0}];
-    if(Math.abs(feeVariance) >= 0.005){
-      jeEntries.push(feeVariance>0
-        ? {acct:'5070',name:'COGS — Transaction Fee Expense',dr:feeVariance,cr:0}
-        : {acct:'5070',name:'COGS — Transaction Fee Expense',dr:0,cr:Math.abs(feeVariance)});
+    if(isLast && Math.abs(feeVariance) >= 0.005){
+      varLines.forEach(function(l){
+        var amt = Math.abs(l.amount);
+        var acctInfo = COA.find(function(a){ return a.acct===l.acct; });
+        jeEntries.push(varSign>0
+          ? {acct:l.acct,name:acctInfo?acctInfo.name:l.acct,dr:amt,cr:0}
+          : {acct:l.acct,name:acctInfo?acctInfo.name:l.acct,dr:0,cr:amt});
+      });
+      if(unallocated >= 0.005){
+        jeEntries.push(varSign>0
+          ? {acct:'5080',name:'COGS — Unknown Variance Expense',dr:unallocated,cr:0}
+          : {acct:'5080',name:'COGS — Unknown Variance Expense',dr:0,cr:unallocated});
+      }
     }
     jeEntries.push({acct:cashAcct,name:cashName,dr:0,cr:payAmt});
     var je = {id:await nextGLId(), date:row.pmnt_date, ref:pmtId, era:invEra,
-      memo:'Bank-matched payment'+(invEra==='troy'?' (Troy-era)':invEra==='dc-paid'?' (DC paid for Troy)':'')+' \u2014 ' + vendorName(inv.vendorId) + ' ' + (row.ck_num||pmtId)+(Math.abs(feeVariance)>=0.005?' (incl. '+fmt(Math.abs(feeVariance))+' fee variance)':''),
+      memo:'Bank-matched payment'+(invEra==='troy'?' (Troy-era)':invEra==='dc-paid'?' (DC paid for Troy)':'')+' \u2014 ' + vendorName(inv.vendorId) + ' ' + (row.ck_num||pmtId)+(Math.abs(feeVariance)>=0.005?' (incl. '+fmt(Math.abs(feeVariance))+' variance)':''),
       entries:jeEntries};
 
     var pmtOk=await savePaymentToSB(pmt);
