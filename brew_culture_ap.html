@@ -3580,10 +3580,10 @@ function renderLineItems(){
       :autoMatch
       ?`<div style="padding:8px 10px;background:var(--amber-lo);border:1px solid #E0B87A;border-radius:var(--r);font-size:11px;color:var(--amber);cursor:pointer" onclick="applyAutoMatch(${i},'${autoMatch.ingredient}')">⚡ apply: ${autoMatch.ingredient}</div>`
       :`<div style="padding:8px 10px;color:var(--ink-lo);font-size:12px;text-align:center">—</div>`;
-    return`<div class="line-item-row${line.ingredient?' has-ingredient':''}">
+    return`<div class="line-item-row${line.ingredient?' has-ingredient':''}" id="line-row-${i}">
       <input placeholder="Description from invoice" value="${line.description||''}"
         oninput="lineItems[${i}].description=this.value;autoMatchIngredient(${i},this.value)">
-      <select onchange="lineItems[${i}].acct=this.value">
+      <select id="acct-sel-${i}" onchange="lineItems[${i}].acct=this.value">
         <option value="">Account…</option>
         ${COA.filter(a=>a.type!=='Liability'&&a.type!=='Equity'&&a.type!=='Revenue').map(a=>`<option value="${a.acct}" ${line.acct===a.acct?'selected':''}>${a.acct} · ${a.name}</option>`).join('')}
       </select>
@@ -3654,9 +3654,24 @@ async function saveInvoice(editId){
   const vendorId=$('inv-vendor').value,date=$('inv-date').value,dueDate=$('inv-due').value;
   const memo=$('inv-memo').value.trim(),invoiceNum=$('inv-num').value.trim(),era=$('era-val').value||ERA.DC;
   const errEl=$('inv-err');
-  if(!vendorId){errEl.textContent='Select a vendor.';return}
-  if(!date){errEl.textContent='Invoice date required.';return}
-  if(lineItems.some(l=>!l.acct)){errEl.textContent='Each line needs a GL account.';return}
+  if(!vendorId){errEl.textContent='Select a vendor.';showToast('Select a vendor — nothing was saved.');return}
+  if(!date){errEl.textContent='Invoice date required.';showToast('Invoice date is required — nothing was saved.');return}
+  const missingAcctIdx=lineItems.findIndex(l=>!l.acct);
+  if(missingAcctIdx>-1){
+    const desc=lineItems[missingAcctIdx].description||('line '+(missingAcctIdx+1));
+    errEl.textContent='"'+desc+'" needs a GL account before this can be saved.';
+    const rowEl=document.getElementById('line-row-'+missingAcctIdx);
+    if(rowEl){
+      rowEl.scrollIntoView({behavior:'smooth',block:'center'});
+      rowEl.style.outline='2px solid var(--red)';
+      rowEl.style.outlineOffset='2px';
+      setTimeout(()=>{rowEl.style.outline=''},2500);
+    }
+    const selEl=document.getElementById('acct-sel-'+missingAcctIdx);
+    if(selEl)selEl.focus();
+    showToast('"'+desc+'" needs a GL account — nothing was saved.');
+    return;
+  }
   const lines=lineItems.map(l=>({...l,total:(l.qty||1)*(l.unitCost||0)}));
   const subtotal=lines.reduce((s,l)=>s+l.total,0);
   const vName=vendorName(vendorId);
