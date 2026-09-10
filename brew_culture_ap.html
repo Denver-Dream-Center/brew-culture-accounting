@@ -1381,6 +1381,13 @@ function parseCloverXLSX(ab){
         // relieves Gift Card Liability rather than hitting Undeposited Cash
         // or Undeposited Credit Card Revenue.
         gift_card_redeemed: hasBankSweep ? (parseFloat(r['Gift_Card_Redeemed']) || 0) : 0,
+        // Gift card SALES, unlike redemptions, don't need a manual column --
+        // Clover already flags the item itself (name "Gift card", is_revenue
+        // false, $0 net) and item_price carries the card's face value. Real
+        // money still changes hands though (it hits amount_collected same as
+        // any other item), so it has to land as a liability, not vanish.
+        // Accumulated below as items are processed.
+        gift_card_sold: 0,
         discount: parseFloat(r['Order_Total_Discount']) || 0,
         refund: parseFloat(r['Order_Total_Refund']) || 0,
         discount_names: r['Order_discount_names'] || '',
@@ -1391,6 +1398,10 @@ function parseCloverXLSX(ab){
     var isRevenue = r['is_revenue'] === true || String(r['is_revenue']).toLowerCase() === 'true';
     var refunded  = r['refunded']   === true || String(r['refunded']).toLowerCase()   === 'true';
     var exchanged = r['exchanged']  === true || String(r['exchanged']).toLowerCase()  === 'true';
+    if(itemName && itemName.toLowerCase().indexOf('gift card') !== -1){
+      var giftSoldAmt = (parseFloat(r['item_price'])||0) - (parseFloat(r['item_total_refund'])||0);
+      orderMap[oid].gift_card_sold += giftSoldAmt;
+    }
     orderMap[oid].items.push({
       item_name:    itemName,
       item_id:      r['item_id'] || '',
@@ -1445,6 +1456,7 @@ function parseCloverXLSX(ab){
         card_collected: 0,
         credit_swept: 0,
         gift_card_redeemed: 0,
+        gift_card_sold: 0,
         discounts: 0,
         refunds: 0,
         item_lines: []
@@ -1460,6 +1472,7 @@ function parseCloverXLSX(ab){
     day.refunds           += o.refund;
     if(hasBankSweep) day.credit_swept += o.credit_swept;
     day.gift_card_redeemed += o.gift_card_redeemed;
+    day.gift_card_sold += o.gift_card_sold;
     var ch = classifyPayment(o.payment_type);
     if(ch === 'cash'){
       day.cash_net       += o.order_net;
@@ -1484,6 +1497,7 @@ function parseCloverXLSX(ab){
     day.card_collected   = Math.round(day.card_collected   * 100) / 100;
     day.credit_swept     = hasBankSweep ? (Math.round(day.credit_swept * 100) / 100) : null;
     day.gift_card_redeemed = Math.round(day.gift_card_redeemed * 100) / 100;
+    day.gift_card_sold   = Math.round(day.gift_card_sold   * 100) / 100;
     day.discounts        = Math.round(day.discounts        * 100) / 100;
     day.refunds           = Math.round(day.refunds          * 100) / 100;
     day.order_count = day.orders.length;
@@ -1507,6 +1521,7 @@ function parseCloverXLSX(ab){
       settlement_date: o.bank_sweep_date || o.date, // real bank sweep date when the file provides one, else mirrors sale_date
       credit_swept: o.credit_swept,
       gift_card_redeemed: o.gift_card_redeemed,
+      gift_card_sold: o.gift_card_sold,
       item_count: o.items.length,
       employee: o.employee || '',
       payment_type: o.payment_type || '',
@@ -1571,6 +1586,7 @@ function buildSettlement(dayData){
     card_collected: dayData.card_collected,
     credit_swept: dayData.credit_swept != null ? dayData.credit_swept : null,
     gift_card_redeemed: dayData.gift_card_redeemed || 0,
+    gift_card_sold: dayData.gift_card_sold || 0,
     discounts: dayData.discounts,
     refunds: dayData.refunds,
     order_count: dayData.order_count,
@@ -1599,6 +1615,7 @@ async function saveSettlementToSB(s){
     card_collected: s.card_collected || 0,
     credit_swept: (s.credit_swept !== undefined && s.credit_swept !== null) ? s.credit_swept : null,
     gift_card_redeemed: s.gift_card_redeemed || 0,
+    gift_card_sold: s.gift_card_sold || 0,
     discounts: s.discounts,
     refunds: s.refunds || 0,
     order_count: s.order_count,
@@ -1639,7 +1656,7 @@ async function saveSettlementToSB(s){
 // always sum exactly to gross_net + tax + tips, with no stray rounding gap.
 // ═══════════════════════════════════════════════
 function settlementGLTotal(s){
-  return Math.round(((s.gross_net||0)+(s.tax||0)+(s.tips||0))*100)/100;
+  return Math.round(((s.gross_net||0)+(s.tax||0)+(s.tips||0)+(s.gift_card_sold||0))*100)/100;
 }
 
 // The card/debit portion of a settlement — this is what Clover's bank
@@ -1686,6 +1703,14 @@ async function postSettlementGL(s){
   entries.push({acct:'4010',name:'In-Store Revenue',dr:0,cr:Math.round((s.gross_net||0)*100)/100});
   if(s.tax>0.004)entries.push({acct:'2050',name:'Sales Tax Payable',dr:0,cr:Math.round(s.tax*100)/100});
   if(s.tips>0.004)entries.push({acct:'2060',name:'Tips Payable',dr:0,cr:Math.round(s.tips*100)/100});
+  // A newly-sold gift card is real cash (already included above in
+  // cardPortion/cashPortion via settlementGLTotal) but not revenue -- it's a
+  // future obligation to the customer. Without this line that cash had no
+  // credit-side home at all: gross_net correctly excludes it (Clover flags
+  // the item is_revenue=false), so it was silently vanishing out of the
+  // cash/card debit split instead of landing on the balance sheet.
+  var giftCardSoldPortion = Math.round((s.gift_card_sold||0)*100)/100;
+  if(Math.abs(giftCardSoldPortion) > 0.004) entries.push({acct:'2040',name:'Gift Card Liability',dr:0,cr:giftCardSoldPortion});
 
   var je={id:await nextGLId(),date:s.date,ref:s.id,era:ERA.DC,
     memo:'Daily settlement — '+fmtDate(s.date)+' ('+s.order_count+' orders)',entries:entries};
@@ -1707,6 +1732,7 @@ async function loadRevData(){
         card_collected: r.card_collected || 0,
         credit_swept: (r.credit_swept !== undefined) ? r.credit_swept : null,
         gift_card_redeemed: r.gift_card_redeemed || 0,
+        gift_card_sold: r.gift_card_sold || 0,
         discounts: r.discounts || 0,
         refunds: r.refunds || 0,
         order_count: r.order_count, item_count: r.item_count,
@@ -1881,13 +1907,20 @@ function renderCloverPreview(dayMap){
     // preview overstates Card Rcvd by any gift-card-redeemed amount on a
     // split-tender order (the bug this replaces: card_collected includes
     // the full order total regardless of tender, with no awareness of
-    // Gift_Card_Redeemed at all).
+    // Gift_Card_Redeemed at all). Uses settlementGLTotal so a newly-sold
+    // gift card's cash (real money, no revenue) is accounted for the same
+    // way postSettlementGL accounts for it, instead of silently depressing
+    // Cash Rcvd here the way it did before gift_card_sold existed.
     var giftPortion = day.gift_card_redeemed || 0;
+    var giftSoldPortion = day.gift_card_sold || 0;
     var cardPortion = settlementCardPortion(day);
-    var dayTotal = Math.round((day.gross_net + day.tax + day.tips)*100)/100;
+    var dayTotal = settlementGLTotal(day);
     var cashPortion = Math.round((dayTotal - cardPortion - giftPortion)*100)/100;
     var giftCell = giftPortion > 0
       ? '<span style="color:#9B6A10">' + fmt(giftPortion) + '</span>'
+      : '<span style="color:var(--ink-lo)">\u2014</span>';
+    var giftSoldCell = giftSoldPortion > 0
+      ? '<span style="color:var(--inv)">' + fmt(giftSoldPortion) + '</span>'
       : '<span style="color:var(--ink-lo)">\u2014</span>';
     return '<tr class="' + rowCls + '">' +
       '<td>' + fmtDate(d) + dupNote + '</td>' +
@@ -1899,6 +1932,7 @@ function renderCloverPreview(dayMap){
       '<td class="text-right mono">' + fmt(day.tips) + '</td>' +
       '<td class="text-right mono">' + fmt(cashPortion) + '</td>' +
       '<td class="text-right mono">' + fmt(cardPortion) + '</td>' +
+      '<td class="text-right mono">' + giftSoldCell + '</td>' +
       '<td class="text-right mono">' + giftCell + '</td>' +
       '<td class="text-right mono">' + day.order_count + '</td>' +
     '</tr>';
@@ -1930,6 +1964,7 @@ function renderCloverPreview(dayMap){
         '<th class="text-right">Tips</th>' +
         '<th class="text-right">Cash Rcvd</th>' +
         '<th class="text-right">Card Rcvd</th>' +
+        '<th class="text-right">GC Sold</th>' +
         '<th class="text-right">Gift Card</th>' +
         '<th class="text-right">Orders</th>' +
       '</tr></thead><tbody>' + rows + '</tbody></table>' +
