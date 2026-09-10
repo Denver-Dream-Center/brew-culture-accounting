@@ -480,6 +480,7 @@ const COA=[
   {acct:'6110',name:'Credit Card Fees',type:'Expense'},
   {acct:'6115',name:'Late Fees',type:'Expense'},
   {acct:'6120',name:'DoorDash Commission',type:'Expense'},
+  {acct:'6125',name:'Uncollected Sales Write-off',type:'Expense'},
   {acct:'6200',name:'General & Administrative',type:'Expense'},
   {acct:'6210',name:'Software & Subscriptions',type:'Expense'},
   {acct:'6220',name:'Repairs & Maintenance',type:'Expense'},
@@ -1346,6 +1347,26 @@ function parseCloverXLSX(ab){
     if(!orderMap[oid]){
       var dateStr = extractDate(r['date']);
       var bankSweepDateStr = hasBankSweep ? extractDate(r['Bank_Sweep_Date']) : dateStr;
+      var oTip = parseFloat(hasBankSweep ? r['Unique_Order_Tip'] : r['Order_Tip_Amount']) || 0;
+      var oTax = parseFloat(hasBankSweep ? r['Unique_Order_Tax'] : r['Order_Tax']) || 0;
+      var oNet = parseFloat(hasBankSweep ? r['Unique_Order_Net'] : r['Order_Net']) || 0;
+      var oAmtCollected = parseFloat(hasBankSweep ? r['Unique_Order_Amt_Collected'] : r['Order_Amount_collected']) || 0;
+      var oCreditSwept = hasBankSweep ? (parseFloat(r['Unique_Credit_Amt_Collected']) || 0) : null;
+      // Order_Payment_with_tips reflects what actually cleared (net+tax+tip),
+      // as opposed to Unique_Order_Amt_Collected/Unique_Credit_Amt_Collected
+      // above, which can still show the full attempted/authorized amount
+      // even when a card only partially went through. When the two diverge
+      // by more than a rounding cent, the gap is money that was rung up
+      // (full revenue still gets recognized below) but never actually
+      // collected -- pull it out of the collected/swept figures so bank
+      // matching isn't chasing cash that was never deposited, and write it
+      // off explicitly instead of leaving it silently overstating cash.
+      var oUncollected = 0;
+      if(r['Order_Payment_with_tips'] !== undefined && r['Order_Payment_with_tips'] !== null && r['Order_Payment_with_tips'] !== ''){
+        var actuallyCleared = parseFloat(r['Order_Payment_with_tips']) || 0;
+        var gap = Math.round(((oNet+oTax+oTip) - actuallyCleared)*100)/100;
+        if(gap > 0.01) oUncollected = gap;
+      }
 
       orderMap[oid] = {
         date: dateStr,
@@ -1363,16 +1384,17 @@ function parseCloverXLSX(ab){
         // the first row of each order carries a nonzero value, contiguity
         // already validated above) — safe to read directly since we only
         // ever look at an order's first-seen row here anyway.
-        tip: parseFloat(hasBankSweep ? r['Unique_Order_Tip'] : r['Order_Tip_Amount']) || 0,
-        tax: parseFloat(hasBankSweep ? r['Unique_Order_Tax'] : r['Order_Tax']) || 0,
-        order_net: parseFloat(hasBankSweep ? r['Unique_Order_Net'] : r['Order_Net']) || 0,
+        tip: oTip,
+        tax: oTax,
+        order_net: oNet,
         order_gross: parseFloat(r['Order_Gross']) || 0,
-        amount_collected: parseFloat(hasBankSweep ? r['Unique_Order_Amt_Collected'] : r['Order_Amount_collected']) || 0,
+        amount_collected: Math.round((oAmtCollected - oUncollected)*100)/100,
         // Card/debit portion only (excludes cash) — this is what Clover
         // actually sweeps to the bank, straight from the manually-verified
         // Unique_Credit_Amt_Collected column. null for plain-format files
         // (no such distinction available there).
-        credit_swept: hasBankSweep ? (parseFloat(r['Unique_Credit_Amt_Collected']) || 0) : null,
+        credit_swept: oCreditSwept !== null ? Math.round((oCreditSwept - oUncollected)*100)/100 : null,
+        uncollected_writeoff: oUncollected,
         // Gift card portion of this order, manually entered on split-tender
         // orders (Clover doesn't isolate this anywhere in the export — the
         // combined payment_type string, e.g. "Gift Cards, Credit Card", is
@@ -1457,6 +1479,7 @@ function parseCloverXLSX(ab){
         credit_swept: 0,
         gift_card_redeemed: 0,
         gift_card_sold: 0,
+        uncollected_writeoff: 0,
         discounts: 0,
         refunds: 0,
         item_lines: []
@@ -1470,6 +1493,7 @@ function parseCloverXLSX(ab){
     day.tips             += o.tip;
     day.discounts        += o.discount;
     day.refunds           += o.refund;
+    day.uncollected_writeoff += o.uncollected_writeoff;
     if(hasBankSweep) day.credit_swept += o.credit_swept;
     day.gift_card_redeemed += o.gift_card_redeemed;
     day.gift_card_sold += o.gift_card_sold;
@@ -1498,6 +1522,7 @@ function parseCloverXLSX(ab){
     day.credit_swept     = hasBankSweep ? (Math.round(day.credit_swept * 100) / 100) : null;
     day.gift_card_redeemed = Math.round(day.gift_card_redeemed * 100) / 100;
     day.gift_card_sold   = Math.round(day.gift_card_sold   * 100) / 100;
+    day.uncollected_writeoff = Math.round(day.uncollected_writeoff * 100) / 100;
     day.discounts        = Math.round(day.discounts        * 100) / 100;
     day.refunds           = Math.round(day.refunds          * 100) / 100;
     day.order_count = day.orders.length;
@@ -1522,6 +1547,7 @@ function parseCloverXLSX(ab){
       credit_swept: o.credit_swept,
       gift_card_redeemed: o.gift_card_redeemed,
       gift_card_sold: o.gift_card_sold,
+      uncollected_writeoff: o.uncollected_writeoff,
       item_count: o.items.length,
       employee: o.employee || '',
       payment_type: o.payment_type || '',
@@ -1587,6 +1613,7 @@ function buildSettlement(dayData){
     credit_swept: dayData.credit_swept != null ? dayData.credit_swept : null,
     gift_card_redeemed: dayData.gift_card_redeemed || 0,
     gift_card_sold: dayData.gift_card_sold || 0,
+    uncollected_writeoff: dayData.uncollected_writeoff || 0,
     discounts: dayData.discounts,
     refunds: dayData.refunds,
     order_count: dayData.order_count,
@@ -1616,6 +1643,7 @@ async function saveSettlementToSB(s){
     credit_swept: (s.credit_swept !== undefined && s.credit_swept !== null) ? s.credit_swept : null,
     gift_card_redeemed: s.gift_card_redeemed || 0,
     gift_card_sold: s.gift_card_sold || 0,
+    uncollected_writeoff: s.uncollected_writeoff || 0,
     discounts: s.discounts,
     refunds: s.refunds || 0,
     order_count: s.order_count,
@@ -1690,11 +1718,17 @@ async function postSettlementGL(s){
 
   var cardPortion = settlementCardPortion(s);
   var giftCardPortion = Math.round((s.gift_card_redeemed||0)*100)/100;
-  var cashPortion = Math.round((total - cardPortion - giftCardPortion)*100)/100;
+  var uncollectedPortion = Math.round((s.uncollected_writeoff||0)*100)/100;
+  var cashPortion = Math.round((total - cardPortion - giftCardPortion - uncollectedPortion)*100)/100;
 
   var entries=[];
   if(Math.abs(cardPortion) > 0.004) entries.push({acct:'1016',name:'Undeposited Credit Card Revenue',dr:cardPortion,cr:0});
   if(Math.abs(cashPortion) > 0.004) entries.push({acct:'1017',name:'Undeposited Cash Revenue',dr:cashPortion,cr:0});
+  // Full revenue/tax/tip still gets recognized below (the sale genuinely
+  // happened) -- this just books what was rung up but never actually
+  // collected (cardPortion/cashPortion above are already net of it) as a
+  // write-off instead of letting it silently overstate undeposited cash.
+  if(Math.abs(uncollectedPortion) > 0.004) entries.push({acct:'6125',name:'Uncollected Sales Write-off',dr:uncollectedPortion,cr:0});
   // Gift card redemptions aren't new money in either direction — the cash
   // was already collected (and should already have been credited to this
   // same liability account) whenever the card was originally sold. Debiting
@@ -1733,6 +1767,7 @@ async function loadRevData(){
         credit_swept: (r.credit_swept !== undefined) ? r.credit_swept : null,
         gift_card_redeemed: r.gift_card_redeemed || 0,
         gift_card_sold: r.gift_card_sold || 0,
+        uncollected_writeoff: r.uncollected_writeoff || 0,
         discounts: r.discounts || 0,
         refunds: r.refunds || 0,
         order_count: r.order_count, item_count: r.item_count,
@@ -1913,14 +1948,18 @@ function renderCloverPreview(dayMap){
     // Cash Rcvd here the way it did before gift_card_sold existed.
     var giftPortion = day.gift_card_redeemed || 0;
     var giftSoldPortion = day.gift_card_sold || 0;
+    var uncollectedPortion = day.uncollected_writeoff || 0;
     var cardPortion = settlementCardPortion(day);
     var dayTotal = settlementGLTotal(day);
-    var cashPortion = Math.round((dayTotal - cardPortion - giftPortion)*100)/100;
+    var cashPortion = Math.round((dayTotal - cardPortion - giftPortion - uncollectedPortion)*100)/100;
     var giftCell = giftPortion > 0
       ? '<span style="color:#9B6A10">' + fmt(giftPortion) + '</span>'
       : '<span style="color:var(--ink-lo)">\u2014</span>';
     var giftSoldCell = giftSoldPortion > 0
       ? '<span style="color:var(--inv)">' + fmt(giftSoldPortion) + '</span>'
+      : '<span style="color:var(--ink-lo)">\u2014</span>';
+    var uncollectedCell = uncollectedPortion > 0
+      ? '<span style="color:var(--red)">' + fmt(uncollectedPortion) + '</span>'
       : '<span style="color:var(--ink-lo)">\u2014</span>';
     return '<tr class="' + rowCls + '">' +
       '<td>' + fmtDate(d) + dupNote + '</td>' +
@@ -1934,6 +1973,7 @@ function renderCloverPreview(dayMap){
       '<td class="text-right mono">' + fmt(cardPortion) + '</td>' +
       '<td class="text-right mono">' + giftSoldCell + '</td>' +
       '<td class="text-right mono">' + giftCell + '</td>' +
+      '<td class="text-right mono">' + uncollectedCell + '</td>' +
       '<td class="text-right mono">' + day.order_count + '</td>' +
     '</tr>';
   }).join('');
@@ -1966,6 +2006,7 @@ function renderCloverPreview(dayMap){
         '<th class="text-right">Card Rcvd</th>' +
         '<th class="text-right">GC Sold</th>' +
         '<th class="text-right">Gift Card</th>' +
+        '<th class="text-right">Uncollected</th>' +
         '<th class="text-right">Orders</th>' +
       '</tr></thead><tbody>' + rows + '</tbody></table>' +
     '</div>' +
