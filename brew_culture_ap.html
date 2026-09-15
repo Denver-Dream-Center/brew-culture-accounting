@@ -541,7 +541,8 @@ let DB = {
   shiftLog: [],
   payrollRuns: [],
   payrollRunEmployees: [],
-  payrollRunLineItems: []
+  payrollRunLineItems: [],
+  purchaseOrders: []
 };
 
 // Supabase helpers
@@ -584,7 +585,7 @@ async function loadAllData() {
     const [vendors, invoices, payments, gl, fifo, rules,
            ingredients, recipes, pastryLog, pastrySkus,
            employees, employeePayRates, employeeStatusHistory, shiftLog,
-           payrollRuns, payrollRunEmployees, payrollRunLineItems] = await Promise.all([
+           payrollRuns, payrollRunEmployees, payrollRunLineItems, purchaseOrders] = await Promise.all([
       sbGet('vendors', {order:'name'}),
       sbGet('invoices', {order:'invoice_date', asc:false}),
       sbGet('payments', {order:'payment_date', asc:false}),
@@ -601,7 +602,8 @@ async function loadAllData() {
       sbGet('shift_log', {order:'work_date', asc:false}),
       sbGet('payroll_runs', {order:'check_date', asc:false}),
       sbGet('payroll_run_employees'),
-      sbGet('payroll_run_line_items')
+      sbGet('payroll_run_line_items'),
+      sbGet('purchase_orders', {order:'order_placed_at', asc:false})
     ]);
 
     // Map Supabase column names to app field names
@@ -622,6 +624,7 @@ async function loadAllData() {
     DB.payrollRuns = payrollRuns.map(mapPayrollRunFromDB);
     DB.payrollRunEmployees = payrollRunEmployees.map(mapPayrollRunEmployeeFromDB);
     DB.payrollRunLineItems = payrollRunLineItems.map(mapPayrollLineItemFromDB);
+    DB.purchaseOrders = purchaseOrders;
 
     // Load revenue data
     await loadRevData();
@@ -1087,6 +1090,8 @@ function renderSidebar(){
       '<div class="sidebar-section">Inventory</div>' +
       '<button class="nav-item" onclick="showView(\'fifo\')" id="nav-fifo"><span class="nav-icon">&#9633;</span> FIFO Deliveries</button>' +
       '<button class="nav-item" onclick="showView(\'rules\')" id="nav-rules"><span class="nav-icon">&#8644;</span> Matching Rules</button>' +
+      '<div class="sidebar-section">Ordering</div>' +
+      '<button class="nav-item" onclick="showView(\'ordering\')" id="nav-ordering"><span class="nav-icon">&#9673;</span> Gold Seal Orders</button>' +
       '<div class="sidebar-section">Recipes</div>' +
       '<button class="nav-item" onclick="showView(\'ingredients\')" id="nav-ingredients"><span class="nav-icon">&#9679;</span> Ingredients</button>' +
       '<button class="nav-item" onclick="showView(\'recipes\')" id="nav-recipes"><span class="nav-icon">&#8801;</span> Recipes</button>' +
@@ -2770,6 +2775,8 @@ function showView(view){
     troy:['1300 · Troy Receivable','Prior owner balance ledger'],
     fifo:['FIFO Deliveries','Inventory delivery log'],
     rules:['Matching Rules','Vendor product \u2192 ingredient mapping'],
+    ordering:['Gold Seal Orders','Demand-projected ordering \xb7 food items'],
+    'ordering-new':['New Gold Seal Order','Count on hand \xb7 review suggested quantities'],
     ingredients:['Ingredients','Active ingredient master list'],
     recipes:['Recipes','Menu item ingredient definitions'],
     'pastry-close':['Pastry Daily Close','Enter received quantities \xb7 compare vs invoiced'],
@@ -2795,6 +2802,7 @@ function showView(view){
     dashboard:renderDashboard,invoices:renderInvoices,vendors:renderVendors,
     payments:renderPayments,gl:renderGL,'trial-balance':renderTrialBalance,troy:renderTroy,fifo:renderFIFO,
     rules:renderRules,ingredients:renderIngredients,recipes:renderRecipes,
+    ordering:renderOrdering,'ordering-new':renderOrderingNew,
     'pastry-close':renderPastryClose,'pastry-tracker':renderPastryTracker,
     'pastry-skus':renderPastrySkus,
     'rev-dashboard':renderRevDashboard,'rev-import':renderRevImport,
@@ -3226,6 +3234,309 @@ function renderRules(){
       <thead><tr><th>Match Text</th><th>Ingredient</th><th class="text-right">Multiplier</th><th>Inv Unit</th><th>Notes</th><th></th></tr></thead>
       <tbody>${rows||'<tr><td colspan="6" class="text-center" style="padding:32px;color:var(--ink-lo)">No rules yet</td></tr>'}</tbody>
     </table></div></div>`;
+}
+
+// ═══════════════════════════════════════════════
+// ORDERING MODULE — Gold Seal, directly-sold food items
+//
+// Covers only the "ea"-tracked food-category items (burritos + the case-
+// packed snack items) — per Gold Seal Ordering Module spec Section 8,
+// recipe-driven demand for oz/g items (milk, syrup, chai, tea, matcha) is
+// out of scope until a hand-walkthrough validates that path the same way
+// burritos were validated.
+//
+// Coverage-window formula was verified against the hand-validated walkthrough
+// number (Veggie: 13.9 projected demand for a Monday order) rather than
+// taken from the spec's prose as written -- the prose's day list ("through
+// Wednesday, Thursday, and Friday") omits Tuesday, but the actual validated
+// figure only reproduces to 13.9 if Tuesday (this order's own delivery day)
+// is counted as a full day too. Recomputing with Tuesday excluded gives
+// ~11.0, not 13.9. So the real rule is: today (partial) + every day through
+// the delivery date of the cutoff AFTER this one, all counted in full,
+// including the day this order itself gets delivered.
+// ═══════════════════════════════════════════════
+
+// POS item name(s) -> Gold Seal ingredient. Bonasaurus needs two aliases:
+// Clover records it inconsistently as both "Burrito - Vegan" and bare
+// "Vegan" for the same physical item (confirmed against clover_order_items;
+// "Bonasaurus" itself never appears as a POS name).
+const ORDERING_FOOD_ITEMS = [
+  {ingredient:'Burrito - Chupacabra', posNames:['Burrito - Chupacabra']},
+  {ingredient:'Burrito - Bacon', posNames:['Burrito - Bacon']},
+  {ingredient:'Burrito - Chorizo', posNames:['Burrito - Chorizo']},
+  {ingredient:'Burrito - Veggie', posNames:['Burrito - Veggie']},
+  {ingredient:'Burrito - Bonasaurus', posNames:['Burrito - Vegan','Vegan']},
+  {ingredient:'Gluten Free Bacon Burriito', posNames:['Gluten Free Bacon Burriito']},
+  {ingredient:'Patter Bar', posNames:['Patter Bar']},
+  {ingredient:'Rich Brownies', posNames:['Rich Brownies']},
+  {ingredient:'Oatmeal', posNames:['Oatmeal']}
+];
+const ORDERING_DEMAND_WINDOW_DAYS = 90; // rolling trailing window, per spec Section 4
+
+function orderingVendor(){
+  return DB.vendors.find(v=>v.name==='Gold Seal Distributing');
+}
+
+// Next two upcoming cutoffs from a vendor's delivery_schedule (e.g.
+// [{day:1,cutoff:'10:00',deliveryDay:2}, {day:4,cutoff:'10:00',deliveryDay:5}]
+// for Gold Seal's Mon->Tue / Thu->Fri schedule). "day"/"deliveryDay" use
+// JS's 0=Sun..6=Sat convention. A cutoff "today" only counts if the current
+// time hasn't passed it yet -- otherwise this scans forward to the next one.
+function nextTwoCutoffs(schedule, now){
+  if(!schedule || !schedule.length) return null;
+  const found=[];
+  const nowHM = String(now.getHours()).padStart(2,'0')+':'+String(now.getMinutes()).padStart(2,'0');
+  for(let i=0;i<15 && found.length<2;i++){
+    const d = new Date(now.getFullYear(),now.getMonth(),now.getDate()+i);
+    const dow = d.getDay();
+    const dateStr = d.toISOString().slice(0,10);
+    schedule.filter(s=>s.day===dow).forEach(s=>{
+      if(i===0 && s.cutoff<=nowHM) return; // today's cutoff already passed
+      let dd = new Date(d);
+      while(dd.getDay()!==s.deliveryDay) dd.setDate(dd.getDate()+1);
+      found.push({cutoffDate:dateStr, cutoffTime:s.cutoff, deliveryDate:dd.toISOString().slice(0,10)});
+    });
+  }
+  found.sort((a,b)=>(a.cutoffDate+a.cutoffTime).localeCompare(b.cutoffDate+b.cutoffTime));
+  return found.slice(0,2);
+}
+
+// The coverage window for the order being placed right now: every date
+// string from today through (and including) the delivery date of the
+// cutoff AFTER this one. `partialFirstDay` is true only when today IS the
+// cutoff date (the normal case) -- if the buyer is prepping early, today
+// isn't actually cutoff-constrained yet, so it counts as a full day too.
+function buildCoverageWindow(schedule, now){
+  const cutoffs = nextTwoCutoffs(schedule, now);
+  if(!cutoffs || cutoffs.length<2) return null;
+  const [thisCutoff, nextCutoff] = cutoffs;
+  const todayStrLocal = new Date(now.getFullYear(),now.getMonth(),now.getDate()).toISOString().slice(0,10);
+  const days = [];
+  let d = todayStrLocal;
+  while(d <= nextCutoff.deliveryDate){ days.push(d); d = addDays(d,1); }
+  return {thisCutoff, nextCutoff, days, partialFirstDay: thisCutoff.cutoffDate === todayStrLocal};
+}
+
+// Server-side day-of-week aggregation over a date range for a set of POS
+// item names -- {dow, day_count, total_units, units_after_cutoff}[] for all
+// 7 weekdays. Done as a Postgres RPC rather than pulling raw order/item rows
+// into the browser, since the rolling window can span thousands of orders.
+async function fetchOrderingDowStats(posNames, startDate, endDate, cutoffTime){
+  const {data, error} = await _sb.rpc('ordering_item_dow_stats', {
+    p_item_names: posNames, p_start_date: startDate, p_end_date: endDate, p_cutoff_time: cutoffTime+':00'
+  });
+  if(error){ console.error('fetchOrderingDowStats', error); return null; }
+  return data;
+}
+
+// Builds the full suggestion set for a new order: the coverage window, and
+// per-item projected demand (on_hand/suggested/actual are left for the UI
+// to fill in as the buyer counts and reviews). The cutoff-time fraction
+// (e.g. ~50% of Monday burrito sales land at/after the 10am cutoff) is
+// computed storewide across all forecasted items combined, not per item --
+// verified against the walkthrough number, a per-item fraction overshoots it.
+async function buildOrderSuggestions(){
+  const vendor = orderingVendor();
+  if(!vendor) return {error:'Gold Seal Distributing vendor not found.'};
+  const schedule = vendor.delivery_schedule;
+  if(!schedule || !schedule.length) return {error:'No delivery schedule configured for Gold Seal.'};
+  const now = new Date();
+  const win = buildCoverageWindow(schedule, now);
+  if(!win) return {error:'Could not determine the next delivery window.'};
+
+  const histEnd = addDays(win.days[0], -1); // trailing window ends yesterday -- today's sales aren't complete yet
+  const histStart = addDays(histEnd, -(ORDERING_DEMAND_WINDOW_DAYS-1));
+  const todayDow = new Date(win.days[0]+'T12:00:00').getDay();
+
+  let cutoffFraction = 1;
+  if(win.partialFirstDay){
+    const allPosNames = ORDERING_FOOD_ITEMS.reduce((a,it)=>a.concat(it.posNames),[]);
+    const storewide = await fetchOrderingDowStats(allPosNames, histStart, histEnd, win.thisCutoff.cutoffTime);
+    const todayRow = storewide && storewide.find(r=>r.dow===todayDow);
+    cutoffFraction = (todayRow && todayRow.total_units>0) ? (todayRow.units_after_cutoff/todayRow.total_units) : 1;
+  }
+
+  const lines = [];
+  for(const item of ORDERING_FOOD_ITEMS){
+    const stats = await fetchOrderingDowStats(item.posNames, histStart, histEnd, win.thisCutoff.cutoffTime);
+    const rateByDow = {};
+    (stats||[]).forEach(r=>{ rateByDow[r.dow] = r.day_count>0 ? r.total_units/r.day_count : 0; });
+    let demand = 0;
+    win.days.forEach((dateStr,idx)=>{
+      const dow = new Date(dateStr+'T12:00:00').getDay();
+      const rate = rateByDow[dow]||0;
+      demand += (idx===0) ? rate*cutoffFraction : rate;
+    });
+    demand = Math.round(demand*100)/100;
+    const rule = DB.rules.find(r=>r.ingredient===item.ingredient);
+    const caseSize = rule ? rule.multiplier : null;
+    // Initial suggestion assumes 0 on hand (buyer hasn't counted yet) so the
+    // column shows a real starting number rather than a flat 0 that reads as
+    // broken -- it's recomputed for real the moment they enter a count.
+    const initialSuggested = caseSize ? Math.ceil(demand / caseSize) : 0;
+    lines.push({
+      item: item.ingredient,
+      case_size: caseSize,
+      on_hand_qty_at_order: 0,
+      projected_demand: demand,
+      suggested_qty: initialSuggested,
+      actual_qty_ordered: initialSuggested,
+      unit_type: 'case',
+      notes: rule ? '' : 'No fifo_rules entry for this item — case size unknown'
+    });
+  }
+  return {vendor, window:win, cutoffFraction, lines};
+}
+
+let _orderingState = null;
+
+// ═══════════════════════════════════════════════
+// ORDERING VIEW — list of saved Gold Seal orders
+// ═══════════════════════════════════════════════
+function renderOrdering(){
+  $('topbar-actions').innerHTML=`<button class="btn btn-primary" onclick="showView('ordering-new')">＋ New Gold Seal Order</button>`;
+  const orders=[...DB.purchaseOrders].sort((a,b)=>(b.order_placed_at||'').localeCompare(a.order_placed_at||''));
+  const rows=orders.map(o=>{
+    const lineCount=(o.lines||[]).length;
+    const orderedCount=(o.lines||[]).filter(l=>(l.actual_qty_ordered||0)>0).length;
+    return`<tr>
+      <td>${fmtDate(o.order_placed_at?o.order_placed_at.slice(0,10):'')}</td>
+      <td>${fmtDate(o.delivery_date_expected)}</td>
+      <td>${vendorName(o.vendor_id)}</td>
+      <td class="text-right mono">${orderedCount} / ${lineCount} items</td>
+      <td style="color:var(--ink-mid);font-size:12px">${o.placed_by||'—'}</td>
+      <td><div style="display:flex;gap:4px">
+        <button class="btn btn-ghost btn-sm" onclick="printOrderWorksheet('${o.id}')">Print Worksheet</button>
+      </div></td>
+    </tr>`;
+  }).join('');
+  $('content').innerHTML=`
+    <div class="alert alert-inv" style="margin-bottom:16px">Suggested order quantities are projected from historical Clover sales by day of week, weighted for the specific coverage window until the next Gold Seal delivery after this one. Review and adjust before placing the real order — nothing here places the order automatically.</div>
+    <div class="card"><div class="tbl-wrap"><table>
+      <thead><tr><th>Placed</th><th>Delivery Expected</th><th>Vendor</th><th class="text-right">Items Ordered</th><th>Placed By</th><th></th></tr></thead>
+      <tbody>${rows||'<tr><td colspan="6" class="text-center" style="padding:32px;color:var(--ink-lo)">No orders logged yet</td></tr>'}</tbody>
+    </table></div></div>`;
+}
+
+// ═══════════════════════════════════════════════
+// ORDERING VIEW — new order (count → project → suggest → review → save)
+// ═══════════════════════════════════════════════
+async function renderOrderingNew(){
+  $('topbar-actions').innerHTML=`<button class="btn btn-ghost" onclick="showView('ordering')">← Back to Orders</button>`;
+  $('content').innerHTML=`<div class="card" style="padding:32px;text-align:center;color:var(--ink-mid)">Projecting demand from Clover history…</div>`;
+  const result = await buildOrderSuggestions();
+  if(result.error){
+    $('content').innerHTML=`<div class="alert" style="background:var(--red-lo);border:1px solid #EAB5B1;color:var(--red)">${result.error}</div>`;
+    return;
+  }
+  _orderingState = {vendorId: result.vendor.id, window: result.window, lines: result.lines};
+  renderOrderingNewTable();
+}
+
+function renderOrderingNewTable(){
+  const s = _orderingState; if(!s) return;
+  const win = s.window;
+  const dowNames=['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+  const rows = s.lines.map((l,i)=>{
+    const caseSize = l.case_size;
+    return`<tr>
+      <td>${l.item}${!caseSize?' <span style="color:var(--red);font-size:11px">(no case size)</span>':''}</td>
+      <td><input type="number" min="0" step="1" value="${l.on_hand_qty_at_order||''}" placeholder="0" style="width:80px" oninput="orderingSetOnHand(${i},this.value)"></td>
+      <td class="text-right mono">${l.projected_demand}</td>
+      <td class="text-right mono fw600" id="ord-suggest-${i}">${l.suggested_qty}</td>
+      <td><input type="number" min="0" step="1" value="${l.actual_qty_ordered||''}" placeholder="0" style="width:80px" id="ord-actual-${i}" oninput="orderingSetActual(${i},this.value)"></td>
+      <td><input value="${l.notes||''}" placeholder="optional" oninput="orderingSetNotes(${i},this.value)"></td>
+    </tr>`;
+  }).join('');
+  $('content').innerHTML=`
+    <div class="alert alert-inv" style="margin-bottom:16px">
+      <strong>${vendorName(s.vendorId)}</strong> — order due by ${win.thisCutoff.cutoffTime} on ${dowNames[new Date(win.thisCutoff.cutoffDate+'T12:00:00').getDay()]} (${fmtDate(win.thisCutoff.cutoffDate)}), delivered ${fmtDate(win.thisCutoff.deliveryDate)}.
+      This order needs to cover demand through ${fmtDate(win.nextCutoff.deliveryDate)}, when the next delivery lands.
+    </div>
+    <div class="card"><div class="tbl-wrap"><table>
+      <thead><tr><th>Item</th><th>On Hand *</th><th class="text-right">Projected Demand</th><th class="text-right">Suggested (cases)</th><th>Actual Qty Ordered *</th><th>Notes</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div></div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px">
+      <span id="ordering-err" style="color:var(--red);font-size:12px;align-self:center;margin-right:auto"></span>
+      <button class="btn btn-ghost" onclick="showView('ordering')">Cancel</button>
+      <button class="btn btn-primary" onclick="saveOrderingOrder()">Save Order</button>
+    </div>`;
+}
+
+function orderingRecomputeSuggested(i){
+  const l = _orderingState.lines[i];
+  if(!l.case_size){ l.suggested_qty = 0; return; }
+  const need = Math.max(0, l.projected_demand - (l.on_hand_qty_at_order||0));
+  l.suggested_qty = Math.ceil(need / l.case_size);
+}
+
+function orderingSetOnHand(i,val){
+  const l = _orderingState.lines[i];
+  l.on_hand_qty_at_order = parseFloat(val)||0;
+  orderingRecomputeSuggested(i);
+  const suggestEl=$('ord-suggest-'+i); if(suggestEl) suggestEl.textContent=l.suggested_qty;
+  // Only pre-fill the actual-qty field if the buyer hasn't typed anything of
+  // their own yet -- once they have, their entry wins (Step 4: log both,
+  // don't silently overwrite an override).
+  const actualEl=$('ord-actual-'+i);
+  if(actualEl && !actualEl.dataset.touched){ actualEl.value = l.suggested_qty || ''; l.actual_qty_ordered = l.suggested_qty; }
+}
+function orderingSetActual(i,val){
+  _orderingState.lines[i].actual_qty_ordered = parseFloat(val)||0;
+  const el=$('ord-actual-'+i); if(el) el.dataset.touched='1';
+}
+function orderingSetNotes(i,val){ _orderingState.lines[i].notes = val; }
+
+async function saveOrderingOrder(){
+  const s = _orderingState; if(!s) return;
+  const errEl = $('ordering-err');
+  if(s.lines.every(l=>!l.on_hand_qty_at_order && !l.actual_qty_ordered)){
+    if(errEl) errEl.textContent = 'Enter at least one on-hand count or order quantity before saving.';
+    return;
+  }
+  const id = 'PO-'+Date.now();
+  const order = {
+    id, vendor_id: s.vendorId,
+    order_placed_at: new Date().toISOString(),
+    delivery_date_expected: s.window.thisCutoff.deliveryDate,
+    placed_by: (_session && _session.user && _session.user.email) || '',
+    lines: s.lines.map(l=>({
+      item:l.item, on_hand_qty_at_order:l.on_hand_qty_at_order||0, projected_demand:l.projected_demand,
+      suggested_qty:l.suggested_qty||0, actual_qty_ordered:l.actual_qty_ordered||0,
+      unit_type:l.unit_type, notes:l.notes||''
+    }))
+  };
+  const ok = await sbUpsert('purchase_orders', order);
+  if(!ok){ if(errEl) errEl.textContent='Save failed — check your connection and try again.'; return; }
+  DB.purchaseOrders.unshift(order);
+  _orderingState = null;
+  showToast('Order saved');
+  showView('ordering');
+}
+
+function printOrderWorksheet(orderId){
+  const order = DB.purchaseOrders.find(o=>o.id===orderId);
+  if(!order) return;
+  const rows = (order.lines||[]).map(l=>`<tr>
+    <td>${l.item}</td><td>${l.on_hand_qty_at_order}</td><td>${l.projected_demand}</td>
+    <td>${l.suggested_qty}</td><td style="font-weight:700">${l.actual_qty_ordered}</td><td>${l.notes||''}</td>
+  </tr>`).join('');
+  const win = window.open('', '_blank');
+  if(!win) return;
+  win.document.write(`<!DOCTYPE html><html><head><title>${order.id} Worksheet</title><style>
+    body{font-family:-apple-system,Segoe UI,sans-serif;padding:28px;color:#222}
+    table{width:100%;border-collapse:collapse;margin-top:16px}
+    th,td{border:1px solid #ccc;padding:7px 12px;text-align:left;font-size:13px}
+    th{background:#f4f0ea}
+  </style></head><body>
+    <h2>${vendorName(order.vendor_id)} — Order Worksheet</h2>
+    <div>Placed: ${new Date(order.order_placed_at).toLocaleString()} &middot; Delivery expected: ${fmtDate(order.delivery_date_expected)}</div>
+    <table><thead><tr><th>Item</th><th>On Hand</th><th>Projected Demand</th><th>Suggested</th><th>Ordered</th><th>Notes</th></tr></thead>
+    <tbody>${rows}</tbody></table>
+  </body></html>`);
+  win.document.close();
+  win.print();
 }
 
 // ═══════════════════════════════════════════════
@@ -6804,7 +7115,7 @@ async function doSignOut(){
   _dataLoaded = false;
   ANTHROPIC_API_KEY = '';
   DB = {vendors:[],invoices:[],payments:[],gl:[],fifo:[],rules:[],
-        ingredients:[],recipes:[],pastryLog:[],pastrySkus:[]};
+        ingredients:[],recipes:[],pastryLog:[],pastrySkus:[],purchaseOrders:[]};
   document.getElementById('main-app').style.display = 'none';
   document.getElementById('module-switcher').style.display = 'none';
   document.getElementById('login-screen').style.display = 'flex';
