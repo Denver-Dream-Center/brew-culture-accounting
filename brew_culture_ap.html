@@ -3260,17 +3260,38 @@ function renderRules(){
 // Clover records it inconsistently as both "Burrito - Vegan" and bare
 // "Vegan" for the same physical item (confirmed against clover_order_items;
 // "Bonasaurus" itself never appears as a POS name).
-const ORDERING_FOOD_ITEMS = [
-  {ingredient:'Burrito - Chupacabra', posNames:['Burrito - Chupacabra']},
-  {ingredient:'Burrito - Bacon', posNames:['Burrito - Bacon']},
-  {ingredient:'Burrito - Chorizo', posNames:['Burrito - Chorizo']},
-  {ingredient:'Burrito - Veggie', posNames:['Burrito - Veggie']},
-  {ingredient:'Burrito - Bonasaurus', posNames:['Burrito - Vegan','Vegan']},
-  {ingredient:'Gluten Free Bacon Burriito', posNames:['Gluten Free Bacon Burriito']},
-  {ingredient:'Patter Bar', posNames:['Patter Bar']},
-  {ingredient:'Rich Brownies', posNames:['Rich Brownies']},
-  {ingredient:'Oatmeal', posNames:['Oatmeal']}
+const ORDERING_CATALOG = [
+  {category:'Food', forecastable:true, items:[
+    {ingredient:'Burrito - Chupacabra', posNames:['Burrito - Chupacabra']},
+    {ingredient:'Burrito - Bacon', posNames:['Burrito - Bacon']},
+    {ingredient:'Burrito - Chorizo', posNames:['Burrito - Chorizo']},
+    {ingredient:'Burrito - Veggie', posNames:['Burrito - Veggie']},
+    {ingredient:'Burrito - Bonasaurus', posNames:['Burrito - Vegan','Vegan']},
+    {ingredient:'Gluten Free Bacon Burriito', posNames:['Gluten Free Bacon Burriito']},
+    {ingredient:'Patter Bar', posNames:['Patter Bar']},
+    {ingredient:'Rich Brownies', posNames:['Rich Brownies']},
+    {ingredient:'Oatmeal', posNames:['Oatmeal']}
+  ]},
+  {category:'Alt Milk', forecastable:false, items:[
+    {ingredient:'Oat Milk'}, {ingredient:'Almond Milk'}, {ingredient:'Coconut Milk'},
+    {ingredient:'Soy Milk'}, {ingredient:'Pistachio Milk'}
+  ]},
+  {category:'Base', forecastable:false, items:[{ingredient:'Matcha'}]},
+  {category:'Chai', forecastable:false, items:[
+    {ingredient:'Spicy Chai'}, {ingredient:'Sweet Chai'}, {ingredient:'Herbal Chai'}
+  ]},
+  {category:'Tea', forecastable:false, items:[
+    {ingredient:'Tea Leaves'}, {ingredient:'Hojicha Green Tea'}
+  ]},
+  {category:'Syrup', forecastable:false, items:[
+    {ingredient:'Coconut Syrup'}, {ingredient:'Hazelnut Syrup'}, {ingredient:'Strawberry Syrup'},
+    {ingredient:'Caramel'}, {ingredient:'White Chocolate'}
+  ]}
 ];
+// Flattened for iteration; non-food items have no posNames since they're not
+// forecasted from Clover sales -- they still appear on the order form for
+// manual on-hand/actual-qty entry so invoice matching has a line to match against.
+const ORDERING_ALL_ITEMS = ORDERING_CATALOG.flatMap(cat=>cat.items.map(it=>({...it, category:cat.category, forecastable:cat.forecastable})));
 const ORDERING_DEMAND_WINDOW_DAYS = 90; // rolling trailing window, per spec Section 4
 
 function orderingVendor(){
@@ -3348,34 +3369,46 @@ async function buildOrderSuggestions(){
   const histStart = addDays(histEnd, -(ORDERING_DEMAND_WINDOW_DAYS-1));
   const todayDow = new Date(win.days[0]+'T12:00:00').getDay();
 
+  const forecastableItems = ORDERING_ALL_ITEMS.filter(it=>it.forecastable);
   let cutoffFraction = 1;
   if(win.partialFirstDay){
-    const allPosNames = ORDERING_FOOD_ITEMS.reduce((a,it)=>a.concat(it.posNames),[]);
+    const allPosNames = forecastableItems.reduce((a,it)=>a.concat(it.posNames),[]);
     const storewide = await fetchOrderingDowStats(allPosNames, histStart, histEnd, win.thisCutoff.cutoffTime);
     const todayRow = storewide && storewide.find(r=>r.dow===todayDow);
     cutoffFraction = (todayRow && todayRow.total_units>0) ? (todayRow.units_after_cutoff/todayRow.total_units) : 1;
   }
 
+  const ingredientList = loadIngredients();
   const lines = [];
-  for(const item of ORDERING_FOOD_ITEMS){
-    const stats = await fetchOrderingDowStats(item.posNames, histStart, histEnd, win.thisCutoff.cutoffTime);
-    const rateByDow = {};
-    (stats||[]).forEach(r=>{ rateByDow[r.dow] = r.day_count>0 ? r.total_units/r.day_count : 0; });
-    let demand = 0;
-    win.days.forEach((dateStr,idx)=>{
-      const dow = new Date(dateStr+'T12:00:00').getDay();
-      const rate = rateByDow[dow]||0;
-      demand += (idx===0) ? rate*cutoffFraction : rate;
-    });
-    demand = Math.round(demand*100)/100;
+  for(const item of ORDERING_ALL_ITEMS){
     const rule = DB.rules.find(r=>r.ingredient===item.ingredient);
     const caseSize = rule ? rule.multiplier : null;
-    // Initial suggestion assumes 0 on hand (buyer hasn't counted yet) so the
-    // column shows a real starting number rather than a flat 0 that reads as
-    // broken -- it's recomputed for real the moment they enter a count.
-    const initialSuggested = caseSize ? Math.ceil(demand / caseSize) : 0;
+    // Non-forecastable items (oz/g items bought without a recipe-driven demand
+    // model yet, per Section 8) still get a row -- count + manual entry only,
+    // so the order has a line for every purchased item to match invoices against.
+    let demand = null, initialSuggested = 0;
+    if(item.forecastable){
+      const stats = await fetchOrderingDowStats(item.posNames, histStart, histEnd, win.thisCutoff.cutoffTime);
+      const rateByDow = {};
+      (stats||[]).forEach(r=>{ rateByDow[r.dow] = r.day_count>0 ? r.total_units/r.day_count : 0; });
+      demand = 0;
+      win.days.forEach((dateStr,idx)=>{
+        const dow = new Date(dateStr+'T12:00:00').getDay();
+        const rate = rateByDow[dow]||0;
+        demand += (idx===0) ? rate*cutoffFraction : rate;
+      });
+      demand = Math.round(demand*100)/100;
+      // Initial suggestion assumes 0 on hand (buyer hasn't counted yet) so the
+      // column shows a real starting number rather than a flat 0 that reads as
+      // broken -- it's recomputed for real the moment they enter a count.
+      initialSuggested = caseSize ? Math.ceil(demand / caseSize) : 0;
+    }
+    const ing = ingredientList.find(i=>i.name===item.ingredient);
     lines.push({
       item: item.ingredient,
+      category: item.category,
+      forecastable: item.forecastable,
+      unit: ing ? ing.unit : '',
       case_size: caseSize,
       on_hand_qty_at_order: 0,
       projected_demand: demand,
@@ -3437,13 +3470,16 @@ function renderOrderingNewTable(){
   const s = _orderingState; if(!s) return;
   const win = s.window;
   const dowNames=['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+  let lastCategory = null;
   const rows = s.lines.map((l,i)=>{
     const caseSize = l.case_size;
-    return`<tr>
+    const catHeader = l.category!==lastCategory ? `<tr><td colspan="6" style="background:var(--paper-2,#f4f0ea);font-weight:700;font-size:12px;text-transform:uppercase;letter-spacing:.03em;padding:8px 12px">${l.category}</td></tr>` : '';
+    lastCategory = l.category;
+    return catHeader + `<tr>
       <td>${l.item}${!caseSize?' <span style="color:var(--red);font-size:11px">(no case size)</span>':''}</td>
-      <td><input type="number" min="0" step="1" value="${l.on_hand_qty_at_order||''}" placeholder="0" style="width:80px" oninput="orderingSetOnHand(${i},this.value)"></td>
-      <td class="text-right mono">${l.projected_demand}</td>
-      <td class="text-right mono fw600" id="ord-suggest-${i}">${l.suggested_qty}</td>
+      <td><input type="number" min="0" step="1" value="${l.on_hand_qty_at_order||''}" placeholder="0" style="width:80px" oninput="orderingSetOnHand(${i},this.value)">${l.unit?` <span style="color:var(--ink-lo);font-size:11px">${l.unit}</span>`:''}</td>
+      <td class="text-right mono">${l.forecastable?l.projected_demand:'—'}</td>
+      <td class="text-right mono fw600" id="ord-suggest-${i}">${l.forecastable?l.suggested_qty:'—'}</td>
       <td><input type="number" min="0" step="1" value="${l.actual_qty_ordered||''}" placeholder="0" style="width:80px" id="ord-actual-${i}" oninput="orderingSetActual(${i},this.value)"></td>
       <td><input value="${l.notes||''}" placeholder="optional" oninput="orderingSetNotes(${i},this.value)"></td>
     </tr>`;
@@ -3466,7 +3502,7 @@ function renderOrderingNewTable(){
 
 function orderingRecomputeSuggested(i){
   const l = _orderingState.lines[i];
-  if(!l.case_size){ l.suggested_qty = 0; return; }
+  if(!l.forecastable || !l.case_size){ l.suggested_qty = 0; return; }
   const need = Math.max(0, l.projected_demand - (l.on_hand_qty_at_order||0));
   l.suggested_qty = Math.ceil(need / l.case_size);
 }
@@ -3474,6 +3510,7 @@ function orderingRecomputeSuggested(i){
 function orderingSetOnHand(i,val){
   const l = _orderingState.lines[i];
   l.on_hand_qty_at_order = parseFloat(val)||0;
+  if(!l.forecastable) return; // manual-entry items: on-hand is a count for the buyer's reference only
   orderingRecomputeSuggested(i);
   const suggestEl=$('ord-suggest-'+i); if(suggestEl) suggestEl.textContent=l.suggested_qty;
   // Only pre-fill the actual-qty field if the buyer hasn't typed anything of
@@ -3502,7 +3539,8 @@ async function saveOrderingOrder(){
     delivery_date_expected: s.window.thisCutoff.deliveryDate,
     placed_by: (_session && _session.user && _session.user.email) || '',
     lines: s.lines.map(l=>({
-      item:l.item, on_hand_qty_at_order:l.on_hand_qty_at_order||0, projected_demand:l.projected_demand,
+      item:l.item, category:l.category, forecastable:l.forecastable, unit:l.unit,
+      on_hand_qty_at_order:l.on_hand_qty_at_order||0, projected_demand:l.projected_demand,
       suggested_qty:l.suggested_qty||0, actual_qty_ordered:l.actual_qty_ordered||0,
       unit_type:l.unit_type, notes:l.notes||''
     }))
@@ -3518,10 +3556,15 @@ async function saveOrderingOrder(){
 function printOrderWorksheet(orderId){
   const order = DB.purchaseOrders.find(o=>o.id===orderId);
   if(!order) return;
-  const rows = (order.lines||[]).map(l=>`<tr>
-    <td>${l.item}</td><td>${l.on_hand_qty_at_order}</td><td>${l.projected_demand}</td>
-    <td>${l.suggested_qty}</td><td style="font-weight:700">${l.actual_qty_ordered}</td><td>${l.notes||''}</td>
-  </tr>`).join('');
+  let lastCategory = null;
+  const rows = (order.lines||[]).map(l=>{
+    const catHeader = l.category!==lastCategory ? `<tr><td colspan="6" style="background:#f4f0ea;font-weight:700;text-transform:uppercase;font-size:12px">${l.category||''}</td></tr>` : '';
+    lastCategory = l.category;
+    return catHeader + `<tr>
+    <td>${l.item}</td><td>${l.on_hand_qty_at_order}${l.unit?' '+l.unit:''}</td><td>${l.forecastable?l.projected_demand:'—'}</td>
+    <td>${l.forecastable?l.suggested_qty:'—'}</td><td style="font-weight:700">${l.actual_qty_ordered}</td><td>${l.notes||''}</td>
+  </tr>`;
+  }).join('');
   const win = window.open('', '_blank');
   if(!win) return;
   win.document.write(`<!DOCTYPE html><html><head><title>${order.id} Worksheet</title><style>
