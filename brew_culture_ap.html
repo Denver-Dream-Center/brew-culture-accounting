@@ -7636,6 +7636,41 @@ async function savePayRateToSB(rate){
   return ok;
 }
 
+// DB-authoritative IDs for brand-new employees/pay rates, replacing the
+// localStorage nextSeq() counter that caused three silent upsert-overwrites
+// (Jacob Crouch, Al Clark, Curtis Moyer) on 2026-09-17: a stale/zeroed
+// counter in one browser handed out an ID that already belonged to a real
+// row in the shared database. next_employee_id()/next_pay_rate_id() pull
+// from a Postgres sequence instead, so the ID authority lives in the DB.
+async function nextEmployeeId(){
+  const {data, error} = await _sb.rpc('next_employee_id');
+  if(error){ console.error('nextEmployeeId error', error); throw error; }
+  return data;
+}
+async function nextPayRateId(){
+  const {data, error} = await _sb.rpc('next_pay_rate_id');
+  if(error){ console.error('nextPayRateId error', error); throw error; }
+  return data;
+}
+
+// True inserts for brand-new employee/pay-rate rows (as opposed to
+// saveEmployeeToSB/savePayRateToSB above, which upsert and are for editing a
+// row whose ID is already known-good). An insert fails loudly on a
+// primary-key collision instead of silently overwriting another record.
+async function insertEmployeeToSB(emp){
+  const ok = await sbInsert('employees', mapEmployeeToDB(emp));
+  if(ok){
+    DB.employees.push(emp);
+    DB.employees.sort((a,b)=>a.name.localeCompare(b.name));
+  }
+  return ok;
+}
+async function insertPayRateToSB(rate){
+  const ok = await sbInsert('employee_pay_rates', mapPayRateToDB(rate));
+  if(ok) DB.employeePayRates.push(rate);
+  return ok;
+}
+
 function renderPayrollEmployees(){
   $('topbar-actions').innerHTML=`<button class="btn btn-primary" onclick="openEmployeeModal()">＋ New Employee</button>`;
   const emps=[...DB.employees].sort((a,b)=>a.name.localeCompare(b.name));
@@ -7770,6 +7805,10 @@ function openEmployeeModal(editId){
         <button class="btn btn-secondary btn-sm" onclick="openStatusChangeModal('${editing.id}')">＋ Change Status</button>
       </div>
       ${renderStatusHistoryTable(editing.id)}
+    </div>
+    <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border-lo)">
+      <span style="font-size:12px;font-weight:600;color:var(--ink-mid);text-transform:uppercase;letter-spacing:.06em">Edit History</span>
+      <div id="emp-audit-history" style="font-size:12px;color:var(--ink-lo);margin-top:8px">Loading…</div>
     </div>`:''}
     </div>
     <div class="modal-footer">
@@ -7779,6 +7818,29 @@ function openEmployeeModal(editId){
       <button class="btn btn-primary" onclick="saveEmployee('${editId||''}')">${editing?'Save':'Add Employee'}</button>
     </div>
   </div>`);
+  if(editing) loadEmployeeAuditHistory(editing.id);
+}
+
+// Reads straight from the audit_log trigger (Part 2 of the 2026-09-17
+// ID-collision incident fix) -- turns "did someone else edit this today?"
+// into a look at this panel instead of ad hoc log/data forensics.
+async function loadEmployeeAuditHistory(employeeId){
+  const {data, error} = await _sb.from('audit_log').select('action,changed_by,changed_at,old_data,new_data')
+    .eq('table_name','employees').eq('row_id',employeeId).order('changed_at',{ascending:false}).limit(20);
+  const el = $('emp-audit-history'); if(!el) return; // modal may have closed before this resolved
+  if(error){ el.textContent = 'Could not load edit history.'; return; }
+  if(!data || !data.length){ el.textContent = 'No recorded changes yet.'; return; }
+  el.innerHTML = data.map(r=>{
+    const changed = r.action==='UPDATE' ? changedFieldNames(r.old_data, r.new_data) : '';
+    return `<div style="padding:4px 0;border-bottom:1px solid var(--border-lo)">
+      <span class="mono">${new Date(r.changed_at).toLocaleString()}</span> — <strong>${r.action}</strong> by ${r.changed_by||'unknown'}${changed?` <span style="color:var(--ink-mid)">(${changed})</span>`:''}
+    </div>`;
+  }).join('');
+}
+function changedFieldNames(oldData, newData){
+  if(!oldData || !newData) return '';
+  const keys = Object.keys(newData).filter(k=>JSON.stringify(oldData[k])!==JSON.stringify(newData[k]));
+  return keys.join(', ');
 }
 
 async function saveEmployee(editId){
@@ -7792,31 +7854,40 @@ async function saveEmployee(editId){
     tipsOffsetSalary:$('emp-tips-offset').checked,
     notes:$('emp-notes').value.trim()||null
   };
-  if(!editId){
-    data.employmentType=$('emp-type').value;
-    data.tipClassification=$('emp-tip').value;
+  if(editId){
+    const employee = {...DB.employees.find(e=>e.id===editId), ...data};
+    const ok = await saveEmployeeToSB(employee); // editing a known-good ID -- upsert is correct here
+    if(!ok){$('emp-err').textContent='Save failed. Check connection.';return}
+    closeModal();renderPayrollEmployees();
+    return;
   }
-  const employee = editId ? {...DB.employees.find(e=>e.id===editId), ...data} : {id:nextSeq('EMP'), ...data};
-  const ok = await saveEmployeeToSB(employee);
-  if(!ok){$('emp-err').textContent='Save failed. Check connection.';return}
-  if(!editId){
-    const status={
-      id:nextSeq('STAT'), employeeId:employee.id, employmentType:employee.employmentType,
-      tipClassification:employee.tipClassification, effectiveStartDate:employee.hireDate||todayStr(),
-      effectiveEndDate:null, reason:'Initial setup'
-    };
-    await saveStatusToSB(status);
-    const rateInput=$('emp-rate').value;
-    if(rateInput===''){closeModal();renderPayrollEmployees();showToast('Employee saved — add a starting pay rate from the employee record.');return}
-    const rateVal=parseFloat(rateInput);
-    if(isNaN(rateVal)||rateVal<0){closeModal();renderPayrollEmployees();showToast('Employee saved — add a starting pay rate from the employee record.');return}
-    const rate={
-      id:nextSeq('PYR'), employeeId:employee.id, payRate:rateVal,
-      payRateType:$('emp-rate-type').value, effectiveStartDate:$('emp-rate-start').value||todayStr(),
-      effectiveEndDate:null, reason:'Initial rate'
-    };
-    await savePayRateToSB(rate);
-  }
+  data.employmentType=$('emp-type').value;
+  data.tipClassification=$('emp-tip').value;
+  let newId;
+  try{ newId = await nextEmployeeId(); }
+  catch(e){ $('emp-err').textContent='Could not generate an employee ID. Check connection and try again.'; return; }
+  const employee = {id:newId, ...data};
+  const ok = await insertEmployeeToSB(employee); // true insert -- fails loudly on an ID collision instead of overwriting
+  if(!ok){$('emp-err').textContent='Could not create employee — ID collision, please retry.';return}
+  const status={
+    id:nextSeq('STAT'), employeeId:employee.id, employmentType:employee.employmentType,
+    tipClassification:employee.tipClassification, effectiveStartDate:employee.hireDate||todayStr(),
+    effectiveEndDate:null, reason:'Initial setup'
+  };
+  await saveStatusToSB(status);
+  const rateInput=$('emp-rate').value;
+  if(rateInput===''){closeModal();renderPayrollEmployees();showToast('Employee saved — add a starting pay rate from the employee record.');return}
+  const rateVal=parseFloat(rateInput);
+  if(isNaN(rateVal)||rateVal<0){closeModal();renderPayrollEmployees();showToast('Employee saved — add a starting pay rate from the employee record.');return}
+  let rateId;
+  try{ rateId = await nextPayRateId(); }
+  catch(e){ closeModal();renderPayrollEmployees();showToast('Employee saved, but the starting pay rate could not be created — add it from the employee record.');return }
+  const rate={
+    id:rateId, employeeId:employee.id, payRate:rateVal,
+    payRateType:$('emp-rate-type').value, effectiveStartDate:$('emp-rate-start').value||todayStr(),
+    effectiveEndDate:null, reason:'Initial rate'
+  };
+  await insertPayRateToSB(rate);
   closeModal();renderPayrollEmployees();
 }
 
@@ -9065,21 +9136,25 @@ async function savePayRate(employeeId){
   const rateVal=parseFloat(rateInput);
   if(isNaN(rateVal)||rateVal<0){$('pyr-err').textContent='Enter a valid rate (0 or more).';return}
   const startDate=$('pyr-start').value; if(!startDate){$('pyr-err').textContent='Effective date required.';return}
+  let rateId;
+  try{ rateId = await nextPayRateId(); }
+  catch(e){ $('pyr-err').textContent='Could not generate a rate ID. Check connection and try again.'; return; }
   // Close out the currently open-ended rate, ending the day before the new rate starts
   const current = currentPayRate(employeeId);
   if(current && !current.effectiveEndDate){
     const endDate = addDays(startDate, -1);
     if(endDate >= current.effectiveStartDate){
       current.effectiveEndDate = endDate;
-      await savePayRateToSB(current);
+      await savePayRateToSB(current); // editing a known-good existing row -- upsert is correct here
     }
   }
   const rate={
-    id:nextSeq('PYR'), employeeId, payRate:rateVal,
+    id:rateId, employeeId, payRate:rateVal,
     payRateType:$('pyr-type').value, effectiveStartDate:startDate,
     effectiveEndDate:null, reason:$('pyr-reason').value.trim()||null
   };
-  await savePayRateToSB(rate);
+  const ok = await insertPayRateToSB(rate); // true insert -- fails loudly on an ID collision instead of overwriting
+  if(!ok){$('pyr-err').textContent='Could not save rate — ID collision, please retry.';return}
   closeModal();openEmployeeModal(employeeId);
 }
 
