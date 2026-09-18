@@ -3763,14 +3763,16 @@ async function confirmApplyCredit(creditInvoiceId){
   credit.balance=Math.min(0,credit.balance+amount);
   if(Math.abs(credit.balance)<0.005){credit.balance=0;credit.status='paid'}else credit.status='partial';
 
-  const recordId=nextSeq('PMT');
+  let recordId;
+  try{ recordId = await nextPaymentId(); }
+  catch(e){ errEl.textContent='Could not generate a payment ID. Check connection and try again.'; return; }
   const record={id:recordId,era:target.era||ERA.DC,invoiceId:target.id,vendorId:target.vendorId,
     date:todayStr(),amount:amount,method:'Credit Applied',ref:credit.id,
     memo:'Credit applied from '+credit.id+' ('+(credit.invoiceNum||credit.id)+')',glPosted:false};
 
   const targetOk=await saveInvoiceToSB(target);
   const creditOk=await saveInvoiceToSB(credit);
-  const pmtOk=await savePaymentToSB(record);
+  const pmtOk=await insertPaymentToSB(record); // true insert -- payments have no edit path, every payment is brand new
 
   closeModal();
   const views={invoices:renderInvoices,dashboard:renderDashboard,vendors:renderVendors,payments:renderPayments};
@@ -4281,7 +4283,9 @@ async function savePayment(){
   if(!amount||amount<=0){errEl.textContent='Enter a valid amount.';return}
   const inv=DB.invoices.find(i=>i.id===invoiceId);
   if(amount>inv.balance+0.005){errEl.textContent=`Exceeds balance of ${fmt(inv.balance)}.`;return}
-  const pmtId=nextSeq('PMT');
+  let pmtId;
+  try{ pmtId = await nextPaymentId(); }
+  catch(e){ errEl.textContent='Could not generate a payment ID. Check connection and try again.'; return; }
   const pmt={id:pmtId,era,invoiceId,vendorId:inv.vendorId,date,amount,method,ref,memo,glPosted:true};
   inv.amountPaid=(inv.amountPaid||0)+amount;inv.balance=Math.max(0,inv.total-inv.amountPaid);
   if(inv.balance<0.005){inv.balance=0;inv.status='paid'}else inv.status='partial';
@@ -4289,7 +4293,7 @@ async function savePayment(){
   const je={id:await nextGLId(),date,ref:pmtId,era,
     memo:'Payment'+(era==='dc-paid'?' (DC→Troy)':era==='troy'?' (Troy-era)':'')+' — '+vendorName(inv.vendorId)+' '+(ref||pmtId),
     entries:[{acct:'2000',name:'Accounts Payable',dr:amount,cr:0},{acct:cashAcct,name:cashName,dr:0,cr:amount}]};
-  const pmtOk=await savePaymentToSB(pmt);
+  const pmtOk=await insertPaymentToSB(pmt); // true insert -- payments have no edit path, every payment is brand new
   const invOk=await saveInvoiceToSB(inv);
   const glOk=await saveGLToSB(je);
   closeModal();
@@ -4411,9 +4415,19 @@ function openVendorModal(editId){
 async function saveVendor(editId){
   const name=$('vnd-name').value.trim();if(!name){$('vnd-err').textContent='Name required.';return}
   const data={name,type:$('vnd-type').value,terms:parseInt($('vnd-terms').value)||30,email:$('vnd-email').value.trim(),phone:$('vnd-phone').value.trim(),notes:$('vnd-notes').value.trim(),defaultAccts:Array.from($('vnd-accts').selectedOptions).map(o=>o.value),active:true};
-  const vendor = editId ? {...DB.vendors.find(v=>v.id===editId),...data} : {id:nextSeq('VND'),...data};
-  const ok = await saveVendorToSB(vendor);
-  if(!ok){$('vnd-err').textContent='Save failed. Check connection.';return}
+  if(editId){
+    const vendor = {...DB.vendors.find(v=>v.id===editId), ...data};
+    const ok = await saveVendorToSB(vendor); // editing a known-good ID -- upsert is correct here
+    if(!ok){$('vnd-err').textContent='Save failed. Check connection.';return}
+    closeModal();renderVendors();
+    return;
+  }
+  let newId;
+  try{ newId = await nextVendorId(); }
+  catch(e){ $('vnd-err').textContent='Could not generate a vendor ID. Check connection and try again.'; return; }
+  const vendor = {id:newId, ...data};
+  const ok = await insertVendorToSB(vendor); // true insert -- fails loudly on an ID collision instead of overwriting
+  if(!ok){$('vnd-err').textContent='Could not create vendor — ID collision, please retry.';return}
   closeModal();renderVendors();
 }
 async function deleteVendor(id){
@@ -6295,7 +6309,7 @@ async function confirmAPMatch(){
     var invEra = inv.era || ERA.DC;
     erasUsed[invEra] = true;
 
-    var pmtId = nextSeq('PMT');
+    var pmtId = await nextPaymentId();
     var pmt = {id:pmtId, era:invEra, invoiceId:inv.id, vendorId:inv.vendorId, date:row.pmnt_date,
                amount:payAmt, method:'ACH/Bank', ref:row.ck_num||'', memo:'Matched from bank ledger \u2014 ' + (row.customer_vendor||''), glPosted:true};
     inv.amountPaid = (inv.amountPaid||0) + apPortion;
@@ -6335,13 +6349,12 @@ async function confirmAPMatch(){
       entries:jeEntries};
     if(isLast){ lastPmtId = pmtId; }
 
-    var pmtOk=await savePaymentToSB(pmt);
+    var pmtOk=await insertPaymentToSB(pmt); // true insert -- payments have no edit path, every payment is brand new
     if(!pmtOk)pmtFailures.push(inv.id);
     var invOk=await saveInvoiceToSB(inv);
     if(!invOk)invFailures.push(inv.id);
     var glOk=await saveGLToSB(je);
     if(!glOk)glFailures.push(inv.id+' ('+pmtId+')');
-    DB.payments.push(pmt);
 
     // Record the match link
     await saveBankMatch({
@@ -6370,12 +6383,11 @@ async function confirmAPMatch(){
     var creditInvOk = await saveInvoiceToSB(credit);
     if(!creditInvOk) invFailures.push(credit.id);
 
-    var creditPmtId = nextSeq('PMT');
+    var creditPmtId = await nextPaymentId();
     var creditPmt = {id:creditPmtId, era:credit.era||ERA.DC, invoiceId:credit.id, vendorId:credit.vendorId, date:row.pmnt_date,
       amount:creditAmt, method:'Credit Applied', ref:lastPmtId||row.ck_num||'', memo:'Credit applied via bank-matched payment '+(lastPmtId||''), glPosted:false};
-    var creditPmtOk = await savePaymentToSB(creditPmt);
+    var creditPmtOk = await insertPaymentToSB(creditPmt); // true insert -- payments have no edit path, every payment is brand new
     if(!creditPmtOk) pmtFailures.push(credit.id);
-    DB.payments.push(creditPmt);
 
     await saveBankMatch({
       id: 'BLM-' + Date.now() + '-credit-' + j,
@@ -7204,6 +7216,47 @@ async function savePaymentToSB(pmt){
     const idx = DB.payments.findIndex(p=>p.id===pmt.id);
     if(idx>=0) DB.payments[idx]=pmt; else DB.payments.unshift(pmt);
   }
+  return ok;
+}
+
+// DB-authoritative IDs for vendors/payments -- same fix as employees/
+// payroll (2026-09-17 incident): nextSeq() was a per-browser localStorage
+// counter disconnected from the database, so a stale counter could hand
+// out an ID that already belonged to a real row, and upsert-by-id would
+// silently overwrite it. These pull from a Postgres sequence instead.
+async function nextVendorId(){
+  const {data, error} = await _sb.rpc('next_vendor_id');
+  if(error){ console.error('nextVendorId error', error); throw error; }
+  return data;
+}
+async function nextPaymentId(){
+  const {data, error} = await _sb.rpc('next_payment_id');
+  if(error){ console.error('nextPaymentId error', error); throw error; }
+  return data;
+}
+
+// True inserts for brand-new vendor/payment rows -- as opposed to
+// saveVendorToSB/savePaymentToSB above, which upsert and are for editing a
+// row whose ID is already known-good (vendors) or never used again after
+// creation (payments have no edit path; every payment is append-only).
+async function insertVendorToSB(vendor){
+  const row = {
+    id:vendor.id, name:vendor.name, type:vendor.type||null,
+    email:vendor.email||null, phone:vendor.phone||null,
+    address:vendor.address||null, notes:vendor.notes||null,
+    active:vendor.active!==false, terms:vendor.terms||30,
+    default_accts:vendor.defaultAccts||null
+  };
+  const ok = await sbInsert('vendors', row);
+  if(ok){
+    DB.vendors.push(vendor);
+    DB.vendors.sort((a,b)=>a.name.localeCompare(b.name));
+  }
+  return ok;
+}
+async function insertPaymentToSB(pmt){
+  const ok = await sbInsert('payments', mapPaymentToDB(pmt));
+  if(ok) DB.payments.unshift(pmt);
   return ok;
 }
 
