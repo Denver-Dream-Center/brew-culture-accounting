@@ -9047,6 +9047,28 @@ function renderPayrollRunEntry(){
   </div>`;
 }
 
+// DB-authoritative IDs for these three tables -- same fix as employees/
+// employee_pay_rates (2026-09-17 incident): nextSeq() was a per-browser
+// localStorage counter disconnected from the database, and every write
+// here was an upsert-by-id, so a stale counter could silently overwrite an
+// existing run/row instead of failing. These pull from a Postgres sequence
+// instead, so the ID authority lives in the DB.
+async function nextPayrollRunId(){
+  const {data, error} = await _sb.rpc('next_payroll_run_id');
+  if(error){ console.error('nextPayrollRunId error', error); throw error; }
+  return data;
+}
+async function nextPayrollRunEmployeeId(){
+  const {data, error} = await _sb.rpc('next_payroll_run_employee_id');
+  if(error){ console.error('nextPayrollRunEmployeeId error', error); throw error; }
+  return data;
+}
+async function nextPayrollRunLineItemId(){
+  const {data, error} = await _sb.rpc('next_payroll_run_line_item_id');
+  if(error){ console.error('nextPayrollRunLineItemId error', error); throw error; }
+  return data;
+}
+
 async function savePayrollRun(){
   const errEl = $('pr-save-err'); errEl.textContent='';
   const h = prState.header;
@@ -9055,14 +9077,24 @@ async function savePayrollRun(){
     if(!e.employeeId){errEl.textContent='Every employee row needs an employee selected.';return}
   }
   showLoadingOverlay('Saving payroll run...');
-  const runId = prState.runId || nextSeq('PYRUN');
-  const runRow = mapPayrollRunToDB({...h, id:runId});
-  const okRun = await sbUpsert('payroll_runs', runRow);
-  if(!okRun){ hideLoadingOverlay(); errEl.textContent='Failed to save run header.'; return; }
+  let runId = prState.runId;
+  if(runId){
+    // Editing an existing run header -- its ID is already known-good, so upsert is correct.
+    const okRun = await sbUpsert('payroll_runs', mapPayrollRunToDB({...h, id:runId}));
+    if(!okRun){ hideLoadingOverlay(); errEl.textContent='Failed to save run header.'; return; }
+  } else {
+    try{ runId = await nextPayrollRunId(); }
+    catch(e){ hideLoadingOverlay(); errEl.textContent='Could not generate a payroll run ID. Check connection and try again.'; return; }
+    // True insert -- fails loudly on an ID collision instead of overwriting an existing run.
+    const okRun = await sbInsert('payroll_runs', mapPayrollRunToDB({...h, id:runId}));
+    if(!okRun){ hideLoadingOverlay(); errEl.textContent='Could not create payroll run — ID collision, please retry.'; return; }
+  }
 
   // Replace-on-save for child rows: delete everything under this run, then
   // reinsert current state -- simplest way to keep employee lines and
   // itemized tax lines in sync without diffing add/remove/edit separately.
+  // Every row below is therefore a brand-new row from the DB's perspective
+  // even when editing an existing run, so all of them use a true insert.
   const existingEmpLines = DB.payrollRunEmployees.filter(e=>e.payrollRunId===runId);
   const existingLineItems = DB.payrollRunLineItems.filter(l=>l.payrollRunId===runId);
   for(const e of existingEmpLines) await sbDelete('payroll_run_employees', e.id);
@@ -9071,7 +9103,7 @@ async function savePayrollRun(){
   DB.payrollRunLineItems = DB.payrollRunLineItems.filter(l=>l.payrollRunId!==runId);
 
   for(const e of prState.employees){
-    const empLineId = nextSeq('PRE');
+    const empLineId = await nextPayrollRunEmployeeId();
     const rate = prEmployeeRate(e);
     const empRow = {
       id:empLineId, payrollRunId:runId, employeeId:e.employeeId,
@@ -9079,19 +9111,22 @@ async function savePayrollRun(){
       tipsOwedAmount:prNum(e.tipsAmount), peerspaceAmount:prNum(e.peerspaceAmount),
       grossAmount: prEmployeeGross(e), netPay: prEmployeeNet(e)
     };
-    await sbUpsert('payroll_run_employees', mapPayrollRunEmployeeToDB(empRow));
+    const okEmp = await sbInsert('payroll_run_employees', mapPayrollRunEmployeeToDB(empRow));
+    if(!okEmp){ hideLoadingOverlay(); errEl.textContent='Could not save payroll employee row — ID collision, please retry.'; return; }
     DB.payrollRunEmployees.push(empRow);
     for(const t of e.taxLines){
       if(!t.code && !prNum(t.amount)) continue; // skip fully-blank rows
-      const lineRow = {id:nextSeq('PRLI'), payrollRunId:runId, employeeId:e.employeeId, category:t.category||'tax', code:t.code||'', eeOrEr:t.eeOrEr||null, amount:prNum(t.amount)};
-      await sbUpsert('payroll_run_line_items', mapPayrollLineItemToDB(lineRow));
+      const lineRow = {id:await nextPayrollRunLineItemId(), payrollRunId:runId, employeeId:e.employeeId, category:t.category||'tax', code:t.code||'', eeOrEr:t.eeOrEr||null, amount:prNum(t.amount)};
+      const okLine = await sbInsert('payroll_run_line_items', mapPayrollLineItemToDB(lineRow));
+      if(!okLine){ hideLoadingOverlay(); errEl.textContent='Could not save payroll line item — ID collision, please retry.'; return; }
       DB.payrollRunLineItems.push(lineRow);
     }
   }
   for(const o of prState.otherItems){
     if(!o.code && !prNum(o.amount)) continue;
-    const lineRow = {id:nextSeq('PRLI'), payrollRunId:runId, employeeId:null, category:o.category||'other', code:o.code||'', eeOrEr:o.eeOrEr||null, amount:prNum(o.amount)};
-    await sbUpsert('payroll_run_line_items', mapPayrollLineItemToDB(lineRow));
+    const lineRow = {id:await nextPayrollRunLineItemId(), payrollRunId:runId, employeeId:null, category:o.category||'other', code:o.code||'', eeOrEr:o.eeOrEr||null, amount:prNum(o.amount)};
+    const okLine = await sbInsert('payroll_run_line_items', mapPayrollLineItemToDB(lineRow));
+    if(!okLine){ hideLoadingOverlay(); errEl.textContent='Could not save payroll line item — ID collision, please retry.'; return; }
     DB.payrollRunLineItems.push(lineRow);
   }
 
