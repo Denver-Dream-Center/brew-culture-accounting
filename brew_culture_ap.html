@@ -8097,16 +8097,17 @@ var CLOVER_ORDERS_FETCH_TIMEOUT_MS = 8000;
 async function fetchCloverOrdersForDate(dateStr){
   if(!dateStr || _cloverOrdersCache[dateStr]) return;
   const _t0 = performance.now();
-  console.log('[timesheet-debug] fetch start', dateStr);
+  let timeoutId;
   try{
     const {data, error} = await Promise.race([
       _sb.from('clover_orders').select('sale_time,order_tip_amount').eq('sale_date', dateStr),
-      new Promise((_,reject)=>setTimeout(()=>reject(new Error('clover_orders fetch timed out for '+dateStr)), CLOVER_ORDERS_FETCH_TIMEOUT_MS))
+      new Promise((_,reject)=>{ timeoutId = setTimeout(()=>reject(new Error('clover_orders fetch timed out for '+dateStr)), CLOVER_ORDERS_FETCH_TIMEOUT_MS); })
     ]);
     _cloverOrdersCache[dateStr] = (!error && data) ? data : [];
-    console.log('[timesheet-debug] fetch done', dateStr, 'rows=', (_cloverOrdersCache[dateStr]||[]).length, 'ms=', Math.round(performance.now()-_t0), error?('error='+JSON.stringify(error)):'');
   }catch(e){
-    console.error('[timesheet-debug] fetch FAILED/TIMED OUT', dateStr, 'ms=', Math.round(performance.now()-_t0), e);
+    console.error('fetchCloverOrdersForDate', dateStr, 'ms=', Math.round(performance.now()-_t0), e);
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 
@@ -8117,17 +8118,44 @@ async function ensureCloverOrdersLoaded(dateStr){
   hideLoadingOverlay();
 }
 
-// Loads every date in [startDate, endDate] one at a time (same sequencing
-// as before) rather than firing them all at once -- firing many concurrent
-// Supabase calls at once around the same time each may need to check/refresh
-// the auth session turned out to be a real regression risk (suspected of
-// causing the app to lock up entirely right after this was briefly changed
-// to Promise.all), so this stays sequential. The per-day timeout in
-// fetchCloverOrdersForDate is what actually protects against a stalled
-// request -- that part doesn't depend on concurrency and is kept.
+// Loads an entire pay period's Clover order data in ONE request instead of
+// one sequential request per day. Live testing (console breadcrumbs) showed
+// the day-by-day loop reliably freezing the tab right after the FIRST
+// per-day request completed -- before the second request's own "fetch
+// start" log, which is plain synchronous code with no network involved, so
+// the freeze can't be explained by anything in this file's own logic. That
+// symptom -- fine once, breaks on repeating the same query-builder call a
+// second time in a loop -- points at the Supabase client itself, not
+// business logic here, so the fix is to stop calling it repeatedly: one
+// ranged query for the whole period, grouped client-side by date.
 async function ensureCloverOrdersLoadedForRange(startDate, endDate){
+  const days = [];
   let d = startDate;
-  while(d <= endDate){ await fetchCloverOrdersForDate(d); d = addDays(d,1); }
+  while(d <= endDate){ if(!_cloverOrdersCache[d]) days.push(d); d = addDays(d,1); }
+  if(!days.length) return;
+
+  console.log('[timesheet-debug] range fetch start', startDate, endDate);
+  const _t0 = performance.now();
+  let timeoutId;
+  try{
+    const {data, error} = await Promise.race([
+      _sb.from('clover_orders').select('sale_date,sale_time,order_tip_amount').gte('sale_date', startDate).lte('sale_date', endDate),
+      new Promise((_,reject)=>{ timeoutId = setTimeout(()=>reject(new Error('clover_orders range fetch timed out for '+startDate+'..'+endDate)), CLOVER_ORDERS_FETCH_TIMEOUT_MS); })
+    ]);
+    days.forEach(day=>{ _cloverOrdersCache[day] = []; }); // mark every requested day as loaded, even ones with zero orders
+    if(!error && data){
+      data.forEach(row=>{
+        if(!_cloverOrdersCache[row.sale_date]) _cloverOrdersCache[row.sale_date] = [];
+        _cloverOrdersCache[row.sale_date].push(row);
+      });
+    }
+    console.log('[timesheet-debug] range fetch done', startDate, endDate, 'rows=', data?data.length:0, 'ms=', Math.round(performance.now()-_t0), error?('error='+JSON.stringify(error)):'');
+  }catch(e){
+    // Leave the cache unset for the requested days so a later render can retry.
+    console.error('[timesheet-debug] range fetch FAILED/TIMED OUT', startDate, endDate, 'ms=', Math.round(performance.now()-_t0), e);
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 // Tip segment engine -- splits a day's Clover tips among the employees who
