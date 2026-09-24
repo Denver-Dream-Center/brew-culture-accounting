@@ -8087,12 +8087,42 @@ function activeEmployeesAsOf(dateStr){
 // is open -- avoids a network round trip on every row edit.
 var _cloverOrdersCache = {};
 
+var CLOVER_ORDERS_FETCH_TIMEOUT_MS = 8000;
+
+// Fetches and caches one date's Clover order rows, with a hard timeout so a
+// single stalled request can't block the caller forever -- degrades to "not
+// loaded yet" for that date instead, and leaves the cache unset so a later
+// attempt can retry rather than permanently showing $0 tips for what might
+// only be a transient stall.
+async function fetchCloverOrdersForDate(dateStr){
+  if(!dateStr || _cloverOrdersCache[dateStr]) return;
+  try{
+    const {data, error} = await Promise.race([
+      _sb.from('clover_orders').select('sale_time,order_tip_amount').eq('sale_date', dateStr),
+      new Promise((_,reject)=>setTimeout(()=>reject(new Error('clover_orders fetch timed out for '+dateStr)), CLOVER_ORDERS_FETCH_TIMEOUT_MS))
+    ]);
+    _cloverOrdersCache[dateStr] = (!error && data) ? data : [];
+  }catch(e){
+    console.error('fetchCloverOrdersForDate', dateStr, e);
+  }
+}
+
 async function ensureCloverOrdersLoaded(dateStr){
   if(!dateStr || _cloverOrdersCache[dateStr]) return;
   showLoadingOverlay('Loading tip data for this date...');
-  const {data, error} = await _sb.from('clover_orders').select('sale_time,order_tip_amount').eq('sale_date', dateStr);
-  _cloverOrdersCache[dateStr] = (!error && data) ? data : [];
+  await fetchCloverOrdersForDate(dateStr);
   hideLoadingOverlay();
+}
+
+// Loads every date in [startDate, endDate] concurrently instead of one
+// await at a time -- faster, and (combined with the per-day timeout above)
+// means one slow/stalled day can't hold up the rest of the period's data,
+// or the view, indefinitely.
+async function ensureCloverOrdersLoadedForRange(startDate, endDate){
+  const days = [];
+  let d = startDate;
+  while(d <= endDate){ days.push(d); d = addDays(d,1); }
+  await Promise.all(days.map(fetchCloverOrdersForDate));
 }
 
 // Tip segment engine -- splits a day's Clover tips among the employees who
@@ -8411,10 +8441,9 @@ async function renderPayrollTimesheets(){
     ${periods.map(p=>`<option value="${p.start}" ${p.start===period.start?'selected':''}>${fmtDate(p.start)} \u2013 ${fmtDate(p.end)}</option>`).join('')}
   </select>`;
 
-  // Tips need that period's Clover data loaded day by day (cached after first load).
+  // Tips need that period's Clover data loaded (cached after first load).
   showLoadingOverlay('Loading pay period data...');
-  let d = period.start;
-  while(d <= period.end){ await ensureCloverOrdersLoaded(d); d = addDays(d,1); }
+  await ensureCloverOrdersLoadedForRange(period.start, period.end);
   hideLoadingOverlay();
 
   const shiftsInPeriod = DB.shiftLog.filter(s=>s.workDate>=period.start && s.workDate<=period.end);
@@ -8557,8 +8586,7 @@ async function renderPayrollTimesheetSummary(){
   </select>`;
 
   showLoadingOverlay('Loading pay period data...');
-  let d = period.start;
-  while(d <= period.end){ await ensureCloverOrdersLoaded(d); d = addDays(d,1); }
+  await ensureCloverOrdersLoadedForRange(period.start, period.end);
   hideLoadingOverlay();
 
   const shiftsInPeriod = DB.shiftLog.filter(s=>s.workDate>=period.start && s.workDate<=period.end);
