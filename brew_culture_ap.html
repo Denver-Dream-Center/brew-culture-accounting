@@ -8096,14 +8096,17 @@ var CLOVER_ORDERS_FETCH_TIMEOUT_MS = 8000;
 // only be a transient stall.
 async function fetchCloverOrdersForDate(dateStr){
   if(!dateStr || _cloverOrdersCache[dateStr]) return;
+  const _t0 = performance.now();
+  console.log('[timesheet-debug] fetch start', dateStr);
   try{
     const {data, error} = await Promise.race([
       _sb.from('clover_orders').select('sale_time,order_tip_amount').eq('sale_date', dateStr),
       new Promise((_,reject)=>setTimeout(()=>reject(new Error('clover_orders fetch timed out for '+dateStr)), CLOVER_ORDERS_FETCH_TIMEOUT_MS))
     ]);
     _cloverOrdersCache[dateStr] = (!error && data) ? data : [];
+    console.log('[timesheet-debug] fetch done', dateStr, 'rows=', (_cloverOrdersCache[dateStr]||[]).length, 'ms=', Math.round(performance.now()-_t0), error?('error='+JSON.stringify(error)):'');
   }catch(e){
-    console.error('fetchCloverOrdersForDate', dateStr, e);
+    console.error('[timesheet-debug] fetch FAILED/TIMED OUT', dateStr, 'ms=', Math.round(performance.now()-_t0), e);
   }
 }
 
@@ -8144,6 +8147,7 @@ function computeTipSplitForDay(dateStr, rawRows){
   const perRowMap = new Map();
   if(!rows.length) return {perEmployee, volunteerRevenue, perRowMap};
   const orderRows = _cloverOrdersCache[dateStr] || [];
+  if(orderRows.length > 2000) console.warn('[timesheet-debug] SUSPICIOUSLY LARGE orderRows for', dateStr, orderRows.length, '-- expected roughly a single day\'s worth');
 
   const boundarySet = new Set();
   rows.forEach(r=>{ boundarySet.add(timeToMinutes(r.clockIn)); boundarySet.add(timeToMinutes(r.clockOut)); });
@@ -8175,7 +8179,12 @@ function computeTipSplitForDay(dateStr, rawRows){
     orderRows.forEach(o=>{
       if(!o.sale_time) return;
       const mins = timeToMinutes(o.sale_time);
-      if(mins>=segStart && mins<segEnd) poolDollars += (o.order_tip_amount||0);
+      // order_tip_amount can come back as a numeric-looking string (Postgres
+      // numeric columns aren't always auto-coerced to a JS number) -- +=
+      // against a truthy non-empty string silently does string
+      // concatenation instead of addition, corrupting the running total.
+      // Number(...) forces real numeric addition regardless of the wire type.
+      if(mins>=segStart && mins<segEnd) poolDollars += Number(o.order_tip_amount)||0;
     });
     const poolCents = Math.round(poolDollars*100);
     if(poolCents<=0) continue;
@@ -8444,17 +8453,21 @@ async function renderPayrollTimesheets(){
   </select>`;
 
   // Tips need that period's Clover data loaded (cached after first load).
+  console.log('[timesheet-debug] renderPayrollTimesheets: about to load range', period.start, period.end);
   showLoadingOverlay('Loading pay period data...');
   await ensureCloverOrdersLoadedForRange(period.start, period.end);
   hideLoadingOverlay();
+  console.log('[timesheet-debug] renderPayrollTimesheets: range load done');
 
   const shiftsInPeriod = DB.shiftLog.filter(s=>s.workDate>=period.start && s.workDate<=period.end);
   const employeeIds = [...new Set(shiftsInPeriod.map(s=>s.employeeId))].sort((a,b)=>employeeName(a).localeCompare(employeeName(b)));
+  console.log('[timesheet-debug] shiftsInPeriod', shiftsInPeriod.length, 'employeeIds', employeeIds.length);
 
   let html;
   if(!employeeIds.length){
     html = `<div class="card"><div class="card-body" style="padding:32px;text-align:center;color:var(--ink-lo)">No shifts logged for this pay period.</div></div>`;
   } else {
+    console.log('[timesheet-debug] starting per-employee computation');
     html = employeeIds.map(empId=>{
       const shifts = shiftsInPeriod.filter(s=>s.employeeId===empId).sort((a,b)=>a.workDate.localeCompare(b.workDate)||(a.clockIn||'').localeCompare(b.clockIn||''));
       let totalHours=0, totalGross=0, totalTips=0;
@@ -8503,7 +8516,9 @@ async function renderPayrollTimesheets(){
       </div>`;
     }).join('');
   }
+  console.log('[timesheet-debug] per-employee computation done, writing content');
   $('content').innerHTML = html;
+  console.log('[timesheet-debug] renderPayrollTimesheets complete');
 }
 
 // One line per employee for a pay period: hours, avg rate, gross pay, tips,
@@ -8587,16 +8602,21 @@ async function renderPayrollTimesheetSummary(){
     ${periods.map(p=>`<option value="${p.start}" ${p.start===period.start?'selected':''}>${fmtDate(p.start)} \u2013 ${fmtDate(p.end)}</option>`).join('')}
   </select>`;
 
+  console.log('[timesheet-debug] renderPayrollTimesheetSummary: about to load range', period.start, period.end);
   showLoadingOverlay('Loading pay period data...');
   await ensureCloverOrdersLoadedForRange(period.start, period.end);
   hideLoadingOverlay();
+  console.log('[timesheet-debug] renderPayrollTimesheetSummary: range load done');
 
   const shiftsInPeriod = DB.shiftLog.filter(s=>s.workDate>=period.start && s.workDate<=period.end);
   const employeeIds = [...new Set(shiftsInPeriod.map(s=>s.employeeId))].sort((a,b)=>employeeName(a).localeCompare(employeeName(b)));
+  console.log('[timesheet-debug] shiftsInPeriod', shiftsInPeriod.length, 'employeeIds', employeeIds.length);
 
   let totHours=0, totGross=0, totTips=0, totPay=0;
   const rows = employeeIds.map(id=>{
+    console.log('[timesheet-debug] computeEmployeePeriodSummary start', id);
     const s = computeEmployeePeriodSummary(id, period);
+    console.log('[timesheet-debug] computeEmployeePeriodSummary done', id);
     totHours += s.hours; totGross += s.grossPay; totTips += s.tips; totPay += s.totalPay;
     return `<tr>
       <td>${employeeName(id)}</td>
@@ -8625,6 +8645,7 @@ async function renderPayrollTimesheetSummary(){
       </tbody>
     </table></div>
   </div>`;
+  console.log('[timesheet-debug] renderPayrollTimesheetSummary complete');
 }
 
 // ═══════════════════════════════════════════════
