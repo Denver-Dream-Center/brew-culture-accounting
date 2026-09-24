@@ -8114,15 +8114,17 @@ async function ensureCloverOrdersLoaded(dateStr){
   hideLoadingOverlay();
 }
 
-// Loads every date in [startDate, endDate] concurrently instead of one
-// await at a time -- faster, and (combined with the per-day timeout above)
-// means one slow/stalled day can't hold up the rest of the period's data,
-// or the view, indefinitely.
+// Loads every date in [startDate, endDate] one at a time (same sequencing
+// as before) rather than firing them all at once -- firing many concurrent
+// Supabase calls at once around the same time each may need to check/refresh
+// the auth session turned out to be a real regression risk (suspected of
+// causing the app to lock up entirely right after this was briefly changed
+// to Promise.all), so this stays sequential. The per-day timeout in
+// fetchCloverOrdersForDate is what actually protects against a stalled
+// request -- that part doesn't depend on concurrency and is kept.
 async function ensureCloverOrdersLoadedForRange(startDate, endDate){
-  const days = [];
   let d = startDate;
-  while(d <= endDate){ days.push(d); d = addDays(d,1); }
-  await Promise.all(days.map(fetchCloverOrdersForDate));
+  while(d <= endDate){ await fetchCloverOrdersForDate(d); d = addDays(d,1); }
 }
 
 // Tip segment engine -- splits a day's Clover tips among the employees who
