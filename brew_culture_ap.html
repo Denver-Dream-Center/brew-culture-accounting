@@ -7625,9 +7625,20 @@ function importData(input){
 // ═══════════════════════════════════════════════
 // PAYROLL MODULE — EMPLOYEES + PAY RATE HISTORY
 // ═══════════════════════════════════════════════
+// Pure calendar-date arithmetic -- deliberately UTC throughout (parse with
+// 'Z', advance with the UTC setter) so the result never depends on the
+// browser's local timezone. The previous version parsed/advanced in local
+// time before converting back via toISOString(): for anyone in a timezone
+// AHEAD of UTC, local midnight for "tomorrow" converts back to today's UTC
+// date, so the date never advanced -- turning every while(d <= end){...;
+// d=addDays(d,1)} loop in this file into a genuine infinite loop (confirmed
+// live: a RangeError: Invalid array length from Array.push in
+// ensureCloverOrdersLoadedForRange, after looping until the array hit its
+// length limit). This only ever surfaced for a user outside a
+// behind-UTC timezone, which is why it went unnoticed until now.
 function addDays(dateStr, days){
-  const d=new Date(dateStr+'T00:00:00');
-  d.setDate(d.getDate()+days);
+  const d=new Date(dateStr+'T00:00:00Z');
+  d.setUTCDate(d.getUTCDate()+days);
   return d.toISOString().slice(0,10);
 }
 
