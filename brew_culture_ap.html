@@ -8145,19 +8145,15 @@ async function ensureCloverOrdersLoadedForRange(startDate, endDate){
   while(d <= endDate){ if(!_cloverOrdersCache[d]) days.push(d); d = addDays(d,1); }
   if(!days.length) return;
 
-  console.log('[timesheet-debug] range fetch start', startDate, endDate);
-  const _t0 = performance.now();
-  // PostgREST caps a single response at 1000 rows by default. A live
-  // reproduction showed exactly rows=1000 for a range that actually holds
-  // ~7,800 orders -- the request wasn't failing, it was silently
-  // truncating, so most of the range (recent dates included) got zero
-  // order data and showed $0 tips with no error anywhere. Page through in
-  // ordered 1000-row chunks instead of assuming one response has everything.
-  // MAX_PAGES is a hard safety ceiling (50,000 rows) -- far beyond any
-  // realistic range for this app -- so this loop is guaranteed to
-  // terminate even if paging behaves unexpectedly; it is not an open-ended
-  // loop like the addDays bug was, since each iteration consumes real,
-  // finite data and stops as soon as a page comes back short.
+  // PostgREST caps a single response at 1000 rows by default, so a range
+  // wide enough to hold more than that (confirmed: ~7,800 orders across a
+  // ~2.5 month range) silently truncates rather than erroring. Page through
+  // in ordered 1000-row chunks instead of assuming one response has
+  // everything. MAX_PAGES is a hard safety ceiling (50,000 rows) -- far
+  // beyond any realistic range for this app -- so this loop is guaranteed
+  // to terminate regardless; it's not open-ended like the earlier addDays
+  // bug, since each iteration consumes real, finite data and stops as soon
+  // as a page comes back short.
   const PAGE_SIZE = 1000, MAX_PAGES = 50;
   let allRows = [];
   try{
@@ -8176,24 +8172,14 @@ async function ensureCloverOrdersLoadedForRange(startDate, endDate){
     }
 
     days.forEach(day=>{ _cloverOrdersCache[day] = []; }); // mark every requested day as loaded, even ones with zero orders
-    let grouped = 0, ungrouped = 0;
     allRows.forEach(row=>{
-      // Normalize to a plain YYYY-MM-DD key -- this is the first code path
-      // in the app that groups clover_orders rows by their OWN sale_date
-      // field rather than by the date string used to query them, so a
-      // wire-format quirk here would silently scatter rows under keys
-      // nothing else looks up. (Verified live: not actually happening --
-      // grouped/ungrouped counts always matched -- but kept as a safe no-op
-      // normalization regardless.)
-      const key = String(row.sale_date).slice(0,10);
+      const key = String(row.sale_date).slice(0,10); // normalize in case the wire format ever includes a time component
       if(_cloverOrdersCache[key]===undefined) _cloverOrdersCache[key] = [];
       _cloverOrdersCache[key].push(row);
-      if(days.includes(key)) grouped++; else ungrouped++;
     });
-    console.log('[timesheet-debug] range fetch done', startDate, endDate, 'totalRows=', allRows.length, 'pages=', Math.max(1,Math.ceil(allRows.length/PAGE_SIZE)), 'grouped=', grouped, 'ungrouped=', ungrouped, 'ms=', Math.round(performance.now()-_t0));
   }catch(e){
     // Leave the cache unset for the requested days so a later render can retry.
-    console.error('[timesheet-debug] range fetch FAILED/TIMED OUT', startDate, endDate, 'ms=', Math.round(performance.now()-_t0), e);
+    console.error('ensureCloverOrdersLoadedForRange', startDate, endDate, e);
   }
 }
 
@@ -8214,7 +8200,6 @@ function computeTipSplitForDay(dateStr, rawRows){
   const perRowMap = new Map();
   if(!rows.length) return {perEmployee, volunteerRevenue, perRowMap};
   const orderRows = _cloverOrdersCache[dateStr] || [];
-  if(orderRows.length > 2000) console.warn('[timesheet-debug] SUSPICIOUSLY LARGE orderRows for', dateStr, orderRows.length, '-- expected roughly a single day\'s worth');
 
   const boundarySet = new Set();
   rows.forEach(r=>{ boundarySet.add(timeToMinutes(r.clockIn)); boundarySet.add(timeToMinutes(r.clockOut)); });
@@ -8537,21 +8522,17 @@ async function renderPayrollTimesheets(){
   </select>`;
 
   // Tips need that period's Clover data loaded (cached after first load).
-  console.log('[timesheet-debug] renderPayrollTimesheets: about to load range', period.start, period.end);
   showLoadingOverlay('Loading pay period data...');
   await ensureCloverOrdersLoadedForRange(period.start, period.end);
   hideLoadingOverlay();
-  console.log('[timesheet-debug] renderPayrollTimesheets: range load done');
 
   const shiftsInPeriod = DB.shiftLog.filter(s=>s.workDate>=period.start && s.workDate<=period.end);
   const employeeIds = [...new Set(shiftsInPeriod.map(s=>s.employeeId))].sort((a,b)=>employeeName(a).localeCompare(employeeName(b)));
-  console.log('[timesheet-debug] shiftsInPeriod', shiftsInPeriod.length, 'employeeIds', employeeIds.length);
 
   let html;
   if(!employeeIds.length){
     html = `<div class="card"><div class="card-body" style="padding:32px;text-align:center;color:var(--ink-lo)">No shifts logged for this pay period.</div></div>`;
   } else {
-    console.log('[timesheet-debug] starting per-employee computation');
     html = employeeIds.map(empId=>{
       const shifts = shiftsInPeriod.filter(s=>s.employeeId===empId).sort((a,b)=>a.workDate.localeCompare(b.workDate)||(a.clockIn||'').localeCompare(b.clockIn||''));
       let totalHours=0, totalGross=0, totalTips=0;
@@ -8600,9 +8581,7 @@ async function renderPayrollTimesheets(){
       </div>`;
     }).join('');
   }
-  console.log('[timesheet-debug] per-employee computation done, writing content');
   $('content').innerHTML = html;
-  console.log('[timesheet-debug] renderPayrollTimesheets complete');
 }
 
 // One line per employee for a pay period: hours, avg rate, gross pay, tips,
@@ -8686,21 +8665,16 @@ async function renderPayrollTimesheetSummary(){
     ${periods.map(p=>`<option value="${p.start}" ${p.start===period.start?'selected':''}>${fmtDate(p.start)} \u2013 ${fmtDate(p.end)}</option>`).join('')}
   </select>`;
 
-  console.log('[timesheet-debug] renderPayrollTimesheetSummary: about to load range', period.start, period.end);
   showLoadingOverlay('Loading pay period data...');
   await ensureCloverOrdersLoadedForRange(period.start, period.end);
   hideLoadingOverlay();
-  console.log('[timesheet-debug] renderPayrollTimesheetSummary: range load done');
 
   const shiftsInPeriod = DB.shiftLog.filter(s=>s.workDate>=period.start && s.workDate<=period.end);
   const employeeIds = [...new Set(shiftsInPeriod.map(s=>s.employeeId))].sort((a,b)=>employeeName(a).localeCompare(employeeName(b)));
-  console.log('[timesheet-debug] shiftsInPeriod', shiftsInPeriod.length, 'employeeIds', employeeIds.length);
 
   let totHours=0, totGross=0, totTips=0, totPay=0;
   const rows = employeeIds.map(id=>{
-    console.log('[timesheet-debug] computeEmployeePeriodSummary start', id);
     const s = computeEmployeePeriodSummary(id, period);
-    console.log('[timesheet-debug] computeEmployeePeriodSummary done', id);
     totHours += s.hours; totGross += s.grossPay; totTips += s.tips; totPay += s.totalPay;
     return `<tr>
       <td>${employeeName(id)}</td>
@@ -8729,7 +8703,6 @@ async function renderPayrollTimesheetSummary(){
       </tbody>
     </table></div>
   </div>`;
-  console.log('[timesheet-debug] renderPayrollTimesheetSummary complete');
 }
 
 // ═══════════════════════════════════════════════
