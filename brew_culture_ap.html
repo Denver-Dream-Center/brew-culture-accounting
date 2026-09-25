@@ -8317,7 +8317,24 @@ function renderShiftLogSummaryTable(){
 async function renderPayrollShifts(){
   $('topbar-actions').innerHTML='';
   loadShiftFormForDate(shiftLogDate);
-  if(shiftLogDate) await ensureCloverOrdersLoaded(shiftLogDate);
+  // Load tip data for every date that appears in the Shift Log (plus the
+  // currently-selected entry-form date, which may not have any saved shifts
+  // yet) in one bulk range query, instead of the old "click each date to
+  // load it" flow -- so the Tips $ column is populated immediately on open,
+  // with no per-row placeholder to remember to click through before running
+  // payroll. One request for the whole range (same shared
+  // ensureCloverOrdersLoadedForRange used by Individual Timesheets/Summary),
+  // not one per day -- avoids the per-day-await pattern responsible for the
+  // September freeze bug.
+  const loggedDates = [...new Set(DB.shiftLog.map(s=>s.workDate))];
+  if(shiftLogDate) loggedDates.push(shiftLogDate);
+  if(loggedDates.length){
+    const minDate = loggedDates.reduce((a,b)=>a<b?a:b);
+    const maxDate = loggedDates.reduce((a,b)=>a>b?a:b);
+    showLoadingOverlay('Loading tip data...');
+    await ensureCloverOrdersLoadedForRange(minDate, maxDate);
+    hideLoadingOverlay();
+  }
   const dateSelected = !!shiftLogDate;
   const activeEmps = activeEmployeesAsOf(shiftLogDate);
   $('content').innerHTML = `<div class="card">
