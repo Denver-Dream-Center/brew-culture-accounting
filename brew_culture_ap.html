@@ -8154,13 +8154,23 @@ async function ensureCloverOrdersLoadedForRange(startDate, endDate){
       new Promise((_,reject)=>{ timeoutId = setTimeout(()=>reject(new Error('clover_orders range fetch timed out for '+startDate+'..'+endDate)), CLOVER_ORDERS_FETCH_TIMEOUT_MS); })
     ]);
     days.forEach(day=>{ _cloverOrdersCache[day] = []; }); // mark every requested day as loaded, even ones with zero orders
+    let grouped = 0, ungrouped = 0;
     if(!error && data){
       data.forEach(row=>{
-        if(!_cloverOrdersCache[row.sale_date]) _cloverOrdersCache[row.sale_date] = [];
-        _cloverOrdersCache[row.sale_date].push(row);
+        // Normalize to a plain YYYY-MM-DD key -- this is the first code path
+        // in the app that groups clover_orders rows by their OWN sale_date
+        // field rather than by the date string used to query them, so a
+        // wire-format quirk here (e.g. a trailing time component) would
+        // silently scatter rows under keys nothing else looks up, leaving
+        // every seeded day at its empty-array default ($0.00 tips) with no
+        // error anywhere.
+        const key = String(row.sale_date).slice(0,10);
+        if(_cloverOrdersCache[key]===undefined) _cloverOrdersCache[key] = [];
+        _cloverOrdersCache[key].push(row);
+        if(days.includes(key)) grouped++; else ungrouped++;
       });
     }
-    console.log('[timesheet-debug] range fetch done', startDate, endDate, 'rows=', data?data.length:0, 'ms=', Math.round(performance.now()-_t0), error?('error='+JSON.stringify(error)):'');
+    console.log('[timesheet-debug] range fetch done', startDate, endDate, 'rows=', data?data.length:0, 'grouped=', grouped, 'ungrouped=', ungrouped, 'sample sale_date=', data&&data[0]?JSON.stringify(data[0].sale_date):null, 'ms=', Math.round(performance.now()-_t0), error?('error='+JSON.stringify(error)):'');
   }catch(e){
     // Leave the cache unset for the requested days so a later render can retry.
     console.error('[timesheet-debug] range fetch FAILED/TIMED OUT', startDate, endDate, 'ms=', Math.round(performance.now()-_t0), e);
