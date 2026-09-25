@@ -8147,35 +8147,53 @@ async function ensureCloverOrdersLoadedForRange(startDate, endDate){
 
   console.log('[timesheet-debug] range fetch start', startDate, endDate);
   const _t0 = performance.now();
-  let timeoutId;
+  // PostgREST caps a single response at 1000 rows by default. A live
+  // reproduction showed exactly rows=1000 for a range that actually holds
+  // ~7,800 orders -- the request wasn't failing, it was silently
+  // truncating, so most of the range (recent dates included) got zero
+  // order data and showed $0 tips with no error anywhere. Page through in
+  // ordered 1000-row chunks instead of assuming one response has everything.
+  // MAX_PAGES is a hard safety ceiling (50,000 rows) -- far beyond any
+  // realistic range for this app -- so this loop is guaranteed to
+  // terminate even if paging behaves unexpectedly; it is not an open-ended
+  // loop like the addDays bug was, since each iteration consumes real,
+  // finite data and stops as soon as a page comes back short.
+  const PAGE_SIZE = 1000, MAX_PAGES = 50;
+  let allRows = [];
   try{
-    const {data, error} = await Promise.race([
-      _sb.from('clover_orders').select('sale_date,sale_time,order_tip_amount').gte('sale_date', startDate).lte('sale_date', endDate),
-      new Promise((_,reject)=>{ timeoutId = setTimeout(()=>reject(new Error('clover_orders range fetch timed out for '+startDate+'..'+endDate)), CLOVER_ORDERS_FETCH_TIMEOUT_MS); })
-    ]);
+    for(let page=0; page<MAX_PAGES; page++){
+      const offset = page*PAGE_SIZE;
+      let timeoutId;
+      const result = await Promise.race([
+        _sb.from('clover_orders').select('sale_date,sale_time,order_tip_amount').gte('sale_date', startDate).lte('sale_date', endDate).order('sale_date').range(offset, offset+PAGE_SIZE-1),
+        new Promise((_,reject)=>{ timeoutId = setTimeout(()=>reject(new Error('clover_orders range fetch timed out for '+startDate+'..'+endDate+' page '+page)), CLOVER_ORDERS_FETCH_TIMEOUT_MS); })
+      ]);
+      clearTimeout(timeoutId);
+      if(result.error) throw new Error('page '+page+': '+JSON.stringify(result.error));
+      const pageRows = result.data || [];
+      allRows = allRows.concat(pageRows);
+      if(pageRows.length < PAGE_SIZE) break; // last page
+    }
+
     days.forEach(day=>{ _cloverOrdersCache[day] = []; }); // mark every requested day as loaded, even ones with zero orders
     let grouped = 0, ungrouped = 0;
-    if(!error && data){
-      data.forEach(row=>{
-        // Normalize to a plain YYYY-MM-DD key -- this is the first code path
-        // in the app that groups clover_orders rows by their OWN sale_date
-        // field rather than by the date string used to query them, so a
-        // wire-format quirk here (e.g. a trailing time component) would
-        // silently scatter rows under keys nothing else looks up, leaving
-        // every seeded day at its empty-array default ($0.00 tips) with no
-        // error anywhere.
-        const key = String(row.sale_date).slice(0,10);
-        if(_cloverOrdersCache[key]===undefined) _cloverOrdersCache[key] = [];
-        _cloverOrdersCache[key].push(row);
-        if(days.includes(key)) grouped++; else ungrouped++;
-      });
-    }
-    console.log('[timesheet-debug] range fetch done', startDate, endDate, 'rows=', data?data.length:0, 'grouped=', grouped, 'ungrouped=', ungrouped, 'sample sale_date=', data&&data[0]?JSON.stringify(data[0].sale_date):null, 'ms=', Math.round(performance.now()-_t0), error?('error='+JSON.stringify(error)):'');
+    allRows.forEach(row=>{
+      // Normalize to a plain YYYY-MM-DD key -- this is the first code path
+      // in the app that groups clover_orders rows by their OWN sale_date
+      // field rather than by the date string used to query them, so a
+      // wire-format quirk here would silently scatter rows under keys
+      // nothing else looks up. (Verified live: not actually happening --
+      // grouped/ungrouped counts always matched -- but kept as a safe no-op
+      // normalization regardless.)
+      const key = String(row.sale_date).slice(0,10);
+      if(_cloverOrdersCache[key]===undefined) _cloverOrdersCache[key] = [];
+      _cloverOrdersCache[key].push(row);
+      if(days.includes(key)) grouped++; else ungrouped++;
+    });
+    console.log('[timesheet-debug] range fetch done', startDate, endDate, 'totalRows=', allRows.length, 'pages=', Math.max(1,Math.ceil(allRows.length/PAGE_SIZE)), 'grouped=', grouped, 'ungrouped=', ungrouped, 'ms=', Math.round(performance.now()-_t0));
   }catch(e){
     // Leave the cache unset for the requested days so a later render can retry.
     console.error('[timesheet-debug] range fetch FAILED/TIMED OUT', startDate, endDate, 'ms=', Math.round(performance.now()-_t0), e);
-  } finally {
-    clearTimeout(timeoutId);
   }
 }
 
