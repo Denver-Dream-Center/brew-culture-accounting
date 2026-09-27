@@ -1854,10 +1854,11 @@ function renderRevImport(){
       '</div>' +
       '<div class="card-body">' +
         '<div style="font-size:12px;color:var(--ink-mid);margin-bottom:12px">' +
-          'Drop the raw Clover daily sales file here first. It comes back reformatted with a blank ' +
-          '<strong>Bank_Sweep_Date</strong> column, dedup formulas for Net/Tax/Tip/Amount Collected/Credit ' +
-          'Collected, and a totals row \u2014 ready for you to move records between days, fill in the sweep ' +
-          'date, and re-upload through the Clover Import above.' +
+          'Drop the raw Clover daily sales file here first. It comes back reformatted with a ' +
+          '<strong>Bank_Sweep_Date</strong> column pre-filled from the sale date, dedup formulas for ' +
+          'Net/Tax/Tip/Amount Collected/Credit Collected, a Gift_Card_Redeemed column auto-filled for any ' +
+          'gift-card-tendered row, and a totals row \u2014 ready for you to move records between days by ' +
+          'overwriting the sweep date, and re-upload through the Clover Import above.' +
         '</div>' +
         '<div class="upload-zone" id="sweepprep-drop-zone" onclick="$$(\'sweepprep-file-input\').click()"' +
           ' ondragover="event.preventDefault();this.classList.add(\'dragover\')"' +
@@ -2303,12 +2304,14 @@ async function confirmLoyaltyImport(){
 // ═══════════════════════════════════════════════
 // REVENUE MODULE — BANK SWEEP PREP TOOL
 // Takes a raw Clover "Full Orders Detail" export and reformats it into the
-// bank-sweep-matching layout: inserts a blank Bank_Sweep_Date column plus
-// five Unique_* dedup columns with LIVE Excel formulas (not precomputed
-// values — this file is meant to be manually edited afterward, moved
-// between days, and re-totaled by Excel itself as records shift around),
-// then a totals row two rows below the last record. The result is handed
-// straight back as a download; nothing here touches the database at all.
+// bank-sweep-matching layout: inserts a Bank_Sweep_Date column pre-filled
+// from that row's sale date (still a plain editable value, so moving a
+// record onto a different bank-sweep day is just typing over it) plus six
+// Unique_*/Gift_Card_Redeemed columns with LIVE Excel formulas (not
+// precomputed values — this file is meant to be manually edited afterward,
+// moved between days, and re-totaled by Excel itself as records shift
+// around), then a totals row two rows below the last record. The result is
+// handed straight back as a download; nothing here touches the database at all.
 // ═══════════════════════════════════════════════
 function handleSweepPrepDrop(files){
   if(files && files[0]) processSweepPrepFile(files[0]);
@@ -2342,7 +2345,7 @@ function processSweepPrepFile(file){
       var a = document.createElement('a');
       a.href = url; a.download = outName; a.click();
       URL.revokeObjectURL(url);
-      resultEl.innerHTML = '<div class="alert alert-inv">Reformatted file downloaded as <strong>' + outName + '</strong>. Fill in Bank_Sweep_Date, move records between days as needed, then re-upload through the Clover Import above.</div>';
+      resultEl.innerHTML = '<div class="alert alert-inv">Reformatted file downloaded as <strong>' + outName + '</strong>. Move records between days as needed (overwrite Bank_Sweep_Date on those rows), then re-upload through the Clover Import above.</div>';
     } catch(err){
       resultEl.innerHTML = '<div class="alert" style="background:var(--red-lo);border:1px solid #EAB5B1;color:var(--red)">' + err.message + '</div>';
       console.error(err);
@@ -2397,16 +2400,18 @@ function buildSweepPrepWorkbook(ab){
   var colLetter = {};
   newHeaders.forEach(function(h, idx){ colLetter[h] = XLSX.utils.encode_col(idx); });
 
-  ['order','date','payment_type','Order_Net','Order_Tax','Order_Tip_Amount','Order_Amount_collected'].forEach(function(req){
+  ['order','date','payment_type','card_type','Order_Net','Order_Tax','Order_Tip_Amount','Order_Amount_collected'].forEach(function(req){
     if(colLetter[req] === undefined){
       throw new Error('Expected column "' + req + '" not found in this file \u2014 is this a Clover Full Orders Detail export?');
     }
   });
 
-  // Gift_Card_Redeemed is manual entry (blank by default, same as
-  // Bank_Sweep_Date) — everything else in UNIQUE_COLS gets a live formula.
+  // Gift_Card_Redeemed now gets a live formula too (see below) — only
+  // Bank_Sweep_Date stays manual/editable, pre-filled below from 'date' as
+  // a starting value the buyer can overwrite when a sale's bank settlement
+  // actually lands on a different day than the sale itself.
   var UNIQUE_COLS = ['Unique_Order_Net','Unique_Order_Tax','Unique_Order_Tip','Unique_Order_Amt_Collected','Unique_Credit_Amt_Collected'];
-  var BLANK_COLS = ['Bank_Sweep_Date','Gift_Card_Redeemed'];
+  var BLANK_COLS = ['Gift_Card_Redeemed']; // placeholder now, overwritten with a live formula below
 
   // Build row data first with plain placeholder values, then set live
   // formulas directly on the resulting cell objects afterward — aoa_to_sheet
@@ -2415,6 +2420,10 @@ function buildSweepPrepWorkbook(ab){
   rows.forEach(function(r){
     var rowArr = [];
     newHeaders.forEach(function(h){
+      // Bank_Sweep_Date starts equal to the sale date -- a plain editable
+      // value (not a formula), so typing a different date over it to move
+      // a record onto another bank-sweep day works exactly like any other cell.
+      if(h === 'Bank_Sweep_Date'){ rowArr.push(r['date']); return; }
       if(BLANK_COLS.indexOf(h) !== -1 || UNIQUE_COLS.indexOf(h) !== -1){ rowArr.push(''); return; }
       rowArr.push(r[h]);
     });
@@ -2451,14 +2460,22 @@ function buildSweepPrepWorkbook(ab){
       {t:'n', f:'IF(' + dedupCond + ',0,' + colLetter['Order_Tip_Amount'] + excelRow + ')'};
     newWs[colLetter['Unique_Order_Amt_Collected'] + excelRow] =
       {t:'n', f:'IF(' + dedupCond + ',0,' + colLetter['Order_Amount_collected'] + excelRow + ')'};
+    // Gift_Card_Redeemed: auto-filled whenever this row's card_type names a
+    // gift card, with the order's own collected amount -- so a wholly-gift-
+    // card-tendered order nets Unique_Credit_Amt_Collected to $0 below
+    // without needing a manual entry, and a split-tender order (gift card +
+    // credit card) still needs the buyer to type over this with just the
+    // gift-card portion by hand, same as before.
+    var ctCol = colLetter['card_type'];
+    var oaCell = colLetter['Order_Amount_collected'] + excelRow;
+    newWs[colLetter['Gift_Card_Redeemed'] + excelRow] =
+      {t:'n', f:'IF(ISNUMBER(SEARCH("GIFT_CARD",' + ctCol + excelRow + ')),' + oaCell + ',"")'};
     // Credit/debit only, net of any gift card portion. Uses SEARCH (a
     // substring check) rather than an exact match, since Clover reports
     // split-tender orders as a combined string like "Gift Cards, Credit
     // Card" — an exact "=" comparison against "Credit Card" would miss
     // these entirely and silently exclude the whole order from the
-    // credit-swept total, which is the bug this replaces. Gift_Card_Redeemed
-    // defaults to blank/0 for every normal order and only needs a manual
-    // entry on the rare split-tender row.
+    // credit-swept total, which is the bug this replaces.
     var pCol = colLetter['payment_type'];
     var uAmtCell = colLetter['Unique_Order_Amt_Collected'] + excelRow;
     var gcCell = colLetter['Gift_Card_Redeemed'] + excelRow;
