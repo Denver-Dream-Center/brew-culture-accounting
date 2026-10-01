@@ -794,14 +794,16 @@ function mapPayrollRunEmployeeFromDB(r) {
   return {
     id: r.id, payrollRunId: r.payroll_run_id, employeeId: r.employee_id,
     regularHours: r.regular_hours, regularRate: r.regular_rate, regularAmount: r.regular_amount,
-    tipsOwedAmount: r.tips_owed_amount, peerspaceAmount: r.peerspace_amount, grossAmount: r.gross_amount, netPay: r.net_pay
+    tipsOwedAmount: r.tips_owed_amount, peerspaceAmount: r.peerspace_amount,
+    otHours: r.ot_hours, otAmount: r.ot_amount, grossAmount: r.gross_amount, netPay: r.net_pay
   };
 }
 function mapPayrollRunEmployeeToDB(r) {
   return {
     id: r.id, payroll_run_id: r.payrollRunId, employee_id: r.employeeId,
     regular_hours: r.regularHours||0, regular_rate: r.regularRate||0, regular_amount: r.regularAmount||0,
-    tips_owed_amount: r.tipsOwedAmount||0, peerspace_amount: r.peerspaceAmount||0, gross_amount: r.grossAmount||0, net_pay: r.netPay||0
+    tips_owed_amount: r.tipsOwedAmount||0, peerspace_amount: r.peerspaceAmount||0,
+    ot_hours: r.otHours||0, ot_amount: r.otAmount||0, gross_amount: r.grossAmount||0, net_pay: r.netPay||0
   };
 }
 function mapPayrollLineItemFromDB(r) {
@@ -8401,9 +8403,26 @@ function renderShiftRows(){
   const activeEmps = activeEmployeesAsOf(shiftLogDate);
   const dayTips = shiftLogDate ? computeTipSplitForDay(shiftLogDate, shiftFormRows) : {perEmployee:{}, volunteerRevenue:0, perRowMap:new Map()};
 
+  // OT preview needs the rest of this week's actual hours per employee, with
+  // TODAY's own hours taken from the in-progress draft rows (not yet saved)
+  // rather than DB.shiftLog -- same overrideDayShifts mechanism used
+  // elsewhere, so a row can show correct OT status before it's been saved.
+  // Recomputed on every render, which only happens on blur/change of a
+  // clock time (the existing onchange pattern below), not per keystroke.
+  const rowSplits = new Map();
+  if(dateSelected){
+    const week = weekRangeFor(shiftLogDate);
+    const empIdsToday = [...new Set(shiftFormRows.filter(r=>r.employeeId).map(r=>r.employeeId))];
+    empIdsToday.forEach(empId=>{
+      const todaysRowsForEmp = shiftFormRows.filter(r=>r.employeeId===empId);
+      const split = computeWeeklyOvertimeSplit(empId, week.weekStart, week.weekEnd, {[shiftLogDate]: todaysRowsForEmp});
+      split.rows.forEach((v,k)=>rowSplits.set(k,v));
+    });
+  }
+
   body.innerHTML = shiftFormRows.map((row,i)=>{
     const dur = shiftDurationHours(row.clockIn, row.clockOut);
-    let hoursText='', payText='', tipsText='';
+    let hoursText='', payText='', tipsText='', rowOT=null;
     if(dur!==null && row.employeeId){
       hoursText = dur.toFixed(2)+' hrs';
       const status = statusAsOf(row.employeeId, shiftLogDate);
@@ -8411,19 +8430,28 @@ function renderShiftRows(){
       const empType = status ? status.employmentType : (emp?emp.employmentType:null);
       if(empType==='hourly'){
         const rate = payRateAsOf(row.employeeId, shiftLogDate);
-        if(rate && rate.payRateType==='hourly') payText = fmt(dur*rate.payRate);
+        if(rate && rate.payRateType==='hourly'){
+          const split = rowSplits.get(row);
+          if(split && split.otHours>0){
+            rowOT = split;
+            hoursText = `${dur.toFixed(2)} hrs (${split.otHours.toFixed(2)} OT)`;
+            payText = fmt(split.regularPay+split.otPay);
+          } else {
+            payText = fmt(dur*rate.payRate);
+          }
+        }
       }
       const tipAmt = dayTips.perRowMap.get(row);
       if(tipAmt!==undefined) tipsText = fmt(tipAmt);
     }
-    return `<div style="display:grid;grid-template-columns:2fr 1fr 1fr 0.8fr 0.9fr 0.9fr 36px;gap:8px;margin-bottom:8px;align-items:center">
+    return `<div style="display:grid;grid-template-columns:2fr 1fr 1fr 0.8fr 0.9fr 0.9fr 36px;gap:8px;margin-bottom:8px;align-items:center${rowOT?';background:#fff3cd;border-radius:var(--r)':''}" ${rowOT?`title="Includes ${rowOT.otHours.toFixed(2)} overtime hour(s) at 1.5x rate"`:''}>
     <select ${dateSelected?'':'disabled'} onchange="shiftFormRows[${i}].employeeId=this.value;renderShiftRows()">
       <option value="">${dateSelected?'Select employee…':'Select a date first'}</option>
       ${dateSelected?activeEmps.map(e=>`<option value="${e.id}" ${row.employeeId===e.id?'selected':''}>${e.name}</option>`).join(''):''}
     </select>
     <input type="time" ${dateSelected?'':'disabled'} value="${row.clockIn||''}" onchange="shiftFormRows[${i}].clockIn=this.value;renderShiftRows()">
     <input type="time" ${dateSelected?'':'disabled'} value="${row.clockOut||''}" onchange="shiftFormRows[${i}].clockOut=this.value;renderShiftRows()">
-    <div class="mono" style="font-size:12px;color:var(--ink-mid);text-align:right">${hoursText}</div>
+    <div class="mono" style="font-size:12px;color:${rowOT?'var(--amber-dark,#8a6500)':'var(--ink-mid)'};text-align:right">${hoursText}${rowOT?' ⚠':''}</div>
     <div class="mono" style="font-size:12px;color:var(--ink-mid);text-align:right">${payText}</div>
     <div class="mono" style="font-size:12px;color:var(--ink-mid);text-align:right">${tipsText}</div>
     <button class="rm-btn" onclick="removeShiftRow(${i})">×</button>
@@ -8510,6 +8538,17 @@ function payPeriodEndFor(dateStr){
   return addDays(payPeriodStartFor(dateStr), PAY_PERIOD_LENGTH-1);
 }
 
+// The calendar Monday-Sunday week containing dateStr. Pay periods are
+// always two such weeks back-to-back starting on the period's own Monday,
+// so this just picks whichever half of payPeriodStartFor's period dateStr
+// falls in -- used by computeWeeklyOvertimeSplit callers that only have a
+// single date (e.g. the Shift Log entry form) rather than a whole period.
+function weekRangeFor(dateStr){
+  const periodStart = payPeriodStartFor(dateStr);
+  const weekStart = dateDiffDays(periodStart, dateStr) < 7 ? periodStart : addDays(periodStart, 7);
+  return {weekStart, weekEnd: addDays(weekStart, 6)};
+}
+
 // Every period from the earliest logged shift (or 10/27/25, whichever is
 // earlier) through today, most recent first.
 function listPayPeriods(){
@@ -8552,18 +8591,32 @@ async function renderPayrollTimesheets(){
   } else {
     html = employeeIds.map(empId=>{
       const shifts = shiftsInPeriod.filter(s=>s.employeeId===empId).sort((a,b)=>a.workDate.localeCompare(b.workDate)||(a.clockIn||'').localeCompare(b.clockIn||''));
-      let totalHours=0, totalGross=0, totalTips=0;
+      const week1End = addDays(period.start, 6);
+      const week2Start = addDays(period.start, 7);
+      const w1 = computeWeeklyOvertimeSplit(empId, period.start, week1End);
+      const w2 = computeWeeklyOvertimeSplit(empId, week2Start, period.end);
+      const rowSplits = new Map([...w1.rows, ...w2.rows]);
+      let totalRegHours=0, totalOTHours=0, totalRegPay=0, totalOTPay=0, totalTips=0;
       const rows = shifts.map(s=>{
         const dur = shiftDurationHours(s.clockIn, s.clockOut);
         const weekday = new Date(s.workDate+'T12:00:00').toLocaleDateString('en-US',{weekday:'short'});
         const rate = payRateAsOf(empId, s.workDate);
         const status = statusAsOf(empId, s.workDate);
         const rateStr = rate ? (rate.payRateType==='salary'?fmt(rate.payRate)+'/yr':fmt(rate.payRate)+'/hr') : '—';
-        let grossStr='—', tipsStr='—';
+        let regHoursStr='—', otHoursStr='—', regPayStr='—', otPayStr='—', tipsStr='—';
         if(dur!==null){
-          totalHours += dur;
-          if(status && status.employmentType==='hourly' && rate && rate.payRateType==='hourly'){
-            const gross = dur*rate.payRate; totalGross += gross; grossStr = fmt(gross);
+          const isHourlyDay = status && status.employmentType==='hourly' && rate && rate.payRateType==='hourly';
+          const split = rowSplits.get(s);
+          if(isHourlyDay && split){
+            totalRegHours += split.regularHours; totalOTHours += split.otHours;
+            totalRegPay += split.regularPay; totalOTPay += split.otPay;
+            regHoursStr = split.regularHours.toFixed(2);
+            otHoursStr = split.otHours>0 ? split.otHours.toFixed(2) : '—';
+            regPayStr = fmt(split.regularPay);
+            otPayStr = split.otHours>0 ? fmt(split.otPay) : '—';
+          } else {
+            totalRegHours += dur;
+            regHoursStr = dur.toFixed(2);
           }
           const daySplit = computeTipSplitForDay(s.workDate, DB.shiftLog.filter(x=>x.workDate===s.workDate));
           const tipAmt = daySplit.perEmployee[empId];
@@ -8575,22 +8628,27 @@ async function renderPayrollTimesheets(){
           <td class="mono">${rateStr}</td>
           <td class="mono">${fmtTime12(s.clockIn)}</td>
           <td class="mono">${s.clockOut?fmtTime12(s.clockOut):'—'}</td>
-          <td class="text-right mono">${dur!==null?dur.toFixed(2):'—'}</td>
-          <td class="text-right mono">${grossStr}</td>
+          <td class="text-right mono">${regHoursStr}</td>
+          <td class="text-right mono">${otHoursStr}</td>
+          <td class="text-right mono">${regPayStr}</td>
+          <td class="text-right mono">${otPayStr}</td>
           <td class="text-right mono">${tipsStr}</td>
         </tr>`;
       }).join('');
+      const totalHours = totalRegHours + totalOTHours;
       return `<div class="card" style="margin-bottom:16px">
         <div class="card-header"><span class="card-title">${employeeName(empId)}</span>
-          <span style="font-size:12px;color:var(--ink-mid)">${totalHours.toFixed(2)} hrs \u00b7 ${fmt(totalGross)} gross \u00b7 ${fmt(totalTips)} tips</span>
+          <span style="font-size:12px;color:var(--ink-mid)">${totalHours.toFixed(2)} hrs \u00b7 ${fmt(totalRegPay+totalOTPay)} gross \u00b7 ${fmt(totalTips)} tips</span>
         </div>
         <div class="tbl-wrap"><table>
-          <thead><tr><th>Date</th><th>Day</th><th>Wage Rate</th><th>Clock In</th><th>Clock Out</th><th class="text-right">Hours</th><th class="text-right">Gross Wages</th><th class="text-right">Tips</th></tr></thead>
+          <thead><tr><th>Date</th><th>Day</th><th>Wage Rate</th><th>Clock In</th><th>Clock Out</th><th class="text-right">Reg Hours</th><th class="text-right">OT Hours</th><th class="text-right">Regular Pay</th><th class="text-right">OT Premium</th><th class="text-right">Tips</th></tr></thead>
           <tbody>${rows}
           <tr style="border-top:2px solid var(--border);font-weight:600">
             <td colspan="5">Subtotal</td>
-            <td class="text-right mono">${totalHours.toFixed(2)}</td>
-            <td class="text-right mono">${fmt(totalGross)}</td>
+            <td class="text-right mono">${totalRegHours.toFixed(2)}</td>
+            <td class="text-right mono">${totalOTHours>0?totalOTHours.toFixed(2):'—'}</td>
+            <td class="text-right mono">${fmt(totalRegPay)}</td>
+            <td class="text-right mono">${totalOTPay>0?fmt(totalOTPay):'—'}</td>
             <td class="text-right mono">${fmt(totalTips)}</td>
           </tr>
           </tbody>
@@ -8599,6 +8657,97 @@ async function renderPayrollTimesheets(){
     }).join('');
   }
   $('content').innerHTML = html;
+}
+
+// Colorado overtime (7 CCR 1103-1, COMPS Order): 1.5x the regular rate for
+// the GREATER of (a) hours over 40 in the calendar week or (b) hours over
+// 12 in a single workday -- not additive, whichever method yields more OT
+// hours for the week wins. (The third CO trigger, 12 consecutive hours
+// regardless of workday boundaries, isn't handled -- shifts don't cross
+// midnight in this system, so it can't fire; flag if that ever changes.)
+// Only hourly-classified days count toward either threshold -- a salaried
+// day's hours are excluded entirely, not just zero-rated.
+//
+// weekStart/weekEnd must be one calendar Monday-Sunday week (pay periods
+// here are always exactly two such weeks, so callers split a period in
+// half before calling this -- OT is a weekly concept, never computed
+// across more or less than one real week).
+//
+// overrideDayShifts (optional): {workDate: [{clockIn,clockOut}, ...]} --
+// substitutes draft/unsaved rows for specific dates instead of what's
+// saved in DB.shiftLog, so the Shift Log entry form can preview OT for the
+// day currently being edited using in-progress clock times.
+//
+// Once the week's total OT hours is known, which SPECIFIC hours count as
+// OT is allocated chronologically from the END of the week backward (last
+// worked hours are OT first) -- both across days, and within a day across
+// that day's own rows (latest clock-in absorbs OT first) -- so a day or
+// shift that's only partially in overtime still attributes correctly, and
+// the pay rate used for OT hours is whatever was effective on the actual
+// day those hours were worked (payRateAsOf, same as everywhere else).
+//
+// Returns week totals (weekRegularHours, weekOTHours, regularPay, otPay),
+// a per-day breakdown, and a Map keyed by each shift-row object (whichever
+// object was iterated to build it, real or override) to its own
+// {hours, regularHours, otHours, regularPay, otPay} -- callers look up a
+// specific row's split via rows.get(thatRowObject).
+function computeWeeklyOvertimeSplit(employeeId, weekStart, weekEnd, overrideDayShifts){
+  overrideDayShifts = overrideDayShifts || {};
+  const emp = DB.employees.find(e=>e.id===employeeId);
+  const days = [];
+  let d = weekStart;
+  while(d <= weekEnd){
+    const dayRows = overrideDayShifts[d] !== undefined
+      ? overrideDayShifts[d]
+      : DB.shiftLog.filter(s=>s.employeeId===employeeId && s.workDate===d);
+    const rowsWithHours = dayRows
+      .map(r=>({row:r, hours:shiftDurationHours(r.clockIn, r.clockOut)}))
+      .filter(x=>x.hours!==null && x.hours>0);
+    const dailyHours = rowsWithHours.reduce((s,x)=>s+x.hours, 0);
+    const status = statusAsOf(employeeId, d);
+    const empType = status ? status.employmentType : (emp?emp.employmentType:null);
+    days.push({date:d, rows:rowsWithHours, dailyHours, otEligible: empType==='hourly'});
+    d = addDays(d,1);
+  }
+
+  const eligibleDays = days.filter(day=>day.otEligible);
+  const dailyOTSum = eligibleDays.reduce((s,day)=>s+Math.max(0, day.dailyHours-12), 0);
+  const weeklyTotal = eligibleDays.reduce((s,day)=>s+day.dailyHours, 0);
+  const weeklyOTCandidate = Math.max(0, weeklyTotal-40);
+  const weekOTHours = Math.max(dailyOTSum, weeklyOTCandidate);
+  const weekRegularHours = weeklyTotal - weekOTHours;
+
+  let remainingOT = weekOTHours;
+  const dayResults = {};
+  const rowResults = new Map();
+  let regularPay = 0, otPay = 0;
+  for(let i=days.length-1; i>=0; i--){
+    const day = days[i];
+    const rate = payRateAsOf(employeeId, day.date);
+    const payRate = (rate && rate.payRateType==='hourly') ? rate.payRate : 0;
+    let dayOT = 0;
+    if(day.otEligible){
+      dayOT = Math.min(day.dailyHours, remainingOT);
+      remainingOT -= dayOT;
+    }
+    const dayRegular = day.dailyHours - dayOT;
+    dayResults[day.date] = {hours:day.dailyHours, regularHours:dayRegular, otHours:dayOT};
+
+    // Latest clock-in within the day absorbs OT first, same "from the end" rule as across days.
+    const sortedRows = [...day.rows].sort((a,b)=>(b.row.clockIn||'').localeCompare(a.row.clockIn||''));
+    let rowRemainingOT = dayOT;
+    sortedRows.forEach(x=>{
+      const rOT = day.otEligible ? Math.min(x.hours, rowRemainingOT) : 0;
+      rowRemainingOT -= rOT;
+      const rRegular = x.hours - rOT;
+      const rRegularPay = day.otEligible ? rRegular*payRate : 0;
+      const rOTPay = rOT*1.5*payRate;
+      regularPay += rRegularPay; otPay += rOTPay;
+      rowResults.set(x.row, {hours:x.hours, regularHours:rRegular, otHours:rOT, regularPay:rRegularPay, otPay:rOTPay});
+    });
+  }
+
+  return {weekRegularHours, weekOTHours, regularPay, otPay, days:dayResults, rows:rowResults};
 }
 
 // One line per employee for a pay period: hours, avg rate, gross pay, tips,
@@ -8611,7 +8760,9 @@ async function renderPayrollTimesheets(){
 // transition (e.g. salaried through 8/19, hourly starting 8/20). Each
 // day's own status/rate is looked up independently, so this naturally
 // reduces to the old single-classification behavior for anyone who
-// didn't change classification during the period.
+// didn't change classification during the period. Hourly wages now split
+// into regular/OT via computeWeeklyOvertimeSplit, one call per calendar
+// week in the period (pay periods here are always exactly two).
 function computeEmployeePeriodSummary(empId, period){
   const emp = DB.employees.find(e=>e.id===empId);
   const shifts = DB.shiftLog.filter(s=>s.employeeId===empId && s.workDate>=period.start && s.workDate<=period.end);
@@ -8624,7 +8775,6 @@ function computeEmployeePeriodSummary(empId, period){
   shifts.forEach(s=>{ const d=shiftDurationHours(s.clockIn,s.clockOut); if(d!==null) hours+=d; });
 
   let salariedDailyTotal = 0;  // sum of (annual salary / 26 / 14) for each salaried calendar day in the period
-  let hourlyWages = 0;         // sum of hours x effective rate for each hourly-classified day
   let tipsSalaried = 0, tipsHourly = 0;
   let sawSalariedDay = false, sawHourlyDay = false;
 
@@ -8643,18 +8793,25 @@ function computeEmployeePeriodSummary(empId, period){
       tipsSalaried += tipAmt;
     } else if(empType==='hourly'){
       sawHourlyDay = true;
-      dayShifts.filter(s=>s.employeeId===empId).forEach(s=>{
-        const dur = shiftDurationHours(s.clockIn, s.clockOut);
-        if(dur!==null){
-          const r = payRateAsOf(empId, d);
-          if(r && r.payRateType==='hourly') hourlyWages += dur*r.payRate;
-        }
-      });
       tipsHourly += tipAmt;
     }
     // volunteer days contribute no wages and (per policy) no personal tips
     d = addDays(d,1);
   }
+
+  // Hourly wages, OT-aware. A pay period here is always exactly two
+  // calendar weeks (Monday-Sunday), and overtime is strictly a weekly
+  // concept, so split the period in half and run each week through
+  // computeWeeklyOvertimeSplit rather than summing hours x rate directly.
+  const week1End = addDays(period.start, 6);
+  const week2Start = addDays(period.start, 7);
+  const w1 = computeWeeklyOvertimeSplit(empId, period.start, week1End);
+  const w2 = computeWeeklyOvertimeSplit(empId, week2Start, period.end);
+  const regularHours = w1.weekRegularHours + w2.weekRegularHours;
+  const otHours = w1.weekOTHours + w2.weekOTHours;
+  const regularPay = w1.regularPay + w2.regularPay;
+  const otPay = w1.otPay + w2.otPay;
+  const hourlyWages = regularPay + otPay;
 
   const tips = tipsSalaried + tipsHourly;
   let grossPay, flaggedExceed = false;
@@ -8668,7 +8825,7 @@ function computeEmployeePeriodSummary(empId, period){
   const avgRate = hours>0 ? grossPay/hours : null;
   const empType = (sawSalariedDay && sawHourlyDay) ? 'mixed' : (sawHourlyDay ? 'hourly' : (sawSalariedDay ? 'salaried' : null));
 
-  return {hours, avgRate, grossPay, tips, totalPay, flaggedExceed, empType};
+  return {hours, avgRate, grossPay, tips, totalPay, flaggedExceed, empType, regularHours, otHours, regularPay, otPay};
 }
 
 async function renderPayrollTimesheetSummary(){
@@ -8689,31 +8846,36 @@ async function renderPayrollTimesheetSummary(){
   const shiftsInPeriod = DB.shiftLog.filter(s=>s.workDate>=period.start && s.workDate<=period.end);
   const employeeIds = [...new Set(shiftsInPeriod.map(s=>s.employeeId))].sort((a,b)=>employeeName(a).localeCompare(employeeName(b)));
 
-  let totHours=0, totGross=0, totTips=0, totPay=0;
+  let totRegHours=0, totOTHours=0, totGross=0, totOTPay=0, totTips=0, totPay=0;
   const rows = employeeIds.map(id=>{
     const s = computeEmployeePeriodSummary(id, period);
-    totHours += s.hours; totGross += s.grossPay; totTips += s.tips; totPay += s.totalPay;
+    totRegHours += s.regularHours; totOTHours += s.otHours; totGross += s.grossPay; totOTPay += s.otPay; totTips += s.tips; totPay += s.totalPay;
     return `<tr>
       <td>${employeeName(id)}</td>
-      <td class="text-right mono">${s.hours.toFixed(2)}</td>
-      <td class="text-right mono">${s.avgRate!==null?fmt(s.avgRate)+'/hr':'—'}</td>
+      <td class="text-right mono">${s.regularHours.toFixed(2)}</td>
+      <td class="text-right mono">${s.otHours>0?s.otHours.toFixed(2):'\u2014'}</td>
+      <td class="text-right mono">${s.avgRate!==null?fmt(s.avgRate)+'/hr':'\u2014'}</td>
       <td class="text-right mono">${fmt(s.grossPay)}</td>
+      <td class="text-right mono">${s.otHours>0?fmt(s.otPay):'\u2014'}</td>
       <td class="text-right mono">${fmt(s.tips)}</td>
       <td class="text-right mono">${fmt(s.totalPay)}${s.flaggedExceed?' <span style="color:var(--red)" title="Tips exceeded period salary -- gross pay floored at $0">\u26a0</span>':''}</td>
     </tr>`;
   }).join('');
+  const totHours = totRegHours + totOTHours;
   const avgRateTotal = totHours>0 ? totGross/totHours : 0;
 
   $('content').innerHTML = `<div class="card">
     <div class="card-header"><span class="card-title">${fmtDate(period.start)} \u2013 ${fmtDate(period.end)}</span><span style="font-size:12px;color:var(--ink-mid)">${employeeIds.length} employee${employeeIds.length!==1?'s':''}</span></div>
     <div class="tbl-wrap"><table>
-      <thead><tr><th>Employee</th><th class="text-right">Hours</th><th class="text-right">Avg Rate</th><th class="text-right">Gross Pay</th><th class="text-right">Tips</th><th class="text-right">Total Pay (incl. Tips)</th></tr></thead>
-      <tbody>${rows||'<tr><td colspan="6" class="text-center" style="padding:32px;color:var(--ink-lo)">No shifts logged for this pay period.</td></tr>'}
+      <thead><tr><th>Employee</th><th class="text-right">Reg Hours</th><th class="text-right">OT Hours</th><th class="text-right">Avg Rate</th><th class="text-right">Gross Pay</th><th class="text-right">OT Premium</th><th class="text-right">Tips</th><th class="text-right">Total Pay (incl. Tips)</th></tr></thead>
+      <tbody>${rows||'<tr><td colspan="8" class="text-center" style="padding:32px;color:var(--ink-lo)">No shifts logged for this pay period.</td></tr>'}
       ${employeeIds.length?`<tr style="border-top:2px solid var(--border);font-weight:600">
         <td>Period Total</td>
-        <td class="text-right mono">${totHours.toFixed(2)}</td>
+        <td class="text-right mono">${totRegHours.toFixed(2)}</td>
+        <td class="text-right mono">${totOTHours>0?totOTHours.toFixed(2):'\u2014'}</td>
         <td class="text-right mono">${fmt(avgRateTotal)}/hr</td>
         <td class="text-right mono">${fmt(totGross)}</td>
+        <td class="text-right mono">${totOTPay>0?fmt(totOTPay):'\u2014'}</td>
         <td class="text-right mono">${fmt(totTips)}</td>
         <td class="text-right mono">${fmt(totPay)}</td>
       </tr>`:''}
@@ -8743,6 +8905,7 @@ function loadPayrollRunState(runId){
   const employees = empLines.map(e=>({
     localId:e.id, employeeId:e.employeeId, regHours:e.regularHours,
     regAmount:e.regularAmount, tipsAmount:e.tipsOwedAmount, peerspaceAmount:e.peerspaceAmount||0,
+    otHours:e.otHours||0, otAmount:e.otAmount||0,
     taxLines: lineItems.filter(l=>l.employeeId===e.employeeId).map(l=>({localId:l.id, category:l.category, code:l.code, eeOrEr:l.eeOrEr, amount:l.amount}))
   }));
   const otherItems = lineItems.filter(l=>!l.employeeId).map(l=>({localId:l.id, category:l.category, code:l.code, eeOrEr:l.eeOrEr, amount:l.amount}));
@@ -8826,7 +8989,7 @@ function parsePayrollDetailXLSX(ab){
     if(!name) continue;
     if(/^Company Total/.test(name) || /^Pay Frequency Total/.test(name)) break;
 
-    const emp = {employeeId: matchEmployeeByAdpName(name), adpName:name, regHours:'', regAmount:'', tipsAmount:'', peerspaceAmount:'', taxLines:[], reportedNetPay:null, paymentDates:[]};
+    const emp = {employeeId: matchEmployeeByAdpName(name), adpName:name, regHours:'', regAmount:'', tipsAmount:'', peerspaceAmount:'', otHours:'', otAmount:'', taxLines:[], reportedNetPay:null, paymentDates:[]};
     if(!emp.employeeId) warnings.push(`"${name}" did not match any employee profile -- assign manually.`);
 
     earningBlocks.forEach(b=>{
@@ -8836,6 +8999,7 @@ function parsePayrollDetailXLSX(ab){
       if(label.startsWith('regular')){ emp.regHours = hours!==''?hours:''; emp.regAmount = amount!==''?amount:''; }
       else if(label.startsWith('tips')){ emp.tipsAmount = amount!==''?amount:''; }
       else if(label.startsWith('peerspace')){ emp.peerspaceAmount = amount!==''?amount:''; }
+      else if(label.startsWith('overtime')){ emp.otHours = hours!==''?hours:''; emp.otAmount = amount!==''?amount:''; }
       else if(amount!=='' && amount!=null){ warnings.push(`${name}: unrecognized earning type "${row[b.nameIdx]}" ($${amount}) was not imported.`); }
     });
 
@@ -8888,7 +9052,7 @@ function handlePayrollImportFile(input){
     }
     prState.employees = parsed.employees.map(e=>({
       localId:null, employeeId:e.employeeId||'', regHours:e.regHours, regAmount:e.regAmount,
-      tipsAmount:e.tipsAmount, peerspaceAmount:e.peerspaceAmount, taxLines:e.taxLines,
+      tipsAmount:e.tipsAmount, peerspaceAmount:e.peerspaceAmount, otHours:e.otHours, otAmount:e.otAmount, taxLines:e.taxLines,
       reportedNetPay: e.reportedNetPay, _adpName: e.employeeId?null:e.adpName
     }));
     renderPayrollRunEntry();
@@ -8951,7 +9115,7 @@ function startEditPayrollRun(runId){
 }
 
 function prAddEmployee(){
-  prState.employees.push({localId:null, employeeId:'', regHours:'', regAmount:'', tipsAmount:'', peerspaceAmount:'', taxLines:[]});
+  prState.employees.push({localId:null, employeeId:'', regHours:'', regAmount:'', tipsAmount:'', peerspaceAmount:'', otHours:'', otAmount:'', taxLines:[]});
   renderPayrollRunEntry();
 }
 function prRemoveEmployee(i){
@@ -9013,7 +9177,7 @@ function prRateCellHtml(e){
   return `<span class="mono" style="color:var(--ink-mid)">${fmt(rate.payRate)}/hr</span>`;
 }
 function prEmployeeGross(e){
-  return prNum(e.regAmount) + prNum(e.tipsAmount) + prNum(e.peerspaceAmount);
+  return prNum(e.regAmount) + prNum(e.tipsAmount) + prNum(e.peerspaceAmount) + prNum(e.otAmount);
 }
 function prEmployeeNet(e){
   const eeSum = e.taxLines.filter(t=>t.eeOrEr==='EE').reduce((s,t)=>s+prNum(t.amount),0);
@@ -9107,11 +9271,11 @@ function renderPayrollRunEntry(){
   const h = prState.header;
   const empOptions = employeesActiveInRange(h.periodStart, h.periodEnd);
 
-  const empGridCols = '2fr 0.8fr 0.9fr 1fr 1fr 1fr 1fr 1fr 32px';
+  const empGridCols = '2fr 0.8fr 0.9fr 1fr 1fr 1fr 1fr 1fr 1fr 32px';
   const taxGridCols = '1fr 1.6fr 0.8fr 1fr 32px';
 
   const empHeaderHtml = `<div style="display:grid;grid-template-columns:${empGridCols};gap:6px;padding:0 0 4px;font-size:10px;font-weight:600;color:var(--ink-lo);letter-spacing:.05em;text-transform:uppercase">
-    <span>Employee</span><span>Hours</span><span>Rate</span><span>Regular $</span><span>Tips $</span><span>Peerspace $</span><span>Gross Pay</span><span>Net Pay</span><span></span>
+    <span>Employee</span><span>Hours</span><span>Rate</span><span>Regular $</span><span>Tips $</span><span>Peerspace $</span><span>OT $</span><span>Gross Pay</span><span>Net Pay</span><span></span>
   </div>`;
   const taxHeaderHtml = `<div style="display:grid;grid-template-columns:${taxGridCols};gap:6px;margin:6px 0 2px 24px;font-size:10px;font-weight:600;color:var(--ink-lo);letter-spacing:.05em;text-transform:uppercase">
     <span>Category</span><span>Description</span><span>EE / ER</span><span>Amount</span><span></span>
@@ -9147,6 +9311,7 @@ function renderPayrollRunEntry(){
         <input type="number" step="0.01" value="${e.regAmount}" oninput="prState.employees[${i}].regAmount=this.value;prUpdateEmployeeRow(${i})">
         <input type="number" step="0.01" value="${e.tipsAmount}" oninput="prState.employees[${i}].tipsAmount=this.value;prUpdateEmployeeRow(${i})">
         <input type="number" step="0.01" value="${e.peerspaceAmount}" oninput="prState.employees[${i}].peerspaceAmount=this.value;prUpdateEmployeeRow(${i})">
+        <input type="number" step="0.01" value="${e.otAmount}" oninput="prState.employees[${i}].otAmount=this.value;prUpdateEmployeeRow(${i})">
         <div id="pr-emp-gross-${i}" class="mono" style="font-size:13px;font-weight:600">${fmt(prEmployeeGross(e))}</div>
         <div id="pr-emp-net-${i}" style="font-size:13px">${prNetCellHtml(e)}</div>
         <button class="rm-btn" onclick="prRemoveEmployee(${i})">×</button>
@@ -9287,6 +9452,7 @@ async function savePayrollRun(){
       id:empLineId, payrollRunId:runId, employeeId:e.employeeId,
       regularHours:prNum(e.regHours), regularRate: rate?rate.payRate:0, regularAmount:prNum(e.regAmount),
       tipsOwedAmount:prNum(e.tipsAmount), peerspaceAmount:prNum(e.peerspaceAmount),
+      otHours:prNum(e.otHours), otAmount:prNum(e.otAmount),
       grossAmount: prEmployeeGross(e), netPay: prEmployeeNet(e)
     };
     const okEmp = await sbInsert('payroll_run_employees', mapPayrollRunEmployeeToDB(empRow));
