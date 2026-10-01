@@ -9193,12 +9193,42 @@ function prNetCellHtml(e){
   if(diff<=0.01) return netStr;
   return netStr + `<div style="font-size:10px;color:var(--red);line-height:1.3">Imported Net Pay was ${fmt(prNum(e.reportedNetPay))} -- check tax/deduction lines</div>`;
 }
+// Shift Log's own OT calculation for this employee over the run's entered
+// pay period -- the "expected" side of the OT hours cross-check, same role
+// prProfileRate plays for the Rate check. Only trustworthy when the entered
+// period is a real 14-day Mon-Sun pay period (computeEmployeePeriodSummary
+// assumes that shape to split it into two weeks) -- an off-cycle run or a
+// not-yet-fully-entered period returns null rather than a misleading number.
+function prExpectedFromShiftLog(e){
+  if(!e.employeeId) return null;
+  const h = prState.header;
+  if(!h.periodStart || !h.periodEnd) return null;
+  if(dateDiffDays(h.periodStart, h.periodEnd) !== PAY_PERIOD_LENGTH-1) return null;
+  return computeEmployeePeriodSummary(e.employeeId, {start:h.periodStart, end:h.periodEnd});
+}
+// Returns the Shift-Log-calculated OT hours if it disagrees with the
+// imported ADP OT hours by more than a few minutes (rounding slack), else
+// null. Catches exactly the kind of gap found in Troy Reynolds' 8/31-9/13
+// period (Shift Log said 11.50, ADP paid 12.00) instead of letting it pass
+// silently just because the OT premium dollar amount was captured.
+function prOTHoursMismatch(e){
+  const expected = prExpectedFromShiftLog(e);
+  if(!expected) return null;
+  const imported = prNum(e.otHours);
+  return Math.abs(expected.otHours - imported) > 0.05 ? expected.otHours : null;
+}
+function prOTHoursWarningHtml(e){
+  const mismatch = prOTHoursMismatch(e);
+  if(mismatch===null) return '';
+  return `<div style="font-size:10px;color:var(--red);line-height:1.3">Shift Log calculates ${mismatch.toFixed(2)} OT hrs for this period -- investigate before saving</div>`;
+}
 function prUpdateEmployeeRow(i){
   const e = prState.employees[i];
-  const rEl = $('pr-emp-rate-'+i), gEl = $('pr-emp-gross-'+i), nEl = $('pr-emp-net-'+i);
+  const rEl = $('pr-emp-rate-'+i), gEl = $('pr-emp-gross-'+i), nEl = $('pr-emp-net-'+i), owEl = $('pr-emp-ot-warn-'+i);
   if(rEl) rEl.innerHTML = prRateCellHtml(e);
   if(gEl) gEl.textContent = fmt(prEmployeeGross(e));
   if(nEl) nEl.innerHTML = prNetCellHtml(e);
+  if(owEl) owEl.innerHTML = prOTHoursWarningHtml(e);
   prUpdateSummary();
 }
 
@@ -9271,11 +9301,11 @@ function renderPayrollRunEntry(){
   const h = prState.header;
   const empOptions = employeesActiveInRange(h.periodStart, h.periodEnd);
 
-  const empGridCols = '2fr 0.8fr 0.9fr 1fr 1fr 1fr 1fr 1fr 1fr 32px';
+  const empGridCols = '2fr 0.8fr 0.9fr 1fr 1fr 1fr 0.8fr 1fr 1fr 1fr 32px';
   const taxGridCols = '1fr 1.6fr 0.8fr 1fr 32px';
 
   const empHeaderHtml = `<div style="display:grid;grid-template-columns:${empGridCols};gap:6px;padding:0 0 4px;font-size:10px;font-weight:600;color:var(--ink-lo);letter-spacing:.05em;text-transform:uppercase">
-    <span>Employee</span><span>Hours</span><span>Rate</span><span>Regular $</span><span>Tips $</span><span>Peerspace $</span><span>OT $</span><span>Gross Pay</span><span>Net Pay</span><span></span>
+    <span>Employee</span><span>Reg Hrs</span><span>Rate</span><span>Regular $</span><span>Tips $</span><span>Peerspace $</span><span>OT Hrs</span><span>OT $</span><span>Gross Pay</span><span>Net Pay</span><span></span>
   </div>`;
   const taxHeaderHtml = `<div style="display:grid;grid-template-columns:${taxGridCols};gap:6px;margin:6px 0 2px 24px;font-size:10px;font-weight:600;color:var(--ink-lo);letter-spacing:.05em;text-transform:uppercase">
     <span>Category</span><span>Description</span><span>EE / ER</span><span>Amount</span><span></span>
@@ -9311,6 +9341,10 @@ function renderPayrollRunEntry(){
         <input type="number" step="0.01" value="${e.regAmount}" oninput="prState.employees[${i}].regAmount=this.value;prUpdateEmployeeRow(${i})">
         <input type="number" step="0.01" value="${e.tipsAmount}" oninput="prState.employees[${i}].tipsAmount=this.value;prUpdateEmployeeRow(${i})">
         <input type="number" step="0.01" value="${e.peerspaceAmount}" oninput="prState.employees[${i}].peerspaceAmount=this.value;prUpdateEmployeeRow(${i})">
+        <div>
+          <input type="number" step="0.01" value="${e.otHours}" oninput="prState.employees[${i}].otHours=this.value;prUpdateEmployeeRow(${i})">
+          <div id="pr-emp-ot-warn-${i}">${prOTHoursWarningHtml(e)}</div>
+        </div>
         <input type="number" step="0.01" value="${e.otAmount}" oninput="prState.employees[${i}].otAmount=this.value;prUpdateEmployeeRow(${i})">
         <div id="pr-emp-gross-${i}" class="mono" style="font-size:13px;font-weight:600">${fmt(prEmployeeGross(e))}</div>
         <div id="pr-emp-net-${i}" style="font-size:13px">${prNetCellHtml(e)}</div>
