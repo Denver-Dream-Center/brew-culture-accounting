@@ -8288,21 +8288,40 @@ function computeTipSplitForDay(dateStr, rawRows){
 function shiftLogDaySummaries(){
   const byDate = {};
   DB.shiftLog.forEach(s=>{ if(!byDate[s.workDate]) byDate[s.workDate]=[]; byDate[s.workDate].push(s); });
+  // Memoizes computeWeeklyOvertimeSplit per (employee, week) within this one
+  // call -- without it, an employee who worked 5 days in the same week would
+  // have that week's split recomputed 5 times (once per day row below).
+  const splitCache = new Map();
+  function splitFor(empId, weekStart, weekEnd){
+    const key = empId+'|'+weekStart;
+    if(!splitCache.has(key)) splitCache.set(key, computeWeeklyOvertimeSplit(empId, weekStart, weekEnd));
+    return splitCache.get(key);
+  }
   return Object.keys(byDate).sort((a,b)=>b.localeCompare(a)).map(d=>{
     const shifts = byDate[d];
     const employeeIds = [...new Set(shifts.map(s=>s.employeeId))];
-    let hourlyHours=0, salariedHours=0, hourlyGross=0;
-    shifts.forEach(s=>{
-      const dur = shiftDurationHours(s.clockIn, s.clockOut) || 0;
-      const status = statusAsOf(s.employeeId, d);
-      const emp = DB.employees.find(e=>e.id===s.employeeId);
+    let hourlyRegHours=0, hourlyOTHours=0, salariedHours=0, hourlyGross=0;
+    const week = weekRangeFor(d);
+    employeeIds.forEach(empId=>{
+      const status = statusAsOf(empId, d);
+      const emp = DB.employees.find(e=>e.id===empId);
       const empType = status ? status.employmentType : (emp ? emp.employmentType : null);
+      const empShifts = shifts.filter(s=>s.employeeId===empId);
       if(empType==='hourly'){
-        hourlyHours += dur;
-        const rate = payRateAsOf(s.employeeId, d);
-        if(rate && rate.payRateType==='hourly') hourlyGross += dur*rate.payRate;
+        // OT is a weekly concept -- which of THIS day's hours count as OT
+        // depends on the rest of the week, same engine and same
+        // end-of-week-backward allocation as Timesheets and the entry form
+        // above, so a day's OT total here always agrees with those screens.
+        const split = splitFor(empId, week.weekStart, week.weekEnd);
+        const dayResult = split.days[d] || {regularHours:0, otHours:0};
+        hourlyRegHours += dayResult.regularHours;
+        hourlyOTHours += dayResult.otHours;
+        empShifts.forEach(s=>{
+          const r = split.rows.get(s);
+          if(r) hourlyGross += r.regularPay + r.otPay;
+        });
       } else if(empType==='salaried'){
-        salariedHours += dur;
+        salariedHours += empShifts.reduce((sum,s)=>sum+(shiftDurationHours(s.clockIn,s.clockOut)||0),0);
       }
     });
     // Tips can only be shown once that date's Clover data has been loaded
@@ -8310,12 +8329,13 @@ function shiftLogDaySummaries(){
     // form above) -- null means "not loaded yet", not "zero".
     let tipsTotal = null;
     if(_cloverOrdersCache[d]){
-      const split = computeTipSplitForDay(d, shifts);
-      tipsTotal = Math.round(Object.values(split.perEmployee).reduce((a,b)=>a+b,0)*100)/100;
+      const tipSplit = computeTipSplitForDay(d, shifts);
+      tipsTotal = Math.round(Object.values(tipSplit.perEmployee).reduce((a,b)=>a+b,0)*100)/100;
     }
     return {
       date:d, employeeCount:employeeIds.length,
-      hourlyHours:Math.round(hourlyHours*100)/100,
+      hourlyRegHours:Math.round(hourlyRegHours*100)/100,
+      hourlyOTHours:Math.round(hourlyOTHours*100)/100,
       salariedHours:Math.round(salariedHours*100)/100,
       hourlyGross:Math.round(hourlyGross*100)/100,
       tipsTotal
@@ -8327,11 +8347,13 @@ function renderShiftLogSummaryTable(){
   const days = shiftLogDaySummaries();
   const rows = days.map(d=>{
     const weekday = new Date(d.date+'T12:00:00').toLocaleDateString('en-US',{weekday:'long'});
-    return `<tr onclick="shiftLogDate='${d.date}';renderPayrollShifts()" style="cursor:pointer">
+    const hasOT = d.hourlyOTHours>0;
+    return `<tr onclick="shiftLogDate='${d.date}';renderPayrollShifts()" style="cursor:pointer${hasOT?';background:#fff3cd':''}">
     <td>${fmtDate(d.date)}</td>
     <td style="color:var(--ink-mid)">${weekday}</td>
     <td class="text-right mono">${d.employeeCount}</td>
-    <td class="text-right mono">${d.hourlyHours.toFixed(2)}</td>
+    <td class="text-right mono">${d.hourlyRegHours.toFixed(2)}</td>
+    <td class="text-right mono">${hasOT?'<span style="color:var(--amber-dark,#8a6500);font-weight:600">'+d.hourlyOTHours.toFixed(2)+' ⚠</span>':'—'}</td>
     <td class="text-right mono">${d.salariedHours.toFixed(2)}</td>
     <td class="text-right mono">${fmt(d.hourlyGross)}</td>
     <td class="text-right mono">${d.tipsTotal===null?'<span style="color:var(--ink-lo)">— (click to load)</span>':fmt(d.tipsTotal)}</td>
@@ -8340,8 +8362,8 @@ function renderShiftLogSummaryTable(){
   return `<div class="card" style="margin-top:16px">
     <div class="card-header"><span class="card-title">Shift Log</span><span style="font-size:12px;color:var(--ink-mid)">${days.length} day${days.length!==1?'s':''} logged</span></div>
     <div class="tbl-wrap"><table>
-      <thead><tr><th>Date</th><th>Day</th><th class="text-right"># Employees</th><th class="text-right">Hourly Hrs</th><th class="text-right">Salaried Hrs</th><th class="text-right">Hourly Gross $</th><th class="text-right">Tips $</th></tr></thead>
-      <tbody>${rows||'<tr><td colspan="7" class="text-center" style="padding:24px;color:var(--ink-lo)">No days logged yet</td></tr>'}</tbody>
+      <thead><tr><th>Date</th><th>Day</th><th class="text-right"># Employees</th><th class="text-right">Hourly Reg Hrs</th><th class="text-right">Hourly OT Hrs</th><th class="text-right">Salaried Hrs</th><th class="text-right">Hourly Gross $</th><th class="text-right">Tips $</th></tr></thead>
+      <tbody>${rows||'<tr><td colspan="8" class="text-center" style="padding:24px;color:var(--ink-lo)">No days logged yet</td></tr>'}</tbody>
     </table></div>
   </div>`;
 }
