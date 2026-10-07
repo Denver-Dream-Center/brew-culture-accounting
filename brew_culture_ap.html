@@ -9993,8 +9993,14 @@ async function saveAdminPermissions(){
     return;
   }
 
-  const {error} = await _sb.from('config').update({value: JSON.stringify(updated)}).eq('key','role_permissions');
+  // .select() is required here, not cosmetic: without it, a write RLS
+  // silently blocks (e.g. no UPDATE policy for this role) comes back as
+  // success with zero rows touched -- no error field at all -- which is
+  // exactly what happened before the config table had an UPDATE policy.
+  // Checking data.length catches that instead of showing a false "saved".
+  const {data, error} = await _sb.from('config').update({value: JSON.stringify(updated)}).eq('key','role_permissions').select();
   if(error){ errEl.textContent = 'Could not save: ' + error.message; return; }
+  if(!data || data.length === 0){ errEl.textContent = 'Save did not take effect (no row was updated) -- you may not have permission, or the row is missing.'; return; }
 
   // Re-apply to THIS session immediately, so a change to your own role
   // takes effect without signing out and back in.
