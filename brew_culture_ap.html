@@ -10061,7 +10061,15 @@ _sb.auth.onAuthStateChange((event)=>{
   const {data:{session}} = await _sb.auth.getSession();
   if(session){
     _session = session;
-    _userRole = session.user?.app_metadata?.role || 'bookkeeper';
+    // getSession() can return a cached session/user object straight from
+    // local storage without a network round-trip, so its app_metadata is
+    // only as fresh as the last token refresh -- stale if a role changed
+    // elsewhere since then (exactly what happened the first time a role
+    // was migrated to app_metadata: already-open tabs kept reading the
+    // pre-migration cached value). getUser() always re-fetches the
+    // current user record from the server, so this can't go stale.
+    const {data:{user:freshUser}} = await _sb.auth.getUser();
+    _userRole = freshUser?.app_metadata?.role || 'bookkeeper';
     await loadAnthropicApiKey();
     await loadRolePermissions();
     document.getElementById('login-screen').style.display = 'none';
