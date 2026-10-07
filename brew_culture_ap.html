@@ -2683,7 +2683,8 @@ async function renderRepoFileList(){
       var safeName = f.name.replace(/'/g, "\\'");
       return '<tr><td class="mono" style="font-size:12px">' + f.name + '</td>' +
         '<td>' + added + '</td>' +
-        '<td><button class="btn btn-ghost btn-sm" onclick="downloadRepoFile(\'' + safeName + '\')">Download</button></td></tr>';
+        '<td><button class="btn btn-ghost btn-sm" onclick="downloadRepoFile(\'' + safeName + '\')">Download</button> ' +
+        '<button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="removeRepoFile(\'' + safeName + '\')">Remove</button></td></tr>';
     }).join('') +
     '</tbody></table></div>';
 }
@@ -2695,6 +2696,14 @@ async function downloadRepoFile(name){
   var a = document.createElement('a');
   a.href = url; a.download = name; a.click();
   URL.revokeObjectURL(url);
+}
+
+async function removeRepoFile(name){
+  if(!confirm('Remove "' + name + '" from the repository? This cannot be undone — if it\'s still needed, download a copy first.')) return;
+  var {error} = await _sb.storage.from('revenue-files').remove([name]);
+  if(error){ showToast('Could not remove: ' + error.message); return; }
+  showToast('Removed ' + name + '.');
+  renderRepoFileList();
 }
 
 function buildSweepPrepWorkbook(ab){
