@@ -9806,8 +9806,35 @@ const ADMIN_PERM_FLAG_LABELS = {
   can_void_invoice:'Void Invoice', can_delete_gl:'Delete GL Entry', can_edit_closed_period:'Edit Closed Period',
   can_manage_users:'Manage Users', can_export_backup:'Export Backup'
 };
-const ADMIN_PERM_ROLES = ['admin','manager','bookkeeper'];
+// Known labels for the 3 built-in roles; any other role name (custom,
+// admin-created) falls back to a formatted version of its own key, via
+// formatRoleLabel() below. The role LIST itself is never hardcoded --
+// it's always derived from whatever keys exist in config.role_permissions,
+// so adding or removing a role here doesn't require touching this file.
 const ADMIN_PERM_ROLE_LABELS = {admin:'Admin', manager:'Manager', bookkeeper:'Bookkeeper'};
+const ADMIN_BUILTIN_ROLES = ['admin','manager','bookkeeper'];
+
+function formatRoleLabel(role){
+  return ADMIN_PERM_ROLE_LABELS[role] || role.replace(/_/g,' ').replace(/\b\w/g, c=>c.toUpperCase());
+}
+// 'admin' always sorts first (it's the structurally-special break-glass
+// role); everything else is alphabetical so newly-added roles land in a
+// predictable spot instead of wherever Object.keys() happens to iterate.
+function permsRoleList(all){
+  const keys = Object.keys(all||{});
+  const rest = keys.filter(k=>k!=='admin').sort();
+  return keys.includes('admin') ? ['admin', ...rest] : rest;
+}
+function emptyRolePerms(){
+  const obj = {modules:[]};
+  ADMIN_PERM_FLAGS.forEach(f=>{ obj[f] = false; });
+  return obj;
+}
+
+// The matrix being edited, kept in memory between renders so adding or
+// removing a role (which re-renders the table) doesn't discard whatever
+// checkbox changes haven't been saved yet.
+let _permsDraft = null;
 
 async function renderAdminPermissions(){
   showLoadingOverlay('Loading permissions...');
@@ -9821,29 +9848,46 @@ async function renderAdminPermissions(){
     all = JSON.parse(JSON.stringify(DEFAULT_ROLE_PERMISSIONS));
   }
   hideLoadingOverlay();
+  _permsDraft = all;
+  renderAdminPermissionsMatrix();
+}
+
+function renderAdminPermissionsMatrix(){
+  const all = _permsDraft;
+  const roles = permsRoleList(all);
 
   const moduleRows = ADMIN_PERM_MODULES.map(mod=>{
-    const cells = ADMIN_PERM_ROLES.map(role=>{
+    const cells = roles.map(role=>{
       const checked = ((all[role]&&all[role].modules)||[]).includes(mod);
       return `<td class="text-center"><input type="checkbox" id="aperm-${role}-mod-${mod}" ${checked?'checked':''}></td>`;
     }).join('');
-    return `<tr><td>${ADMIN_PERM_MODULE_LABELS[mod]}</td>${cells}</tr>`;
+    return `<tr><td>${ADMIN_PERM_MODULE_LABELS[mod]||mod}</td>${cells}</tr>`;
   }).join('');
 
   const flagRows = ADMIN_PERM_FLAGS.map(flag=>{
-    const cells = ADMIN_PERM_ROLES.map(role=>{
+    const cells = roles.map(role=>{
       const checked = !!(all[role] && all[role][flag] === true);
       return `<td class="text-center"><input type="checkbox" id="aperm-${role}-${flag}" ${checked?'checked':''}></td>`;
     }).join('');
     return `<tr><td>${ADMIN_PERM_FLAG_LABELS[flag]}</td>${cells}</tr>`;
   }).join('');
 
-  const roleHeaderCells = ADMIN_PERM_ROLES.map(r=>`<th class="text-center">${ADMIN_PERM_ROLE_LABELS[r]}</th>`).join('');
+  const roleHeaderCells = roles.map(r=>{
+    const removable = !ADMIN_BUILTIN_ROLES.includes(r);
+    return `<th class="text-center">${formatRoleLabel(r)}${removable?` <button class="btn btn-ghost btn-sm" title="Remove role" onclick="removeAdminRole('${r}')">×</button>`:''}</th>`;
+  }).join('');
 
   $('content').innerHTML = `<div class="card">
     <div class="card-header"><span class="card-title">Role Permission Matrix</span></div>
     <div class="card-body">
       <div class="alert alert-info" style="margin-bottom:16px">Changes apply to your own session immediately on save. Anyone already signed in under another role picks up the change the next time they sign in.</div>
+
+      <div style="display:flex;gap:8px;align-items:flex-end;margin-bottom:8px;padding-bottom:16px;border-bottom:1px solid var(--border-lo)">
+        <div class="form-group" style="margin:0"><label>New Role Name</label><input type="text" id="aperm-new-role-name" placeholder="e.g. shift_lead" onkeydown="if(event.key==='Enter')addAdminRole()"></div>
+        <button class="btn btn-secondary" onclick="addAdminRole()">+ Add Role</button>
+      </div>
+      <div id="aperm-newrole-err" style="color:var(--red);font-size:13px;margin:0 0 12px;min-height:18px"></div>
+
       <div style="font-size:12px;font-weight:600;color:var(--ink-mid);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">Module Access</div>
       <div class="tbl-wrap"><table>
         <thead><tr><th>Module</th>${roleHeaderCells}</tr></thead>
@@ -9860,10 +9904,14 @@ async function renderAdminPermissions(){
   </div>`;
 }
 
-async function saveAdminPermissions(){
-  const errEl = $('aperm-err'); errEl.textContent = '';
+// Reads whatever's currently checked in the matrix DOM back into an
+// object keyed by role. Called before Add/Remove Role re-renders the
+// table (so in-progress edits survive the re-render) and again right
+// before Save (so the very latest on-screen state is what gets written).
+function collectPermsDraftFromDOM(){
+  const roles = permsRoleList(_permsDraft);
   const updated = {};
-  ADMIN_PERM_ROLES.forEach(role=>{
+  roles.forEach(role=>{
     const modules = ADMIN_PERM_MODULES.filter(mod=>{
       const el = $('aperm-'+role+'-mod-'+mod);
       return el && el.checked;
@@ -9875,11 +9923,46 @@ async function saveAdminPermissions(){
     });
     updated[role] = roleObj;
   });
+  return updated;
+}
+
+function addAdminRole(){
+  const errEl = $('aperm-newrole-err'); errEl.textContent = '';
+  const input = $('aperm-new-role-name');
+  const name = (input.value||'').trim().toLowerCase().replace(/[^a-z0-9_]+/g,'_').replace(/^_+|_+$/g,'');
+  if(!name){ errEl.textContent = 'Enter a role name (letters, numbers, underscores).'; return; }
+  _permsDraft = collectPermsDraftFromDOM();
+  if(_permsDraft[name]){ errEl.textContent = 'A role named "'+name+'" already exists.'; return; }
+  _permsDraft[name] = emptyRolePerms();
+  renderAdminPermissionsMatrix();
+}
+
+async function removeAdminRole(role){
+  if(ADMIN_BUILTIN_ROLES.includes(role)){ showToast('The built-in admin/manager/bookkeeper roles cannot be removed.'); return; }
+  if(!confirm('Remove the "'+formatRoleLabel(role)+'" role? Anyone currently assigned it would need a new role set via Edit Role first.')) return;
+  // Check no current account still has this role, so removing it from the
+  // matrix can't silently strand a user with an undefined permission set.
+  try{
+    const result = await callAdminUsersFn({action:'list'});
+    const inUse = (result.users||[]).some(u=>u.role===role);
+    if(inUse){ showToast('Cannot remove "'+formatRoleLabel(role)+'" -- at least one user still has this role. Reassign them first.'); return; }
+  }catch(e){
+    showToast('Could not verify the role is unused: '+e.message);
+    return;
+  }
+  _permsDraft = collectPermsDraftFromDOM();
+  delete _permsDraft[role];
+  renderAdminPermissionsMatrix();
+}
+
+async function saveAdminPermissions(){
+  const errEl = $('aperm-err'); errEl.textContent = '';
+  const updated = collectPermsDraftFromDOM();
 
   // Break-glass guard: never save a matrix that locks the admin role out of
   // the Admin module itself -- that would make this screen, the one place
   // that could undo a mistake, unreachable through the UI afterward.
-  if(!updated.admin.modules.includes('admin')){
+  if(!updated.admin || !updated.admin.modules.includes('admin')){
     errEl.textContent = 'The Admin role must keep access to the Admin module, or you could lock yourself out of this screen.';
     return;
   }
@@ -9889,6 +9972,7 @@ async function saveAdminPermissions(){
 
   // Re-apply to THIS session immediately, so a change to your own role
   // takes effect without signing out and back in.
+  _permsDraft = updated;
   _rolePerms = updated[_userRole] || updated.bookkeeper || DEFAULT_ROLE_PERMISSIONS.bookkeeper;
   renderSidebar();
   const navEl = $('nav-'+currentView); if(navEl) navEl.classList.add('active');
@@ -9924,13 +10008,25 @@ async function renderAdminUsers(){
   showLoadingOverlay('Loading users...');
   let users = [];
   let loadErr = '';
+  let roleNames = ADMIN_BUILTIN_ROLES.slice();
   try{
     const result = await callAdminUsersFn({action:'list'});
     users = result.users || [];
   }catch(e){
     loadErr = e.message;
   }
+  // Role options (both dropdowns below) come from whatever roles actually
+  // exist in config.role_permissions, same source the Permissions screen
+  // edits -- a custom role added there shows up here automatically.
+  try{
+    const {data} = await _sb.from('config').select('value').eq('key','role_permissions').single();
+    if(data && data.value) roleNames = permsRoleList(JSON.parse(data.value));
+  }catch(e){
+    console.warn('Could not load role list, using built-in roles only:', e.message);
+  }
   hideLoadingOverlay();
+
+  const roleOptionsHtml = (selected)=> roleNames.map(r=>`<option value="${r}" ${r===selected?'selected':''}>${formatRoleLabel(r)}</option>`).join('');
 
   const rows = users.map(u=>{
     const isSelf = !!(_session && _session.user && _session.user.id === u.id);
@@ -9938,14 +10034,10 @@ async function renderAdminUsers(){
     const statusColor = u.status === 'active' ? 'var(--green)' : (u.status === 'deactivated' ? 'var(--red)' : 'var(--amber)');
     const editing = _adminUsersEditingId === u.id;
     const roleCell = editing
-      ? `<select id="auser-role-${u.id}">
-          <option value="admin" ${u.role==='admin'?'selected':''}>admin</option>
-          <option value="manager" ${u.role==='manager'?'selected':''}>manager</option>
-          <option value="bookkeeper" ${u.role==='bookkeeper'?'selected':''}>bookkeeper</option>
-        </select>
+      ? `<select id="auser-role-${u.id}">${roleOptionsHtml(u.role)}</select>
         <button class="btn btn-ghost btn-sm" onclick="saveAdminUserRole('${u.id}')">Save</button>
         <button class="btn btn-ghost btn-sm" onclick="cancelAdminUserRoleEdit()">Cancel</button>`
-      : `<span class="mono">${u.role}</span> <button class="btn btn-ghost btn-sm" onclick="startAdminUserRoleEdit('${u.id}')">Edit Role</button>`;
+      : `<span class="mono">${formatRoleLabel(u.role)}</span> <button class="btn btn-ghost btn-sm" onclick="startAdminUserRoleEdit('${u.id}')">Edit Role</button>`;
     return `<tr>
       <td>${u.email}${isSelf?' <span style="color:var(--ink-lo);font-size:11px">(you)</span>':''}</td>
       <td>${roleCell}</td>
@@ -9973,11 +10065,7 @@ async function renderAdminUsers(){
         <div style="font-size:12px;font-weight:600;color:var(--ink-mid);text-transform:uppercase;letter-spacing:.06em;margin-bottom:10px">Invite New User</div>
         <div class="form-grid">
           <div class="form-group"><label>Email</label><input type="email" id="auser-invite-email" placeholder="name@example.com"></div>
-          <div class="form-group"><label>Role</label><select id="auser-invite-role">
-            <option value="bookkeeper">bookkeeper</option>
-            <option value="manager">manager</option>
-            <option value="admin">admin</option>
-          </select></div>
+          <div class="form-group"><label>Role</label><select id="auser-invite-role">${roleOptionsHtml('bookkeeper')}</select></div>
         </div>
         <div id="auser-invite-err" style="color:var(--red);font-size:13px;margin:8px 0;min-height:18px"></div>
         <button class="btn btn-primary" onclick="sendAdminUserInvite()">Send Invite</button>
