@@ -7274,7 +7274,11 @@ async function doLogin(){
   const {data, error} = await _sb.auth.signInWithPassword({email, password});
   if(error){errEl.textContent = error.message;return}
   _session = data.session;
-  _userRole = data.user?.user_metadata?.role || 'admin';
+  // app_metadata, not user_metadata -- the latter is editable by the user
+  // themselves via auth.updateUser() and must never be trusted for a role
+  // check. Falls back to the least-privileged role, not admin, if a role
+  // is somehow missing (fail closed, not open).
+  _userRole = data.user?.app_metadata?.role || 'bookkeeper';
   await loadAnthropicApiKey();
   await loadRolePermissions();
   document.getElementById('login-screen').style.display = 'none';
@@ -9869,29 +9873,165 @@ async function saveAdminPermissions(){
   showToast('Permissions saved.');
 }
 
-// Part 2 of the spec (list/invite/edit-role/reset-password/deactivate users)
-// needs the Supabase service_role key, which must run server-side -- a
-// Supabase Edge Function, not this file. That function isn't deployed yet:
-// a real service_role key was found sitting in the config table (anon-
-// readable, per the spec's own Part 4) during this build, and deploying a
-// new Edge Function with that same key as its secret would carry the leak
-// forward rather than fix it. This screen is a placeholder until the key
-// is rotated and the Edge Function is built in a follow-up.
-function renderAdminUsers(){
+// Part 2: list/invite/edit-role/deactivate all run through this Edge
+// Function (server-side, holds the service_role key as a platform secret
+// never exposed to the browser). It authorizes purely off the caller's own
+// app_metadata.role, re-verified server-side on every call -- never off
+// anything this file sends it. Reset Password stays client-side (the anon
+// key is already enough for resetPasswordForEmail, same as the login
+// screen's own forgot-password flow), so it doesn't call the function.
+const ADMIN_USERS_FN_URL = SUPABASE_URL + '/functions/v1/admin-users';
+
+async function callAdminUsersFn(payload){
+  const token = _session && _session.access_token;
+  if(!token) throw new Error('Not signed in.');
+  const res = await fetch(ADMIN_USERS_FN_URL, {
+    method: 'POST',
+    headers: {'Content-Type':'application/json', 'Authorization':'Bearer '+token},
+    body: JSON.stringify(payload)
+  });
+  let body;
+  try{ body = await res.json(); }catch(e){ throw new Error('Unexpected response from server.'); }
+  if(!res.ok) throw new Error(body.error || ('Request failed ('+res.status+')'));
+  return body;
+}
+
+let _adminUsersEditingId = null;
+
+async function renderAdminUsers(){
+  showLoadingOverlay('Loading users...');
+  let users = [];
+  let loadErr = '';
+  try{
+    const result = await callAdminUsersFn({action:'list'});
+    users = result.users || [];
+  }catch(e){
+    loadErr = e.message;
+  }
+  hideLoadingOverlay();
+
+  const rows = users.map(u=>{
+    const isSelf = !!(_session && _session.user && _session.user.id === u.id);
+    const lastSignIn = u.lastSignIn ? fmtDate(u.lastSignIn.slice(0,10)) : 'Never';
+    const statusColor = u.status === 'active' ? 'var(--green)' : (u.status === 'deactivated' ? 'var(--red)' : 'var(--amber)');
+    const editing = _adminUsersEditingId === u.id;
+    const roleCell = editing
+      ? `<select id="auser-role-${u.id}">
+          <option value="admin" ${u.role==='admin'?'selected':''}>admin</option>
+          <option value="manager" ${u.role==='manager'?'selected':''}>manager</option>
+          <option value="bookkeeper" ${u.role==='bookkeeper'?'selected':''}>bookkeeper</option>
+        </select>
+        <button class="btn btn-ghost btn-sm" onclick="saveAdminUserRole('${u.id}')">Save</button>
+        <button class="btn btn-ghost btn-sm" onclick="cancelAdminUserRoleEdit()">Cancel</button>`
+      : `<span class="mono">${u.role}</span> <button class="btn btn-ghost btn-sm" onclick="startAdminUserRoleEdit('${u.id}')">Edit Role</button>`;
+    return `<tr>
+      <td>${u.email}${isSelf?' <span style="color:var(--ink-lo);font-size:11px">(you)</span>':''}</td>
+      <td>${roleCell}</td>
+      <td><span style="color:${statusColor}">${u.status}</span></td>
+      <td>${lastSignIn}</td>
+      <td>
+        <button class="btn btn-ghost btn-sm" onclick="resetAdminUserPassword('${u.email}')">Reset Password</button>
+        ${u.status==='deactivated'
+          ? `<button class="btn btn-ghost btn-sm" onclick="reactivateAdminUser('${u.id}')">Reactivate</button>`
+          : `<button class="btn btn-danger btn-sm" ${isSelf?'disabled title="You cannot deactivate your own account."':''} onclick="deactivateAdminUser('${u.id}')">Deactivate</button>`}
+      </td>
+    </tr>`;
+  }).join('');
+
   $('content').innerHTML = `<div class="card">
     <div class="card-header"><span class="card-title">User Management</span></div>
     <div class="card-body">
-      <div class="alert alert-info">User management (invite, edit role, reset password, deactivate) needs a secure server-side Edge Function, since it requires the Supabase service_role key -- a key that must never be sent to the browser. That function is not deployed yet, pending rotation of a service_role key that was found exposed in the config table during this build. Once the key is rotated, this screen will be finished.</div>
-      <div style="margin-top:16px;font-size:13px;color:var(--ink-mid)">
-        <div style="font-weight:600;margin-bottom:6px">Current users (from the admin module spec):</div>
-        <ul style="margin:0;padding-left:20px;line-height:1.8">
-          <li>stephen@denverdc.org -- admin</li>
-          <li>Troy Reynolds -- manager</li>
-          <li>Bookkeeper / White Lotus -- bookkeeper</li>
-        </ul>
+      ${loadErr?`<div class="alert alert-info" style="color:var(--red)">Could not load users: ${loadErr}</div>`:''}
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Email</th><th>Role</th><th>Status</th><th>Last Sign In</th><th>Actions</th></tr></thead>
+        <tbody>${rows||'<tr><td colspan="5" class="text-center" style="padding:24px;color:var(--ink-lo)">No users found.</td></tr>'}</tbody>
+      </table></div>
+
+      <div style="margin-top:28px;padding-top:18px;border-top:1px solid var(--border-lo)">
+        <div style="font-size:12px;font-weight:600;color:var(--ink-mid);text-transform:uppercase;letter-spacing:.06em;margin-bottom:10px">Invite New User</div>
+        <div class="form-grid">
+          <div class="form-group"><label>Email</label><input type="email" id="auser-invite-email" placeholder="name@example.com"></div>
+          <div class="form-group"><label>Role</label><select id="auser-invite-role">
+            <option value="bookkeeper">bookkeeper</option>
+            <option value="manager">manager</option>
+            <option value="admin">admin</option>
+          </select></div>
+        </div>
+        <div id="auser-invite-err" style="color:var(--red);font-size:13px;margin:8px 0;min-height:18px"></div>
+        <button class="btn btn-primary" onclick="sendAdminUserInvite()">Send Invite</button>
       </div>
     </div>
   </div>`;
+}
+
+function startAdminUserRoleEdit(id){ _adminUsersEditingId = id; renderAdminUsers(); }
+function cancelAdminUserRoleEdit(){ _adminUsersEditingId = null; renderAdminUsers(); }
+
+async function saveAdminUserRole(id){
+  const sel = $('auser-role-'+id);
+  const role = sel ? sel.value : null;
+  if(!role) return;
+  showLoadingOverlay('Updating role...');
+  try{
+    await callAdminUsersFn({action:'updateRole', userId:id, role});
+    _adminUsersEditingId = null;
+    hideLoadingOverlay();
+    showToast('Role updated.');
+    renderAdminUsers();
+  }catch(e){
+    hideLoadingOverlay();
+    showToast('Could not update role: '+e.message);
+  }
+}
+
+async function resetAdminUserPassword(email){
+  const {error} = await _sb.auth.resetPasswordForEmail(email, {redirectTo: APP_URL});
+  if(error){ showToast('Could not send reset email: '+error.message); return; }
+  showToast('Reset email sent to '+email+'.');
+}
+
+async function deactivateAdminUser(id){
+  if(!confirm('Deactivate this user? They will not be able to sign in until reactivated.')) return;
+  showLoadingOverlay('Deactivating...');
+  try{
+    await callAdminUsersFn({action:'deactivate', userId:id});
+    hideLoadingOverlay();
+    showToast('User deactivated.');
+    renderAdminUsers();
+  }catch(e){
+    hideLoadingOverlay();
+    showToast('Could not deactivate: '+e.message);
+  }
+}
+
+async function reactivateAdminUser(id){
+  showLoadingOverlay('Reactivating...');
+  try{
+    await callAdminUsersFn({action:'reactivate', userId:id});
+    hideLoadingOverlay();
+    showToast('User reactivated.');
+    renderAdminUsers();
+  }catch(e){
+    hideLoadingOverlay();
+    showToast('Could not reactivate: '+e.message);
+  }
+}
+
+async function sendAdminUserInvite(){
+  const errEl = $('auser-invite-err'); errEl.textContent = '';
+  const email = $('auser-invite-email').value.trim();
+  const role = $('auser-invite-role').value;
+  if(!email){ errEl.textContent = 'Email is required.'; return; }
+  showLoadingOverlay('Sending invite...');
+  try{
+    await callAdminUsersFn({action:'invite', email, role, redirectTo: APP_URL});
+    hideLoadingOverlay();
+    showToast('Invite sent to '+email+'.');
+    renderAdminUsers();
+  }catch(e){
+    hideLoadingOverlay();
+    errEl.textContent = e.message;
+  }
 }
 
 // ==================================================
@@ -9921,7 +10061,7 @@ _sb.auth.onAuthStateChange((event)=>{
   const {data:{session}} = await _sb.auth.getSession();
   if(session){
     _session = session;
-    _userRole = session.user?.user_metadata?.role || 'admin';
+    _userRole = session.user?.app_metadata?.role || 'bookkeeper';
     await loadAnthropicApiKey();
     await loadRolePermissions();
     document.getElementById('login-screen').style.display = 'none';
