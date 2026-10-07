@@ -372,6 +372,7 @@
   <input type="file" id="clover-file-input" accept=".xlsx,.xls" style="display:none" onchange="handleCloverFile(this)">
   <input type="file" id="loyalty-file-input" accept=".xlsx,.xls" style="display:none" onchange="handleLoyaltyFile(this)">
   <input type="file" id="sweepprep-file-input" accept=".xlsx,.xls" style="display:none" onchange="handleSweepPrepFile(this)">
+  <input type="file" id="repo-file-input" accept=".csv" style="display:none" onchange="handleRepoFile(this)">
   <input type="file" id="ledger-file-input" accept=".xlsx,.xls" style="display:none" onchange="handleLedgerFile(this)">
   <div class="main">
     <div class="topbar">
@@ -2012,6 +2013,33 @@ function renderRevImport(){
         '<div id="sweepprep-result" style="margin-top:16px"></div>' +
       '</div>' +
     '</div>' +
+    '<div class="card" style="margin-top:16px">' +
+      '<div class="card-header"><span class="card-title">Revenue File Repository</span>' +
+        '<span style="font-size:12px;color:var(--ink-lo)">Drop the raw CSV — converts, renames, and reformats automatically</span>' +
+      '</div>' +
+      '<div class="card-body">' +
+        '<div style="font-size:12px;color:var(--ink-mid);margin-bottom:12px">' +
+          'Drop the raw Full Orders Detail CSV straight from Clover (not the .xlsx version). It gets converted to ' +
+          'Excel, named <span class="mono">Order_Revenue_by_Item_M-D-YY_sweep_prep_1.xlsx</span> from the sale date, ' +
+          'run through the same Bank Sweep Prep reformatting as the tool above, and pushed to the repository below ' +
+          '— ready for your bookkeeper to download, verify against POS totals, correct if needed, and submit ' +
+          'through Clover Import at the top of this page.' +
+        '</div>' +
+        '<div class="upload-zone" id="repo-drop-zone" onclick="$$(\'repo-file-input\').click()"' +
+          ' ondragover="event.preventDefault();this.classList.add(\'dragover\')"' +
+          ' ondragleave="this.classList.remove(\'dragover\')"' +
+          ' ondrop="event.preventDefault();this.classList.remove(\'dragover\');handleRepoDrop(event.dataTransfer.files)">' +
+          '<div class="upload-icon">&#8679;</div>' +
+          '<div class="upload-title">Drop raw Clover CSV export here or click to browse</div>' +
+          '<div class="upload-sub">FullOrdersDetails_for_period_*.csv</div>' +
+        '</div>' +
+        '<div id="repo-result" style="margin-top:16px"></div>' +
+        '<div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border-lo)">' +
+          '<div style="font-size:12px;font-weight:600;color:var(--ink-mid);text-transform:uppercase;letter-spacing:.06em;margin-bottom:10px">Repository Files</div>' +
+          '<div id="repo-file-list"><div style="color:var(--ink-mid);font-size:13px">Loading...</div></div>' +
+        '</div>' +
+      '</div>' +
+    '</div>' +
     '<div class="card" style="margin-top:0">' +
       '<div class="card-header"><span class="card-title">Already Imported</span></div>' +
       '<div class="card-body" style="padding:0">' +
@@ -2033,6 +2061,7 @@ function renderRevImport(){
         ) +
       '</div>' +
     '</div>';
+  renderRepoFileList();
 }
 
 function handleCloverDrop(files){
@@ -2463,6 +2492,18 @@ function handleSweepPrepFile(input){
   input.value = '';
 }
 
+// Shared by the manual Bank Sweep Prep Tool and the automated CSV
+// repository pipeline below: bumps "..._sweep_prep_<N>" to
+// "..._sweep_prep_<N+1>" (the user's own versioning convention for
+// tracking rounds of moving records between adjacent days), or appends a
+// plain "_sweep_prep" suffix if the name doesn't already have one.
+function bumpSweepPrepVersion(baseName){
+  var versionMatch = baseName.match(/^(.*_sweep_prep_)(\d+)$/);
+  return versionMatch
+    ? versionMatch[1] + (parseInt(versionMatch[2], 10) + 1)
+    : baseName + '_sweep_prep';
+}
+
 function processSweepPrepFile(file){
   var resultEl = $('sweepprep-result');
   if(!resultEl) return;
@@ -2471,14 +2512,7 @@ function processSweepPrepFile(file){
   reader.onload = function(e){
     try{
       var baseName = file.name.replace(/\.xlsx$/i, '');
-      // If the uploaded file already ends in "_sweep_prep_<N>" (the user's
-      // own versioning convention for tracking multiple rounds of moving
-      // records between adjacent days), bump N by 1 instead of stacking
-      // another literal "_sweep_prep" suffix on top of it.
-      var versionMatch = baseName.match(/^(.*_sweep_prep_)(\d+)$/);
-      var outName = versionMatch
-        ? versionMatch[1] + (parseInt(versionMatch[2], 10) + 1) + '.xlsx'
-        : baseName + '_sweep_prep.xlsx';
+      var outName = bumpSweepPrepVersion(baseName) + '.xlsx';
       var wbOut = buildSweepPrepWorkbook(e.target.result);
       var wbArr = XLSX.write(wbOut, {bookType:'xlsx', type:'array'});
       var blob = new Blob([wbArr], {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
@@ -2493,6 +2527,174 @@ function processSweepPrepFile(file){
     }
   };
   reader.readAsArrayBuffer(file);
+}
+
+// ── REVENUE FILE REPOSITORY (CSV -> Excel -> sweep prep -> Supabase Storage) ──
+// Automates what used to be three manual steps (save the Clover CSV
+// export as Excel by hand, rename it by hand, run it through the Bank
+// Sweep Prep Tool above) and pushes the result to a shared repository
+// instead of the owner's own downloads folder, so a bookkeeper without
+// POS Analytics access can pick it up, verify it against POS totals, and
+// submit it through Clover Import herself.
+
+// Minimal RFC4180-style CSV parser: handles quoted fields, embedded
+// commas/newlines inside quotes, and "" as an escaped quote -- this
+// export relies on quoting for fields like "BREW CULTURE COFFEE, LLC".
+// Written by hand instead of handed to SheetJS's own CSV reader so cells
+// stay exactly the string/number types this function chooses, with no
+// risk of a date-looking string like "2026-09-29" getting silently
+// coerced into an Excel date serial along the way.
+function parseCSVText(text){
+  var rows = [];
+  var row = [];
+  var field = '';
+  var inQuotes = false;
+  var i = 0;
+  var len = text.length;
+  while(i < len){
+    var c = text[i];
+    if(inQuotes){
+      if(c === '"'){
+        if(text[i+1] === '"'){ field += '"'; i += 2; continue; }
+        inQuotes = false; i++; continue;
+      }
+      field += c; i++; continue;
+    } else {
+      if(c === '"'){ inQuotes = true; i++; continue; }
+      if(c === ','){ row.push(field); field = ''; i++; continue; }
+      if(c === '\r'){ i++; continue; }
+      if(c === '\n'){ row.push(field); rows.push(row); row = []; field = ''; i++; continue; }
+      field += c; i++; continue;
+    }
+  }
+  if(field !== '' || row.length > 0){ row.push(field); rows.push(row); }
+  return rows;
+}
+
+// Converts parsed CSV rows into a SheetJS-ready array-of-arrays, coercing
+// plain numeric-looking fields (Order_Net, Order_Tax, etc.) to real
+// numbers -- needed for the sweep-prep totals/dedup formulas downstream,
+// which expect numeric cells, not text. Deliberately narrow (digits and
+// at most one decimal point only) so dates, order IDs, and N/A stay text.
+function csvRowsToAoa(rows){
+  if(rows.length === 0) return [];
+  var aoa = [rows[0]];
+  for(var r = 1; r < rows.length; r++){
+    var raw = rows[r];
+    if(raw.length === 1 && raw[0] === '') continue; // trailing blank line
+    aoa.push(raw.map(function(v){
+      if(v !== '' && /^-?\d+(\.\d+)?$/.test(v)) return parseFloat(v);
+      return v;
+    }));
+  }
+  return aoa;
+}
+
+// Derives "Order_Revenue_by_Item_M-D-YY_sweep_prep_1" from the CSV's own
+// 'date' column (the earliest date present) rather than trusting the
+// uploaded CSV's filename, so the naming convention holds even if Clover
+// changes its own export filename format.
+function deriveSweepPrepBaseName(aoa){
+  var header = aoa[0];
+  var dateIdx = header.indexOf('date');
+  if(dateIdx === -1) throw new Error('No "date" column found in this export -- is this a Clover Full Orders Detail CSV?');
+  var minDate = null;
+  for(var i = 1; i < aoa.length; i++){
+    var d = aoa[i][dateIdx];
+    if(typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d)){
+      if(!minDate || d < minDate) minDate = d;
+    }
+  }
+  if(!minDate) throw new Error('Could not find a valid sale date in this export to build the filename from.');
+  var parts = minDate.split('-');
+  var mm = parseInt(parts[1], 10), dd = parseInt(parts[2], 10), yy = parts[0].slice(2);
+  return 'Order_Revenue_by_Item_' + mm + '-' + dd + '-' + yy + '_sweep_prep_1';
+}
+
+function handleRepoDrop(files){
+  if(files && files[0]) processRepoCSVFile(files[0]);
+}
+function handleRepoFile(input){
+  if(input.files && input.files[0]) processRepoCSVFile(input.files[0]);
+  input.value = '';
+}
+
+function processRepoCSVFile(file){
+  var resultEl = $('repo-result');
+  if(!resultEl) return;
+  if(!/\.csv$/i.test(file.name)){
+    resultEl.innerHTML = '<div class="alert" style="background:var(--red-lo);border:1px solid #EAB5B1;color:var(--red)">Please drop the raw .csv export — this box converts it to Excel for you; it does not take an already-converted .xlsx file.</div>';
+    return;
+  }
+  resultEl.innerHTML = '<div style="color:var(--ink-mid);font-size:13px">Reading file...</div>';
+  var reader = new FileReader();
+  reader.onload = async function(e){
+    try{
+      var aoa = csvRowsToAoa(parseCSVText(e.target.result));
+      if(aoa.length < 2) throw new Error('No data rows found in this CSV.');
+      var baseName = deriveSweepPrepBaseName(aoa);
+
+      // Build a plain .xlsx from the CSV data -- exactly what the manual
+      // "convert to Excel" step used to produce -- then run it through
+      // the SAME sweep-prep transform the tool above already uses,
+      // completely unchanged.
+      var rawWb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(rawWb, XLSX.utils.aoa_to_sheet(aoa), 'Sheet1');
+      var rawAb = XLSX.write(rawWb, {bookType:'xlsx', type:'array'});
+
+      var wbOut = buildSweepPrepWorkbook(rawAb);
+      var wbArr = XLSX.write(wbOut, {bookType:'xlsx', type:'array'});
+      var outName = bumpSweepPrepVersion(baseName) + '.xlsx';
+      var blob = new Blob([wbArr], {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+
+      resultEl.innerHTML = '<div style="color:var(--ink-mid);font-size:13px">Uploading to repository...</div>';
+      var {error} = await _sb.storage.from('revenue-files').upload(outName, blob, {
+        contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        upsert: true
+      });
+      if(error) throw new Error('Upload failed: ' + error.message);
+
+      resultEl.innerHTML = '<div class="alert alert-inv">Converted, reformatted, and uploaded to the repository as <strong>' + outName + '</strong>. Your bookkeeper can download it below, verify it against POS totals, correct if needed, and submit it through Clover Import.</div>';
+      renderRepoFileList();
+    } catch(err){
+      resultEl.innerHTML = '<div class="alert" style="background:var(--red-lo);border:1px solid #EAB5B1;color:var(--red)">' + err.message + '</div>';
+      console.error(err);
+    }
+  };
+  reader.readAsText(file);
+}
+
+async function renderRepoFileList(){
+  var el = $('repo-file-list');
+  if(!el) return;
+  var {data, error} = await _sb.storage.from('revenue-files').list('', {sortBy:{column:'created_at', order:'desc'}});
+  if(error){
+    el.innerHTML = '<div style="color:var(--red);font-size:13px">Could not load repository: ' + error.message + '</div>';
+    return;
+  }
+  var files = (data || []).filter(function(f){ return f.name !== '.emptyFolderPlaceholder'; });
+  if(files.length === 0){
+    el.innerHTML = '<div style="color:var(--ink-lo);font-size:13px;padding:8px 0">No files in the repository yet.</div>';
+    return;
+  }
+  el.innerHTML = '<div class="tbl-wrap"><table><thead><tr><th>File</th><th>Added</th><th></th></tr></thead><tbody>' +
+    files.map(function(f){
+      var added = (f.created_at ? fmtDate(f.created_at.slice(0,10)) : '—');
+      var safeName = f.name.replace(/'/g, "\\'");
+      return '<tr><td class="mono" style="font-size:12px">' + f.name + '</td>' +
+        '<td>' + added + '</td>' +
+        '<td><button class="btn btn-ghost btn-sm" onclick="downloadRepoFile(\'' + safeName + '\')">Download</button></td></tr>';
+    }).join('') +
+    '</tbody></table></div>';
+}
+
+async function downloadRepoFile(name){
+  var {data, error} = await _sb.storage.from('revenue-files').download(name);
+  if(error){ showToast('Could not download: ' + error.message); return; }
+  var url = URL.createObjectURL(data);
+  var a = document.createElement('a');
+  a.href = url; a.download = name; a.click();
+  URL.revokeObjectURL(url);
 }
 
 function buildSweepPrepWorkbook(ab){
