@@ -336,6 +336,12 @@
       <div class="mod-card-sub">Employee profiles, pay rate history, hours, tips, and payroll runs.</div>
       <div class="mod-card-badge">Payroll Module</div>
     </div>
+    <div class="mod-card" id="mod-card-admin" onclick="launchModule('admin')">
+      <div class="mod-icon">&#9881;</div>
+      <div class="mod-card-title">Admin</div>
+      <div class="mod-card-sub">User management, role permissions, and data backup tools.</div>
+      <div class="mod-card-badge">Admin Module</div>
+    </div>
   </div>
   <div style="margin-top:28px">
     <button onclick="doSignOut()" style="background:none;border:1px solid var(--border);border-radius:var(--r);padding:8px 20px;font-size:13px;color:var(--ink-mid);cursor:pointer;font-family:inherit;transition:border-color .15s,color .15s" onmouseover="this.style.color='var(--ink)';this.style.borderColor='var(--ink-mid)'" onmouseout="this.style.color='var(--ink-mid)';this.style.borderColor='var(--border)'">Sign out</button>
@@ -600,7 +606,7 @@ async function loadRolePermissions(){
 // permissions. Call after _rolePerms is loaded and whenever the switcher
 // is (re)shown.
 function applyModulePermissions(){
-  ['ap','revenue','ledger','payroll'].forEach(function(mod){
+  ['ap','revenue','ledger','payroll','admin'].forEach(function(mod){
     const card = document.getElementById('mod-card-'+mod);
     if(card) card.style.display = canAccessModule(mod) ? '' : 'none';
   });
@@ -1117,7 +1123,8 @@ function renderSidebar(){
       '<div class="sidebar-section">Jump To</div>' +
       (canAccessModule('ap')?'<button class="nav-item" onclick="launchModule(\'ap\')"><span class="nav-icon">&#9632;</span> AP Module</button>':'') +
       (canAccessModule('revenue')?'<button class="nav-item" onclick="launchModule(\'revenue\')"><span class="nav-icon">&#9650;</span> Revenue Module</button>':'') +
-      (canAccessModule('ledger')?'<button class="nav-item" onclick="launchModule(\'ledger\')"><span class="nav-icon">&#8942;</span> Bank Ledger</button>':'');
+      (canAccessModule('ledger')?'<button class="nav-item" onclick="launchModule(\'ledger\')"><span class="nav-icon">&#8942;</span> Bank Ledger</button>':'') +
+      (canAccessModule('admin')?'<button class="nav-item" onclick="launchModule(\'admin\')"><span class="nav-icon">&#9881;</span> Admin Module</button>':'');
   } else if(currentModule === 'ledger'){
     el.innerHTML =
       '<div class="sidebar-header">' +
@@ -1130,7 +1137,8 @@ function renderSidebar(){
       '<div class="sidebar-section">Jump To</div>' +
       (canAccessModule('ap')?'<button class="nav-item" onclick="launchModule(\'ap\')"><span class="nav-icon">&#9632;</span> AP Module</button>':'') +
       (canAccessModule('revenue')?'<button class="nav-item" onclick="launchModule(\'revenue\')"><span class="nav-icon">&#9650;</span> Revenue Module</button>':'') +
-      (canAccessModule('payroll')?'<button class="nav-item" onclick="launchModule(\'payroll\')"><span class="nav-icon">&#9679;</span> Payroll Module</button>':'');
+      (canAccessModule('payroll')?'<button class="nav-item" onclick="launchModule(\'payroll\')"><span class="nav-icon">&#9679;</span> Payroll Module</button>':'') +
+      (canAccessModule('admin')?'<button class="nav-item" onclick="launchModule(\'admin\')"><span class="nav-icon">&#9881;</span> Admin Module</button>':'');
   } else if(currentModule === 'revenue'){
     var s = revSidebarStats();
     el.innerHTML =
@@ -1147,6 +1155,7 @@ function renderSidebar(){
       '<div class="sidebar-section">Reconciliation</div>' +
       (canAccessModule('ledger')?'<button class="nav-item" onclick="launchModule(\'ledger\')"><span class="nav-icon">&#8942;</span> Bank Ledger</button>':'') +
       (canAccessModule('payroll')?'<button class="nav-item" onclick="launchModule(\'payroll\')"><span class="nav-icon">&#9679;</span> Payroll Module</button>':'') +
+      (canAccessModule('admin')?'<button class="nav-item" onclick="launchModule(\'admin\')"><span class="nav-icon">&#9881;</span> Admin Module</button>':'') +
       (can('can_export_backup')?('<div class="sidebar-section">Data</div>' +
       '<button class="nav-item" onclick="exportData()"><span class="nav-icon">&#8595;</span> Export Backup</button>'):'') +
       '<div class="rev-sidebar-stats">' +
@@ -1155,6 +1164,25 @@ function renderSidebar(){
         '<div class="stat-row"><span>Pending deposit</span><span class="stat-val" style="color:var(--amber)">' + fmt(s.pending) + '</span></div>' +
         '<div style="margin-top:10px;font-size:10px;color:rgba(255,255,255,.22)">' + new Date().toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}) + '</div>' +
       '</div>';
+  } else if(currentModule === 'admin'){
+    el.innerHTML =
+      '<div class="sidebar-header">' +
+        '<div class="sidebar-logo">Brew Culture</div>' +
+        '<div class="sidebar-title">Admin</div>' +
+        '<div class="sidebar-sub">Users \xb7 permissions \xb7 data</div>' +
+      '</div>' +
+      '<div class="sidebar-section">Admin</div>' +
+      '<button class="nav-item" onclick="showView(\'admin-users\')" id="nav-admin-users"><span class="nav-icon">&#9775;</span> Users</button>' +
+      '<button class="nav-item" onclick="showView(\'admin-permissions\')" id="nav-admin-permissions"><span class="nav-icon">&#9881;</span> Permissions</button>' +
+      '<div class="sidebar-section">Data</div>' +
+      (can('can_export_backup')?'<button class="nav-item" onclick="exportData()"><span class="nav-icon">&#8595;</span> Export Backup</button>':'') +
+      '<button class="nav-item" onclick="triggerImport()"><span class="nav-icon">&#8593;</span> Restore Backup</button>' +
+      '<button class="nav-item" onclick="openMigrationTool()"><span class="nav-icon">&#8644;</span> Migrate to Supabase</button>' +
+      '<div class="sidebar-section">Jump To</div>' +
+      (canAccessModule('ap')?'<button class="nav-item" onclick="launchModule(\'ap\')"><span class="nav-icon">&#9632;</span> AP Module</button>':'') +
+      (canAccessModule('revenue')?'<button class="nav-item" onclick="launchModule(\'revenue\')"><span class="nav-icon">&#9650;</span> Revenue Module</button>':'') +
+      (canAccessModule('ledger')?'<button class="nav-item" onclick="launchModule(\'ledger\')"><span class="nav-icon">&#8942;</span> Bank Ledger</button>':'') +
+      (canAccessModule('payroll')?'<button class="nav-item" onclick="launchModule(\'payroll\')"><span class="nav-icon">&#9679;</span> Payroll Module</button>':'');
   } else {
     var s2 = apSummary(); var troy = troyReceivable();
     el.innerHTML =
@@ -1188,15 +1216,7 @@ function renderSidebar(){
       '<div class="sidebar-section">Reconciliation</div>' +
       (canAccessModule('ledger')?'<button class="nav-item" onclick="launchModule(\'ledger\')"><span class="nav-icon">&#8942;</span> Bank Ledger</button>':'') +
       (canAccessModule('payroll')?'<button class="nav-item" onclick="launchModule(\'payroll\')"><span class="nav-icon">&#9679;</span> Payroll Module</button>':'') +
-      '<div class="sidebar-section">Data</div>' +
-      (can('can_export_backup')?'<button class="nav-item" onclick="exportData()"><span class="nav-icon">&#8595;</span> Export Backup</button>':'') +
-      '<button class="nav-item" onclick="triggerImport()"><span class="nav-icon">&#8593;</span> Restore Backup</button>' +
-      '<button class="nav-item" onclick="openMigrationTool()"><span class="nav-icon">&#8644;</span> Migrate to Supabase</button>' +
-      (_userRole === 'admin' ? (
-        '<div class="sidebar-section">Admin</div>' +
-        '<button class="nav-item" onclick="showView(\'admin-users\')" id="nav-admin-users"><span class="nav-icon">&#9775;</span> Users</button>' +
-        '<button class="nav-item" onclick="showView(\'admin-permissions\')" id="nav-admin-permissions"><span class="nav-icon">&#9881;</span> Permissions</button>'
-      ) : '') +
+      (canAccessModule('admin')?'<button class="nav-item" onclick="launchModule(\'admin\')"><span class="nav-icon">&#9881;</span> Admin Module</button>':'') +
       '<div class="sidebar-stats" id="sidebar-stats"></div>';
   }
 }
@@ -1214,7 +1234,7 @@ async function launchModule(mod){
   currentModule = mod;
   document.getElementById('module-switcher').style.display = 'none';
   document.getElementById('main-app').style.display = 'flex';
-  var labels = {ap:'Accounts Payable', revenue:'Revenue', ledger:'Bank Ledger', payroll:'Payroll'};
+  var labels = {ap:'Accounts Payable', revenue:'Revenue', ledger:'Bank Ledger', payroll:'Payroll', admin:'Admin'};
   document.getElementById('mod-bar-name').textContent = labels[mod] || mod;
   var email = _session && _session.user ? _session.user.email : '';
   document.getElementById('mod-bar-user').textContent = email;
@@ -1232,6 +1252,8 @@ async function launchModule(mod){
     showView('bank-ledger');
   } else if(mod === 'payroll'){
     showView('payroll-employees');
+  } else if(mod === 'admin'){
+    showView('admin-users');
   }
 }
 
