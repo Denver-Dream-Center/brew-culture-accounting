@@ -369,7 +369,6 @@
   <div style="display:flex;flex:1;overflow:hidden">
   <nav class="sidebar" id="sidebar-root"></nav>
   <input type="file" id="import-file-input" accept=".json" style="display:none" onchange="importData(this)">
-  <input type="file" id="clover-file-input" accept=".xlsx,.xls" style="display:none" onchange="handleCloverFile(this)">
   <input type="file" id="loyalty-file-input" accept=".xlsx,.xls" style="display:none" onchange="handleLoyaltyFile(this)">
   <input type="file" id="repo-file-input" accept=".csv" style="display:none" onchange="handleRepoFile(this)">
   <input type="file" id="ledger-file-input" accept=".xlsx,.xls" style="display:none" onchange="handleLedgerFile(this)">
@@ -1950,7 +1949,6 @@ function revSidebarStats(){
 // REVENUE MODULE — CLOVER IMPORT
 // ═══════════════════════════════════════════════
 var _cloverParsed = null;  // holds parsed dayMap between parse and confirm
-var _cloverPreviewTarget = 'clover-parse-result';  // which element renderCloverPreview writes into -- the top Clover Import box normally, or 'repo-result' when triggered from a Revenue File Repository entry's Import button, so the review appears in place instead of jumping to the top of the page
 
 function renderRevImport(){
   $('topbar-actions').innerHTML = '';
@@ -1959,38 +1957,6 @@ function renderRevImport(){
 
   $('content').innerHTML =
     '<div class="card">' +
-      '<div class="card-header"><span class="card-title">Clover Import</span>' +
-        '<span style="font-size:12px;color:var(--ink-lo)">Full Orders Detail export (.xlsx)</span>' +
-      '</div>' +
-      '<div class="card-body">' +
-        '<div class="upload-zone" id="clover-drop-zone" onclick="$$(\'clover-file-input\').click()"' +
-          ' ondragover="event.preventDefault();this.classList.add(\'dragover\')"' +
-          ' ondragleave="this.classList.remove(\'dragover\')"' +
-          ' ondrop="event.preventDefault();this.classList.remove(\'dragover\');handleCloverDrop(event.dataTransfer.files)">' +
-          '<div class="upload-icon">&#8679;</div>' +
-          '<div class="upload-title">Drop Clover export here or click to browse</div>' +
-          '<div class="upload-sub">FullOrdersDetails_for_period_*.xlsx</div>' +
-        '</div>' +
-        '<div id="clover-parse-result" style="margin-top:16px"></div>' +
-      '</div>' +
-    '</div>' +
-    '<div class="card" style="margin-top:16px">' +
-      '<div class="card-header"><span class="card-title">Loyalty App Import</span>' +
-        '<span style="font-size:12px;color:var(--ink-lo)">Loyalzoo transaction export (.xlsx)</span>' +
-      '</div>' +
-      '<div class="card-body">' +
-        '<div class="upload-zone" id="loyalty-drop-zone" onclick="$$(\'loyalty-file-input\').click()"' +
-          ' ondragover="event.preventDefault();this.classList.add(\'dragover\')"' +
-          ' ondragleave="this.classList.remove(\'dragover\')"' +
-          ' ondrop="event.preventDefault();this.classList.remove(\'dragover\');handleLoyaltyDrop(event.dataTransfer.files)">' +
-          '<div class="upload-icon">&#8679;</div>' +
-          '<div class="upload-title">Drop Loyalty App export here or click to browse</div>' +
-          '<div class="upload-sub">P#### transactions *.xlsx</div>' +
-        '</div>' +
-        '<div id="loyalty-parse-result" style="margin-top:16px"></div>' +
-      '</div>' +
-    '</div>' +
-    '<div class="card" style="margin-top:16px">' +
       '<div class="card-header"><span class="card-title">Revenue File Repository</span>' +
         '<span style="font-size:12px;color:var(--ink-lo)">Drop the raw CSV — converts, renames, and reformats automatically</span>' +
       '</div>' +
@@ -2017,7 +1983,23 @@ function renderRevImport(){
         '</div>' +
       '</div>' +
     '</div>' +
-    '<div class="card" style="margin-top:0">' +
+    '<div class="card" style="margin-top:16px">' +
+      '<div class="card-header"><span class="card-title">Loyalty App Import</span>' +
+        '<span style="font-size:12px;color:var(--ink-lo)">Loyalzoo transaction export (.xlsx)</span>' +
+      '</div>' +
+      '<div class="card-body">' +
+        '<div class="upload-zone" id="loyalty-drop-zone" onclick="$$(\'loyalty-file-input\').click()"' +
+          ' ondragover="event.preventDefault();this.classList.add(\'dragover\')"' +
+          ' ondragleave="this.classList.remove(\'dragover\')"' +
+          ' ondrop="event.preventDefault();this.classList.remove(\'dragover\');handleLoyaltyDrop(event.dataTransfer.files)">' +
+          '<div class="upload-icon">&#8679;</div>' +
+          '<div class="upload-title">Drop Loyalty App export here or click to browse</div>' +
+          '<div class="upload-sub">P#### transactions *.xlsx</div>' +
+        '</div>' +
+        '<div id="loyalty-parse-result" style="margin-top:16px"></div>' +
+      '</div>' +
+    '</div>' +
+    '<div class="card" style="margin-top:16px">' +
       '<div class="card-header"><span class="card-title">Already Imported</span></div>' +
       '<div class="card-body" style="padding:0">' +
         (REV.settlements.length === 0
@@ -2041,37 +2023,8 @@ function renderRevImport(){
   renderRepoFileList();
 }
 
-function handleCloverDrop(files){
-  if(files && files[0]) processCloverFile(files[0]);
-}
-
-function handleCloverFile(input){
-  if(input.files && input.files[0]) processCloverFile(input.files[0]);
-  input.value = '';
-}
-
-function processCloverFile(file){
-  _cloverPreviewTarget = 'clover-parse-result';
-  var resultEl = $('clover-parse-result');
-  if(!resultEl) return;
-  resultEl.innerHTML = '<div style="color:var(--ink-mid);font-size:13px">Reading file...</div>';
-  var reader = new FileReader();
-  reader.onload = function(e){
-    try{
-      var ab = e.target.result;
-      var parsed = parseCloverXLSX(ab);
-      _cloverParsed = parsed;
-      renderCloverPreview(parsed.dayMap);
-    } catch(err){
-      resultEl.innerHTML = '<div class="alert" style="background:var(--red-lo);border:1px solid #EAB5B1;color:var(--red)">Parse error: ' + err.message + '</div>';
-      console.error(err);
-    }
-  };
-  reader.readAsArrayBuffer(file);
-}
-
 function renderCloverPreview(dayMap){
-  var resultEl = $(_cloverPreviewTarget);
+  var resultEl = $('repo-result');
   if(!resultEl) return;
   var existing = {};
   REV.settlements.forEach(function(s){ existing[s.date] = true; });
@@ -2165,7 +2118,7 @@ function renderCloverPreview(dayMap){
       '</tr></thead><tbody>' + rows + '</tbody></table>' +
     '</div>' +
     '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px">' +
-      '<button class="btn btn-secondary" onclick="_cloverParsed=null;$$(\'' + _cloverPreviewTarget + '\').innerHTML=\'\'">Cancel</button>' +
+      '<button class="btn btn-secondary" onclick="_cloverParsed=null;$$(\'repo-result\').innerHTML=\'\'">Cancel</button>' +
       '<button class="btn btn-primary" onclick="confirmCloverImport()">&#10003; Confirm Import</button>' +
     '</div>';
 }
@@ -2796,16 +2749,12 @@ async function downloadRepoFile(name){
   URL.revokeObjectURL(url);
 }
 
-// Runs a repository file through the exact same parse/preview path as
-// dropping it into the Clover Import box above (parseCloverXLSX ->
-// renderCloverPreview, same _cloverParsed state, same Confirm Import
-// button) -- just sourced from Supabase Storage instead of a local
-// FileReader, so there's no separate review/submit flow to keep in sync
-// with the real one. Renders into #repo-result (between the drop zone and
-// the Repository Files list) rather than the top-of-page Clover Import
-// box, so the review appears right where the file was imported from.
+// Runs a repository file through parseCloverXLSX -> renderCloverPreview ->
+// confirmCloverImport, same path a standalone Clover Import drop used to
+// use before it was replaced by this repository -- just sourced from
+// Supabase Storage instead of a local FileReader. Renders into #repo-result,
+// between the drop zone and the Repository Files list.
 async function importRepoFile(name){
-  _cloverPreviewTarget = 'repo-result';
   var resultEl = $('repo-result');
   if(!resultEl) return;
   resultEl.scrollIntoView({behavior:'smooth', block:'center'});
