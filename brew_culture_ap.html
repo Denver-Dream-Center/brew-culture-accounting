@@ -2587,13 +2587,30 @@ function findSplitTenderRows(aoa){
 
 var _splitTenderResolve = null, _splitTenderReject = null, _splitTenderRows = null;
 
+// Labels the read-only remainder field with whatever tender it actually
+// represents for THIS split, rather than assuming cash. When needsCreditInput
+// is set, credit/debit already has its own explicit input, so whatever's
+// left after that (and any gift card) is cash by definition. Otherwise
+// (no cash ambiguity to resolve) the remainder is just "the other tender"
+// on the order -- credit/debit for a Gift Card + Debit split with no cash
+// involved at all, or cash for a Gift Card + Cash split.
+function splitRemainderLabel(s){
+  if(s.needsCreditInput) return 'Remaining (cash)';
+  var hasCreditDebit = s.tenders.some(function(t){ return /credit\s*card/i.test(t) || /debit\s*card/i.test(t); });
+  if(hasCreditDebit) return 'Remaining (credit/debit)';
+  var hasCash = s.tenders.some(function(t){ return /cash/i.test(t); });
+  if(hasCash) return 'Remaining (cash)';
+  return 'Remaining (other tender)';
+}
+
 // Shows one summary screen listing every split-tender order that needs a
 // manual amount -- a gift-card input for any order with a gift-card
 // tender, a credit/debit input for any order mixing cash with credit or
 // debit (the one combination the formula can't resolve on its own), or
-// both for a genuine 3-way split -- with cash always shown read-only as
-// the computed remainder. Nothing proceeds until every applicable field is
-// filled in and validated. Returns a Promise resolving to
+// both for a genuine 3-way split -- with the remainder always shown
+// read-only, labeled by whichever tender it actually represents. Nothing
+// proceeds until every applicable field is filled in and validated.
+// Returns a Promise resolving to
 // [{order, rowIndex, giftCardAmount?, creditAmount?}, ...], or rejecting
 // if the uploader cancels.
 function promptSplitTenderAmounts(splits){
@@ -2609,7 +2626,7 @@ function promptSplitTenderAmounts(splits){
         colCount++;
         inputs += '<div class="form-group"><label>Credit/Debit Amount</label><input type="number" step="0.01" min="0" max="' + s.totalCollected + '" id="split-credit-' + idx + '" oninput="updateSplitRemainder(' + idx + ')"></div>';
       }
-      inputs += '<div class="form-group"><label>Remaining (cash)</label><input type="text" id="split-rem-' + idx + '" readonly value="' + fmt(s.totalCollected) + '" style="background:var(--bg)"></div>';
+      inputs += '<div class="form-group"><label>' + splitRemainderLabel(s) + '</label><input type="text" id="split-rem-' + idx + '" readonly value="' + fmt(s.totalCollected) + '" style="background:var(--bg)"></div>';
       return '<div style="padding:10px 0;border-bottom:1px solid var(--border-lo)">' +
         '<div style="font-size:13px;font-weight:600">' + s.order + (s.itemName ? (' — ' + s.itemName) : '') + '</div>' +
         '<div style="font-size:12px;color:var(--ink-mid);margin-bottom:6px">' + s.paymentType + ' · Total collected: ' + fmt(s.totalCollected) + '</div>' +
