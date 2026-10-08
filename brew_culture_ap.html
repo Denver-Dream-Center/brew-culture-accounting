@@ -2991,20 +2991,40 @@ function buildSweepPrepWorkbook(ab){
   // (already counted); otherwise output the real per-order value. Row 2's
   // "row above" is the header row, so the comparison is never true there —
   // no special-casing needed, every data row uses the same formula shape.
+  //
+  // Every cell below also gets a literal computed `.v` alongside its `.f`
+  // formula string — mirroring the same logic in JS. Excel/Sheets always
+  // write both when they save a formula cell; a human opening this file
+  // still gets live, recalculating formulas exactly as before. But this
+  // workbook can now also reach a bookkeeper's review screen via the
+  // Revenue File Repository WITHOUT ever being opened in a real spreadsheet
+  // app first — and SheetJS (used to read it back) only reads a formula
+  // cell's cached value, it never evaluates formulas. Without a `.v`, that
+  // read comes back blank, which is exactly why Net Rev/Tax/Tips/Cash/Card
+  // showed $0.00 on a repository-sourced import while plain pass-through
+  // columns (Gross, Discounts) read fine.
+  var toNum = function(v){ var n = typeof v === 'number' ? v : parseFloat(v); return isNaN(n) ? 0 : n; };
+  var totals = {}; TOTALED_COLS.forEach(function(h){ totals[h] = 0; });
   for(var i = 0; i < rows.length; i++){
     var excelRow = i + 2;
     var prevRow = excelRow - 1;
     var oCol = colLetter['order'];
     var dedupCond = oCol + excelRow + '=' + oCol + prevRow;
+    var isDup = i > 0 && rows[i]['order'] === rows[i - 1]['order'];
+
+    var netVal = isDup ? 0 : toNum(rows[i]['Order_Net']);
+    var taxVal = isDup ? 0 : toNum(rows[i]['Order_Tax']);
+    var tipVal = isDup ? 0 : toNum(rows[i]['Order_Tip_Amount']);
+    var amtCollectedVal = isDup ? 0 : toNum(rows[i]['Order_Amount_collected']);
 
     newWs[colLetter['Unique_Order_Net'] + excelRow] =
-      {t:'n', f:'IF(' + dedupCond + ',0,' + colLetter['Order_Net'] + excelRow + ')'};
+      {t:'n', f:'IF(' + dedupCond + ',0,' + colLetter['Order_Net'] + excelRow + ')', v:netVal};
     newWs[colLetter['Unique_Order_Tax'] + excelRow] =
-      {t:'n', f:'IF(' + dedupCond + ',0,' + colLetter['Order_Tax'] + excelRow + ')'};
+      {t:'n', f:'IF(' + dedupCond + ',0,' + colLetter['Order_Tax'] + excelRow + ')', v:taxVal};
     newWs[colLetter['Unique_Order_Tip'] + excelRow] =
-      {t:'n', f:'IF(' + dedupCond + ',0,' + colLetter['Order_Tip_Amount'] + excelRow + ')'};
+      {t:'n', f:'IF(' + dedupCond + ',0,' + colLetter['Order_Tip_Amount'] + excelRow + ')', v:tipVal};
     newWs[colLetter['Unique_Order_Amt_Collected'] + excelRow] =
-      {t:'n', f:'IF(' + dedupCond + ',0,' + colLetter['Order_Amount_collected'] + excelRow + ')'};
+      {t:'n', f:'IF(' + dedupCond + ',0,' + colLetter['Order_Amount_collected'] + excelRow + ')', v:amtCollectedVal};
     // Gift_Card_Redeemed: auto-filled whenever this row's card_type names a
     // gift card, with the order's own collected amount -- so a wholly-gift-
     // card-tendered order nets Unique_Credit_Amt_Collected to $0 below
@@ -3013,8 +3033,12 @@ function buildSweepPrepWorkbook(ab){
     // gift-card portion by hand, same as before.
     var ctCol = colLetter['card_type'];
     var oaCell = colLetter['Order_Amount_collected'] + excelRow;
-    newWs[colLetter['Gift_Card_Redeemed'] + excelRow] =
-      {t:'n', f:'IF(ISNUMBER(SEARCH("GIFT_CARD",' + ctCol + excelRow + ')),' + oaCell + ',"")'};
+    var oaRawVal = toNum(rows[i]['Order_Amount_collected']);
+    var isGiftCard = String(rows[i]['card_type'] || '').toUpperCase().indexOf('GIFT_CARD') !== -1;
+    var gcVal = isGiftCard ? oaRawVal : '';
+    var gcCellObj = {t:'n', f:'IF(ISNUMBER(SEARCH("GIFT_CARD",' + ctCol + excelRow + ')),' + oaCell + ',"")'};
+    if(gcVal !== '') gcCellObj.v = gcVal;
+    newWs[colLetter['Gift_Card_Redeemed'] + excelRow] = gcCellObj;
     // Credit/debit only, net of any gift card portion. Uses SEARCH (a
     // substring check) rather than an exact match, since Clover reports
     // split-tender orders as a combined string like "Gift Cards, Credit
@@ -3024,15 +3048,25 @@ function buildSweepPrepWorkbook(ab){
     var pCol = colLetter['payment_type'];
     var uAmtCell = colLetter['Unique_Order_Amt_Collected'] + excelRow;
     var gcCell = colLetter['Gift_Card_Redeemed'] + excelRow;
+    var pTypeUpper = String(rows[i]['payment_type'] || '').toUpperCase();
+    var isCreditOrDebit = pTypeUpper.indexOf('CREDIT CARD') !== -1 || pTypeUpper.indexOf('DEBIT CARD') !== -1;
+    var creditVal = isCreditOrDebit ? (amtCollectedVal - (gcVal === '' ? 0 : gcVal)) : 0;
     newWs[colLetter['Unique_Credit_Amt_Collected'] + excelRow] =
       {t:'n', f:'IF(OR(ISNUMBER(SEARCH("Credit Card",' + pCol + excelRow + ')),ISNUMBER(SEARCH("Debit Card",' + pCol + excelRow + ')))' +
-        ',' + uAmtCell + '-IF(' + gcCell + '="",0,' + gcCell + '),0)'};
+        ',' + uAmtCell + '-IF(' + gcCell + '="",0,' + gcCell + '),0)', v:creditVal};
+
+    totals['Unique_Order_Net'] += netVal;
+    totals['Unique_Order_Tax'] += taxVal;
+    totals['Unique_Order_Tip'] += tipVal;
+    totals['Unique_Order_Amt_Collected'] += amtCollectedVal;
+    totals['Unique_Credit_Amt_Collected'] += creditVal;
+    totals['Gift_Card_Redeemed'] += (gcVal === '' ? 0 : gcVal);
   }
 
   // Totals row — SUM every inserted column, explicitly excluding Bank_Sweep_Date.
   TOTALED_COLS.forEach(function(h){
     var col = colLetter[h];
-    newWs[col + totalsRowNum] = {t:'n', f:'SUM(' + col + '2:' + col + lastDataRow + ')'};
+    newWs[col + totalsRowNum] = {t:'n', f:'SUM(' + col + '2:' + col + lastDataRow + ')', v:totals[h]};
   });
 
   // Date/time display formatting, matching the format the owner applies by
