@@ -2528,13 +2528,28 @@ function findSplitTenderRows(aoa){
     if(seen[orderId]) continue;
     seen[orderId] = true;
     var tenders = pt.split(',').map(function(s){ return s.trim(); }).filter(Boolean);
+    var hasGiftCard = tenders.some(function(t){ return /gift\s*card/i.test(t); });
+    var hasCreditDebit = tenders.some(function(t){ return /credit\s*card/i.test(t) || /debit\s*card/i.test(t); });
+    var hasCash = tenders.some(function(t){ return /cash/i.test(t); });
     splits.push({
       order: orderId,
       rowIndex: i, // position within aoa -- maps 1:1 to the sweep-prep output sheet's row, same index
       paymentType: pt,
       tenders: tenders,
       totalCollected: parseFloat(aoa[i][amtIdx]) || 0,
-      itemName: itemIdx !== -1 ? aoa[i][itemIdx] : ''
+      itemName: itemIdx !== -1 ? aoa[i][itemIdx] : '',
+      // Gift_Card_Redeemed has no way to tell a gift-card tender's dollar
+      // amount apart from any other tender on the same order (card_type is
+      // "N/A" on every split-tender row), so any gift-card-involving split
+      // needs the uploader to type it in by hand.
+      needsGiftCardInput: hasGiftCard,
+      // Unique_Credit_Amt_Collected's formula assumes the entire collected
+      // amount (net of any gift card) is credit/debit -- true whenever
+      // credit/debit is the only non-gift-card tender, but wrong the
+      // moment cash is ALSO in the mix, since the formula has no way to
+      // know how much of the total was cash vs card. That combination
+      // needs a manual amount too.
+      needsCreditInput: hasCreditDebit && hasCash
     });
   }
   return splits;
@@ -2542,29 +2557,40 @@ function findSplitTenderRows(aoa){
 
 var _splitTenderResolve = null, _splitTenderReject = null, _splitTenderRows = null;
 
-// Shows one summary screen listing every gift-card split-tender order
-// found, with a gift-card-amount input per order (the other tender's
-// amount is shown read-only, computed as the remainder) -- nothing
-// proceeds until every row is filled in and validated. Returns a Promise
-// resolving to [{order, rowIndex, giftCardAmount}, ...], or rejecting if
-// the uploader cancels.
+// Shows one summary screen listing every split-tender order that needs a
+// manual amount -- a gift-card input for any order with a gift-card
+// tender, a credit/debit input for any order mixing cash with credit or
+// debit (the one combination the formula can't resolve on its own), or
+// both for a genuine 3-way split -- with cash always shown read-only as
+// the computed remainder. Nothing proceeds until every applicable field is
+// filled in and validated. Returns a Promise resolving to
+// [{order, rowIndex, giftCardAmount?, creditAmount?}, ...], or rejecting
+// if the uploader cancels.
 function promptSplitTenderAmounts(splits){
   return new Promise(function(resolve, reject){
     var rowsHtml = splits.map(function(s, idx){
+      var inputs = '';
+      var colCount = 1; // remainder column always present
+      if(s.needsGiftCardInput){
+        colCount++;
+        inputs += '<div class="form-group"><label>Gift Card Amount</label><input type="number" step="0.01" min="0" max="' + s.totalCollected + '" id="split-gc-' + idx + '" oninput="updateSplitRemainder(' + idx + ')"></div>';
+      }
+      if(s.needsCreditInput){
+        colCount++;
+        inputs += '<div class="form-group"><label>Credit/Debit Amount</label><input type="number" step="0.01" min="0" max="' + s.totalCollected + '" id="split-credit-' + idx + '" oninput="updateSplitRemainder(' + idx + ')"></div>';
+      }
+      inputs += '<div class="form-group"><label>Remaining (cash)</label><input type="text" id="split-rem-' + idx + '" readonly value="' + fmt(s.totalCollected) + '" style="background:var(--bg)"></div>';
       return '<div style="padding:10px 0;border-bottom:1px solid var(--border-lo)">' +
         '<div style="font-size:13px;font-weight:600">' + s.order + (s.itemName ? (' — ' + s.itemName) : '') + '</div>' +
         '<div style="font-size:12px;color:var(--ink-mid);margin-bottom:6px">' + s.paymentType + ' · Total collected: ' + fmt(s.totalCollected) + '</div>' +
-        '<div class="form-grid" style="grid-template-columns:1fr 1fr">' +
-          '<div class="form-group"><label>Gift Card Amount</label><input type="number" step="0.01" min="0" max="' + s.totalCollected + '" id="split-gc-' + idx + '" oninput="updateSplitRemainder(' + idx + ',' + s.totalCollected + ')"></div>' +
-          '<div class="form-group"><label>Remaining (other tender)</label><input type="text" id="split-rem-' + idx + '" readonly value="' + fmt(s.totalCollected) + '" style="background:var(--bg)"></div>' +
-        '</div>' +
+        '<div class="form-grid" style="grid-template-columns:repeat(' + colCount + ',1fr)">' + inputs + '</div>' +
       '</div>';
     }).join('');
     openModal(
-      '<div class="modal" style="max-width:560px">' +
+      '<div class="modal" style="max-width:620px">' +
         '<div class="modal-header">' +
           '<div><div class="modal-title">Split-Tender Orders Found</div>' +
-          '<div class="modal-sub">' + splits.length + ' order' + (splits.length !== 1 ? 's' : '') + ' paid with a gift card plus another tender — enter the gift card amount for each</div></div>' +
+          '<div class="modal-sub">' + splits.length + ' order' + (splits.length !== 1 ? 's' : '') + ' paid with more than one tender — enter the amount for each tender shown; cash is calculated as the remainder</div></div>' +
           '<button class="close-btn" onclick="cancelSplitTenderPrompt()">x</button>' +
         '</div>' +
         '<div class="modal-body" style="max-height:60vh;overflow-y:auto">' + rowsHtml + '</div>' +
@@ -2581,13 +2607,17 @@ function promptSplitTenderAmounts(splits){
   });
 }
 
-function updateSplitRemainder(idx, total){
-  var gcEl = $('split-gc-' + idx);
+function updateSplitRemainder(idx){
+  var s = _splitTenderRows[idx];
   var remEl = $('split-rem-' + idx);
-  if(!gcEl || !remEl) return;
-  var gc = parseFloat(gcEl.value);
+  if(!s || !remEl) return;
+  var gcEl = $('split-gc-' + idx);
+  var crEl = $('split-credit-' + idx);
+  var gc = gcEl ? parseFloat(gcEl.value) : 0;
   if(isNaN(gc)) gc = 0;
-  remEl.value = fmt(Math.max(0, total - gc));
+  var cr = crEl ? parseFloat(crEl.value) : 0;
+  if(isNaN(cr)) cr = 0;
+  remEl.value = fmt(Math.max(0, s.totalCollected - gc - cr));
 }
 
 function cancelSplitTenderPrompt(){
@@ -2603,17 +2633,33 @@ function submitSplitTenderPrompt(){
   var results = [];
   for(var i = 0; i < _splitTenderRows.length; i++){
     var s = _splitTenderRows[i];
-    var el = $('split-gc-' + i);
-    var val = parseFloat(el.value);
-    if(el.value === '' || isNaN(val) || val < 0){
-      errEl.textContent = 'Enter a gift card amount (0 or more) for every order listed.';
+    var entry = {order: s.order, rowIndex: s.rowIndex};
+    var sum = 0;
+    if(s.needsGiftCardInput){
+      var gcEl = $('split-gc-' + i);
+      var gcVal = parseFloat(gcEl.value);
+      if(gcEl.value === '' || isNaN(gcVal) || gcVal < 0){
+        errEl.textContent = 'Enter a gift card amount (0 or more) for ' + s.order + '.';
+        return;
+      }
+      entry.giftCardAmount = Math.round(gcVal * 100) / 100;
+      sum += entry.giftCardAmount;
+    }
+    if(s.needsCreditInput){
+      var crEl = $('split-credit-' + i);
+      var crVal = parseFloat(crEl.value);
+      if(crEl.value === '' || isNaN(crVal) || crVal < 0){
+        errEl.textContent = 'Enter a credit/debit amount (0 or more) for ' + s.order + '.';
+        return;
+      }
+      entry.creditAmount = Math.round(crVal * 100) / 100;
+      sum += entry.creditAmount;
+    }
+    if(sum > s.totalCollected + 0.001){
+      errEl.textContent = 'Amounts entered for ' + s.order + ' exceed the total collected (' + fmt(s.totalCollected) + ').';
       return;
     }
-    if(val > s.totalCollected + 0.001){
-      errEl.textContent = 'Gift card amount for ' + s.order + ' can\'t exceed the total collected (' + fmt(s.totalCollected) + ').';
-      return;
-    }
-    results.push({order: s.order, rowIndex: s.rowIndex, giftCardAmount: Math.round(val * 100) / 100});
+    results.push(entry);
   }
   closeModal();
   var resolve = _splitTenderResolve;
@@ -2636,23 +2682,28 @@ function processRepoCSVFile(file){
       if(aoa.length < 2) throw new Error('No data rows found in this CSV.');
       var baseName = deriveSweepPrepBaseName(aoa);
 
-      // Split-tender detection: only orders where a gift card is one of
-      // the tenders get a working field to put the answer into right now
-      // (Gift_Card_Redeemed, already used for this purpose). Other splits
-      // (e.g. Credit Card + Cash) are surfaced as a warning instead of a
-      // prompt -- there's no correct column for them to go in yet.
+      // Split-tender detection: an order needs a manual amount whenever a
+      // gift card is one of its tenders (Gift_Card_Redeemed) or cash is
+      // mixed with credit/debit (Unique_Credit_Amt_Collected) -- the two
+      // cases the sweep-prep formulas can't resolve on their own. A pure
+      // credit+debit split with no cash needs nothing: the formula already
+      // attributes the full amount to credit, correctly. Anything else
+      // (an unrecognized tender combination) is surfaced as a warning
+      // instead of a prompt -- there's no correct column for it to go in.
       var allSplits = findSplitTenderRows(aoa);
-      var giftCardSplits = allSplits.filter(function(s){
-        return s.tenders.some(function(t){ return /gift\s*card/i.test(t); });
+      var promptSplits = allSplits.filter(function(s){
+        return s.needsGiftCardInput || s.needsCreditInput;
       });
       var otherSplits = allSplits.filter(function(s){
-        return !s.tenders.some(function(t){ return /gift\s*card/i.test(t); });
+        if(s.needsGiftCardInput || s.needsCreditInput) return false;
+        var hasCreditDebit = s.tenders.some(function(t){ return /credit\s*card/i.test(t) || /debit\s*card/i.test(t); });
+        return !hasCreditDebit;
       });
 
-      var giftCardResults = [];
-      if(giftCardSplits.length > 0){
+      var splitResults = [];
+      if(promptSplits.length > 0){
         try{
-          giftCardResults = await promptSplitTenderAmounts(giftCardSplits);
+          splitResults = await promptSplitTenderAmounts(promptSplits);
         }catch(cancelErr){
           resultEl.innerHTML = '<div style="color:var(--ink-mid);font-size:13px">Upload cancelled.</div>';
           return;
@@ -2669,19 +2720,27 @@ function processRepoCSVFile(file){
 
       var wbOut = buildSweepPrepWorkbook(rawAb);
 
-      // Write the confirmed gift-card amounts straight into the output
-      // sheet's Gift_Card_Redeemed cells, as plain numbers (not a
-      // formula) -- same treatment Bank_Sweep_Date already gets for
-      // manually-entered data. The per-row card_type-based formula can't
-      // catch these on its own since card_type is "N/A" on a split-tender
-      // row; this is the one piece of information only the uploader has.
-      if(giftCardResults.length > 0){
+      // Write the confirmed amounts straight into the output sheet's
+      // cells, as plain numbers -- replacing the formula entirely, same
+      // treatment Bank_Sweep_Date already gets for manually-entered data.
+      // Gift_Card_Redeemed can't be derived at all (card_type is "N/A" on
+      // every split-tender row); Unique_Credit_Amt_Collected's formula
+      // can compute the gift-card-only case fine on its own, but once cash
+      // is also in the mix it has no way to know the actual card portion,
+      // so that gets overwritten too, exactly like the user's own manual
+      // correction already does by hand.
+      if(splitResults.length > 0){
         var outWs = wbOut.Sheets[wbOut.SheetNames[0]];
         var outHeaderRow = XLSX.utils.sheet_to_json(outWs, {header:1, range:0})[0];
         var gcColIdx = outHeaderRow.indexOf('Gift_Card_Redeemed');
-        giftCardResults.forEach(function(r){
-          var cellAddr = XLSX.utils.encode_cell({r: r.rowIndex, c: gcColIdx});
-          outWs[cellAddr] = {t:'n', v:r.giftCardAmount};
+        var creditColIdx = outHeaderRow.indexOf('Unique_Credit_Amt_Collected');
+        splitResults.forEach(function(r){
+          if(r.giftCardAmount !== undefined){
+            outWs[XLSX.utils.encode_cell({r: r.rowIndex, c: gcColIdx})] = {t:'n', v:r.giftCardAmount};
+          }
+          if(r.creditAmount !== undefined){
+            outWs[XLSX.utils.encode_cell({r: r.rowIndex, c: creditColIdx})] = {t:'n', v:r.creditAmount};
+          }
         });
       }
 
@@ -2697,11 +2756,16 @@ function processRepoCSVFile(file){
       if(error) throw new Error('Upload failed: ' + error.message);
 
       var noteHtml = '';
-      if(giftCardResults.length > 0){
-        noteHtml += '<div style="margin-top:8px">Filled in Gift_Card_Redeemed for ' + giftCardResults.length + ' split-tender order' + (giftCardResults.length !== 1 ? 's' : '') + ': ' + giftCardResults.map(function(r){ return r.order + ' (' + fmt(r.giftCardAmount) + ')'; }).join(', ') + '.</div>';
+      var giftCardFilled = splitResults.filter(function(r){ return r.giftCardAmount !== undefined; });
+      var creditFilled = splitResults.filter(function(r){ return r.creditAmount !== undefined; });
+      if(giftCardFilled.length > 0){
+        noteHtml += '<div style="margin-top:8px">Filled in Gift_Card_Redeemed for ' + giftCardFilled.length + ' split-tender order' + (giftCardFilled.length !== 1 ? 's' : '') + ': ' + giftCardFilled.map(function(r){ return r.order + ' (' + fmt(r.giftCardAmount) + ')'; }).join(', ') + '.</div>';
+      }
+      if(creditFilled.length > 0){
+        noteHtml += '<div style="margin-top:8px">Filled in Unique_Credit_Amt_Collected for ' + creditFilled.length + ' split-tender order' + (creditFilled.length !== 1 ? 's' : '') + ': ' + creditFilled.map(function(r){ return r.order + ' (' + fmt(r.creditAmount) + ')'; }).join(', ') + '.</div>';
       }
       if(otherSplits.length > 0){
-        noteHtml += '<div style="margin-top:8px;color:var(--amber-dark,#8a6500)">⚠ ' + otherSplits.length + ' other split-tender order' + (otherSplits.length !== 1 ? 's' : '') + ' found without a gift card involved (e.g. Credit Card + Cash) — not auto-handled yet, check by hand: ' + otherSplits.map(function(s){ return s.order + ' (' + s.paymentType + ')'; }).join(', ') + '.</div>';
+        noteHtml += '<div style="margin-top:8px;color:var(--amber-dark,#8a6500)">⚠ ' + otherSplits.length + ' other split-tender order' + (otherSplits.length !== 1 ? 's' : '') + ' found with an unrecognized tender combination — not auto-handled, check by hand: ' + otherSplits.map(function(s){ return s.order + ' (' + s.paymentType + ')'; }).join(', ') + '.</div>';
       }
 
       resultEl.innerHTML = '<div class="alert alert-inv">Converted, reformatted, and uploaded to the repository as <strong>' + outName + '</strong>. Your bookkeeper can download it below, verify it against POS totals, correct if needed, and submit it through Clover Import.' + noteHtml + '</div>';
