@@ -2848,7 +2848,8 @@ async function renderRepoFileList(){
       var safeName = f.name.replace(/'/g, "\\'");
       return '<tr><td class="mono" style="font-size:12px">' + f.name + '</td>' +
         '<td>' + added + '</td>' +
-        '<td><button class="btn btn-ghost btn-sm" onclick="downloadRepoFile(\'' + safeName + '\')">Download</button> ' +
+        '<td><button class="btn btn-primary btn-sm" onclick="importRepoFile(\'' + safeName + '\')">Import</button> ' +
+        '<button class="btn btn-ghost btn-sm" onclick="downloadRepoFile(\'' + safeName + '\')">Download</button> ' +
         '<button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="removeRepoFile(\'' + safeName + '\')">Remove</button></td></tr>';
     }).join('') +
     '</tbody></table></div>';
@@ -2861,6 +2862,33 @@ async function downloadRepoFile(name){
   var a = document.createElement('a');
   a.href = url; a.download = name; a.click();
   URL.revokeObjectURL(url);
+}
+
+// Runs a repository file through the exact same parse/preview path as
+// dropping it into the Clover Import box above (parseCloverXLSX ->
+// renderCloverPreview, same _cloverParsed state, same Confirm Import
+// button) -- just sourced from Supabase Storage instead of a local
+// FileReader, so there's no separate review/submit flow to keep in sync
+// with the real one.
+async function importRepoFile(name){
+  var resultEl = $('clover-parse-result');
+  if(!resultEl) return;
+  resultEl.scrollIntoView({behavior:'smooth', block:'center'});
+  resultEl.innerHTML = '<div style="color:var(--ink-mid);font-size:13px">Downloading ' + name + ' from repository...</div>';
+  var {data, error} = await _sb.storage.from('revenue-files').download(name);
+  if(error){
+    resultEl.innerHTML = '<div class="alert" style="background:var(--red-lo);border:1px solid #EAB5B1;color:var(--red)">Could not download: ' + error.message + '</div>';
+    return;
+  }
+  try{
+    var ab = await data.arrayBuffer();
+    var parsed = parseCloverXLSX(ab);
+    _cloverParsed = parsed;
+    renderCloverPreview(parsed.dayMap);
+  } catch(err){
+    resultEl.innerHTML = '<div class="alert" style="background:var(--red-lo);border:1px solid #EAB5B1;color:var(--red)">Parse error: ' + err.message + '</div>';
+    console.error(err);
+  }
 }
 
 async function removeRepoFile(name){
