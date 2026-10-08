@@ -2619,6 +2619,123 @@ function handleRepoFile(input){
   input.value = '';
 }
 
+// Finds split-tender orders (payment_type holds more than one tender,
+// e.g. "Gift Cards, Credit Card") in the raw CSV rows, before any
+// sweep-prep transform runs. Only the FIRST row of each order is
+// returned (orders are contiguous blocks of rows, one per item, in this
+// export -- matching the dedup convention the existing Unique_* columns
+// already rely on), since Order_Amount_collected repeats the same
+// order-level total on every item row and a per-order amount should only
+// ever be attributed once.
+function findSplitTenderRows(aoa){
+  var header = aoa[0];
+  var ptIdx = header.indexOf('payment_type');
+  var orderIdx = header.indexOf('order');
+  var amtIdx = header.indexOf('Order_Amount_collected');
+  var itemIdx = header.indexOf('item_name');
+  if(ptIdx === -1 || orderIdx === -1 || amtIdx === -1) return [];
+  var seen = {};
+  var splits = [];
+  for(var i = 1; i < aoa.length; i++){
+    var pt = aoa[i][ptIdx];
+    var orderId = aoa[i][orderIdx];
+    if(typeof pt !== 'string' || pt.indexOf(',') === -1) continue;
+    if(seen[orderId]) continue;
+    seen[orderId] = true;
+    var tenders = pt.split(',').map(function(s){ return s.trim(); }).filter(Boolean);
+    splits.push({
+      order: orderId,
+      rowIndex: i, // position within aoa -- maps 1:1 to the sweep-prep output sheet's row, same index
+      paymentType: pt,
+      tenders: tenders,
+      totalCollected: parseFloat(aoa[i][amtIdx]) || 0,
+      itemName: itemIdx !== -1 ? aoa[i][itemIdx] : ''
+    });
+  }
+  return splits;
+}
+
+var _splitTenderResolve = null, _splitTenderReject = null, _splitTenderRows = null;
+
+// Shows one summary screen listing every gift-card split-tender order
+// found, with a gift-card-amount input per order (the other tender's
+// amount is shown read-only, computed as the remainder) -- nothing
+// proceeds until every row is filled in and validated. Returns a Promise
+// resolving to [{order, rowIndex, giftCardAmount}, ...], or rejecting if
+// the uploader cancels.
+function promptSplitTenderAmounts(splits){
+  return new Promise(function(resolve, reject){
+    var rowsHtml = splits.map(function(s, idx){
+      return '<div style="padding:10px 0;border-bottom:1px solid var(--border-lo)">' +
+        '<div style="font-size:13px;font-weight:600">' + s.order + (s.itemName ? (' — ' + s.itemName) : '') + '</div>' +
+        '<div style="font-size:12px;color:var(--ink-mid);margin-bottom:6px">' + s.paymentType + ' · Total collected: ' + fmt(s.totalCollected) + '</div>' +
+        '<div class="form-grid" style="grid-template-columns:1fr 1fr">' +
+          '<div class="form-group"><label>Gift Card Amount</label><input type="number" step="0.01" min="0" max="' + s.totalCollected + '" id="split-gc-' + idx + '" oninput="updateSplitRemainder(' + idx + ',' + s.totalCollected + ')"></div>' +
+          '<div class="form-group"><label>Remaining (other tender)</label><input type="text" id="split-rem-' + idx + '" readonly value="' + fmt(s.totalCollected) + '" style="background:var(--bg)"></div>' +
+        '</div>' +
+      '</div>';
+    }).join('');
+    openModal(
+      '<div class="modal" style="max-width:560px">' +
+        '<div class="modal-header">' +
+          '<div><div class="modal-title">Split-Tender Orders Found</div>' +
+          '<div class="modal-sub">' + splits.length + ' order' + (splits.length !== 1 ? 's' : '') + ' paid with a gift card plus another tender — enter the gift card amount for each</div></div>' +
+          '<button class="close-btn" onclick="cancelSplitTenderPrompt()">x</button>' +
+        '</div>' +
+        '<div class="modal-body" style="max-height:60vh;overflow-y:auto">' + rowsHtml + '</div>' +
+        '<div id="split-tender-err" style="color:var(--red);font-size:13px;padding:0 20px;min-height:18px"></div>' +
+        '<div class="modal-footer">' +
+          '<button class="btn btn-ghost" onclick="cancelSplitTenderPrompt()">Cancel Upload</button>' +
+          '<button class="btn btn-primary" onclick="submitSplitTenderPrompt()">Continue</button>' +
+        '</div>' +
+      '</div>'
+    );
+    _splitTenderResolve = resolve;
+    _splitTenderReject = reject;
+    _splitTenderRows = splits;
+  });
+}
+
+function updateSplitRemainder(idx, total){
+  var gcEl = $('split-gc-' + idx);
+  var remEl = $('split-rem-' + idx);
+  if(!gcEl || !remEl) return;
+  var gc = parseFloat(gcEl.value);
+  if(isNaN(gc)) gc = 0;
+  remEl.value = fmt(Math.max(0, total - gc));
+}
+
+function cancelSplitTenderPrompt(){
+  closeModal();
+  var reject = _splitTenderReject;
+  _splitTenderResolve = null; _splitTenderReject = null; _splitTenderRows = null;
+  if(reject) reject(new Error('cancelled'));
+}
+
+function submitSplitTenderPrompt(){
+  var errEl = $('split-tender-err');
+  errEl.textContent = '';
+  var results = [];
+  for(var i = 0; i < _splitTenderRows.length; i++){
+    var s = _splitTenderRows[i];
+    var el = $('split-gc-' + i);
+    var val = parseFloat(el.value);
+    if(el.value === '' || isNaN(val) || val < 0){
+      errEl.textContent = 'Enter a gift card amount (0 or more) for every order listed.';
+      return;
+    }
+    if(val > s.totalCollected + 0.001){
+      errEl.textContent = 'Gift card amount for ' + s.order + ' can\'t exceed the total collected (' + fmt(s.totalCollected) + ').';
+      return;
+    }
+    results.push({order: s.order, rowIndex: s.rowIndex, giftCardAmount: Math.round(val * 100) / 100});
+  }
+  closeModal();
+  var resolve = _splitTenderResolve;
+  _splitTenderResolve = null; _splitTenderReject = null; _splitTenderRows = null;
+  resolve(results);
+}
+
 function processRepoCSVFile(file){
   var resultEl = $('repo-result');
   if(!resultEl) return;
@@ -2634,6 +2751,29 @@ function processRepoCSVFile(file){
       if(aoa.length < 2) throw new Error('No data rows found in this CSV.');
       var baseName = deriveSweepPrepBaseName(aoa);
 
+      // Split-tender detection: only orders where a gift card is one of
+      // the tenders get a working field to put the answer into right now
+      // (Gift_Card_Redeemed, already used for this purpose). Other splits
+      // (e.g. Credit Card + Cash) are surfaced as a warning instead of a
+      // prompt -- there's no correct column for them to go in yet.
+      var allSplits = findSplitTenderRows(aoa);
+      var giftCardSplits = allSplits.filter(function(s){
+        return s.tenders.some(function(t){ return /gift\s*card/i.test(t); });
+      });
+      var otherSplits = allSplits.filter(function(s){
+        return !s.tenders.some(function(t){ return /gift\s*card/i.test(t); });
+      });
+
+      var giftCardResults = [];
+      if(giftCardSplits.length > 0){
+        try{
+          giftCardResults = await promptSplitTenderAmounts(giftCardSplits);
+        }catch(cancelErr){
+          resultEl.innerHTML = '<div style="color:var(--ink-mid);font-size:13px">Upload cancelled.</div>';
+          return;
+        }
+      }
+
       // Build a plain .xlsx from the CSV data -- exactly what the manual
       // "convert to Excel" step used to produce -- then run it through
       // the SAME sweep-prep transform the tool above already uses,
@@ -2643,6 +2783,23 @@ function processRepoCSVFile(file){
       var rawAb = XLSX.write(rawWb, {bookType:'xlsx', type:'array'});
 
       var wbOut = buildSweepPrepWorkbook(rawAb);
+
+      // Write the confirmed gift-card amounts straight into the output
+      // sheet's Gift_Card_Redeemed cells, as plain numbers (not a
+      // formula) -- same treatment Bank_Sweep_Date already gets for
+      // manually-entered data. The per-row card_type-based formula can't
+      // catch these on its own since card_type is "N/A" on a split-tender
+      // row; this is the one piece of information only the uploader has.
+      if(giftCardResults.length > 0){
+        var outWs = wbOut.Sheets[wbOut.SheetNames[0]];
+        var outHeaderRow = XLSX.utils.sheet_to_json(outWs, {header:1, range:0})[0];
+        var gcColIdx = outHeaderRow.indexOf('Gift_Card_Redeemed');
+        giftCardResults.forEach(function(r){
+          var cellAddr = XLSX.utils.encode_cell({r: r.rowIndex, c: gcColIdx});
+          outWs[cellAddr] = {t:'n', v:r.giftCardAmount};
+        });
+      }
+
       var wbArr = XLSX.write(wbOut, {bookType:'xlsx', type:'array'});
       var outName = bumpSweepPrepVersion(baseName) + '.xlsx';
       var blob = new Blob([wbArr], {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
@@ -2654,7 +2811,15 @@ function processRepoCSVFile(file){
       });
       if(error) throw new Error('Upload failed: ' + error.message);
 
-      resultEl.innerHTML = '<div class="alert alert-inv">Converted, reformatted, and uploaded to the repository as <strong>' + outName + '</strong>. Your bookkeeper can download it below, verify it against POS totals, correct if needed, and submit it through Clover Import.</div>';
+      var noteHtml = '';
+      if(giftCardResults.length > 0){
+        noteHtml += '<div style="margin-top:8px">Filled in Gift_Card_Redeemed for ' + giftCardResults.length + ' split-tender order' + (giftCardResults.length !== 1 ? 's' : '') + ': ' + giftCardResults.map(function(r){ return r.order + ' (' + fmt(r.giftCardAmount) + ')'; }).join(', ') + '.</div>';
+      }
+      if(otherSplits.length > 0){
+        noteHtml += '<div style="margin-top:8px;color:var(--amber-dark,#8a6500)">⚠ ' + otherSplits.length + ' other split-tender order' + (otherSplits.length !== 1 ? 's' : '') + ' found without a gift card involved (e.g. Credit Card + Cash) — not auto-handled yet, check by hand: ' + otherSplits.map(function(s){ return s.order + ' (' + s.paymentType + ')'; }).join(', ') + '.</div>';
+      }
+
+      resultEl.innerHTML = '<div class="alert alert-inv">Converted, reformatted, and uploaded to the repository as <strong>' + outName + '</strong>. Your bookkeeper can download it below, verify it against POS totals, correct if needed, and submit it through Clover Import.' + noteHtml + '</div>';
       renderRepoFileList();
     } catch(err){
       resultEl.innerHTML = '<div class="alert" style="background:var(--red-lo);border:1px solid #EAB5B1;color:var(--red)">' + err.message + '</div>';
