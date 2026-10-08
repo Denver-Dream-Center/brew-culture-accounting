@@ -370,7 +370,7 @@
   <nav class="sidebar" id="sidebar-root"></nav>
   <input type="file" id="import-file-input" accept=".json" style="display:none" onchange="importData(this)">
   <input type="file" id="loyalty-file-input" accept=".xlsx,.xls" style="display:none" onchange="handleLoyaltyFile(this)">
-  <input type="file" id="repo-file-input" accept=".csv" style="display:none" onchange="handleRepoFile(this)">
+  <input type="file" id="repo-file-input" accept=".csv,.xlsx" style="display:none" onchange="handleRepoFile(this)">
   <input type="file" id="ledger-file-input" accept=".xlsx,.xls" style="display:none" onchange="handleLedgerFile(this)">
   <div class="main">
     <div class="topbar">
@@ -1966,7 +1966,9 @@ function renderRevImport(){
           'Excel, named <span class="mono">Order_Revenue_by_Item_M-D-YY_sweep_prep_1.xlsx</span> from the sale date, ' +
           'run through the same bank-sweep reformatting the old manual tool used to do, and pushed to the repository ' +
           'below — ready for your bookkeeper to download, verify against POS totals, correct if needed, and submit ' +
-          'with the Import button on the file itself.' +
+          'with the Import button on the file itself. An already-prepped .xlsx can also be dropped here to upload a ' +
+          'hand-corrected version as-is (e.g. after overriding an order\'s Bank_Sweep_Date) — it replaces the file of ' +
+          'the same name below, with no re-conversion.' +
         '</div>' +
         '<div class="upload-zone" id="repo-drop-zone" onclick="$$(\'repo-file-input\').click()"' +
           ' ondragover="event.preventDefault();this.classList.add(\'dragover\')"' +
@@ -1974,7 +1976,7 @@ function renderRevImport(){
           ' ondrop="event.preventDefault();this.classList.remove(\'dragover\');handleRepoDrop(event.dataTransfer.files)">' +
           '<div class="upload-icon">&#8679;</div>' +
           '<div class="upload-title">Drop raw Clover CSV export here or click to browse</div>' +
-          '<div class="upload-sub">FullOrdersDetails_for_period_*.csv</div>' +
+          '<div class="upload-sub">FullOrdersDetails_for_period_*.csv — or an already-prepped .xlsx to re-upload a correction</div>' +
         '</div>' +
         '<div id="repo-result" style="margin-top:16px"></div>' +
         '<div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border-lo)">' +
@@ -2475,6 +2477,25 @@ function csvRowsToAoa(rows){
   return aoa;
 }
 
+// Normalizes a raw CSV date cell to "YYYY-MM-DD", or null if it's not a
+// recognizable date. Clover's own export is ISO ("2026-01-31"), but a file
+// that's been opened and hand-edited in Excel along the way (e.g. to move
+// a late-sweep order into the adjacent day's file) commonly comes back
+// re-saved with locale-formatted dates ("1/31/26") instead -- tolerate
+// both rather than hard-requiring ISO, matching the same locale-string
+// leniency parseCloverXLSX's extractDate already has for the Bank_Sweep_Date
+// column.
+function csvDateToISO(str){
+  if(typeof str !== 'string') return null;
+  if(/^\d{4}-\d{2}-\d{2}$/.test(str)) return str.slice(0, 10);
+  var parts = str.split('/');
+  if(parts.length === 3){
+    var yr = parts[2].length === 4 ? parts[2] : ('20' + parts[2]);
+    return yr + '-' + parts[0].padStart(2, '0') + '-' + parts[1].padStart(2, '0');
+  }
+  return null;
+}
+
 // Derives "Order_Revenue_by_Item_M-D-YY_sweep_prep_1" from the CSV's own
 // 'date' column (the earliest date present) rather than trusting the
 // uploaded CSV's filename, so the naming convention holds even if Clover
@@ -2485,10 +2506,8 @@ function deriveSweepPrepBaseName(aoa){
   if(dateIdx === -1) throw new Error('No "date" column found in this export -- is this a Clover Full Orders Detail CSV?');
   var minDate = null;
   for(var i = 1; i < aoa.length; i++){
-    var d = aoa[i][dateIdx];
-    if(typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d)){
-      if(!minDate || d < minDate) minDate = d;
-    }
+    var iso = csvDateToISO(aoa[i][dateIdx]);
+    if(iso && (!minDate || iso < minDate)) minDate = iso;
   }
   if(!minDate) throw new Error('Could not find a valid sale date in this export to build the filename from.');
   var parts = minDate.split('-');
@@ -2497,11 +2516,22 @@ function deriveSweepPrepBaseName(aoa){
 }
 
 function handleRepoDrop(files){
-  if(files && files[0]) processRepoCSVFile(files[0]);
+  if(files && files[0]) routeRepoFile(files[0]);
 }
 function handleRepoFile(input){
-  if(input.files && input.files[0]) processRepoCSVFile(input.files[0]);
+  if(input.files && input.files[0]) routeRepoFile(input.files[0]);
   input.value = '';
+}
+
+// Raw CSV exports auto-convert as usual. An .xlsx is accepted too, but
+// only to let an already-prepped file (one the bookkeeper downloaded and
+// hand-corrected -- e.g. overriding Bank_Sweep_Date on an order whose
+// card settlement crossed into the next day's bank sweep) go straight
+// back into the repository, replacing what's there. It's never run back
+// through the CSV conversion.
+function routeRepoFile(file){
+  if(/\.xlsx$/i.test(file.name)){ processRepoXLSXFile(file); return; }
+  processRepoCSVFile(file);
 }
 
 // Finds split-tender orders (payment_type holds more than one tender,
@@ -2671,7 +2701,7 @@ function processRepoCSVFile(file){
   var resultEl = $('repo-result');
   if(!resultEl) return;
   if(!/\.csv$/i.test(file.name)){
-    resultEl.innerHTML = '<div class="alert" style="background:var(--red-lo);border:1px solid #EAB5B1;color:var(--red)">Please drop the raw .csv export — this box converts it to Excel for you; it does not take an already-converted .xlsx file.</div>';
+    resultEl.innerHTML = '<div class="alert" style="background:var(--red-lo);border:1px solid #EAB5B1;color:var(--red)">Please drop the raw .csv export — this box converts it to Excel for you. An already-prepped .xlsx (one with a Bank_Sweep_Date column) is also accepted, but only to upload a hand-corrected file as-is.</div>';
     return;
   }
   resultEl.innerHTML = '<div style="color:var(--ink-mid);font-size:13px">Reading file...</div>';
@@ -2768,7 +2798,7 @@ function processRepoCSVFile(file){
         noteHtml += '<div style="margin-top:8px;color:var(--amber-dark,#8a6500)">⚠ ' + otherSplits.length + ' other split-tender order' + (otherSplits.length !== 1 ? 's' : '') + ' found with an unrecognized tender combination — not auto-handled, check by hand: ' + otherSplits.map(function(s){ return s.order + ' (' + s.paymentType + ')'; }).join(', ') + '.</div>';
       }
 
-      resultEl.innerHTML = '<div class="alert alert-inv">Converted, reformatted, and uploaded to the repository as <strong>' + outName + '</strong>. Your bookkeeper can download it below, verify it against POS totals, correct if needed, and submit it through Clover Import.' + noteHtml + '</div>';
+      resultEl.innerHTML = '<div class="alert alert-inv">Converted, reformatted, and uploaded to the repository as <strong>' + outName + '</strong>. Your bookkeeper can download it below, verify it against POS totals, correct if needed, and submit it with the Import button on the file itself.' + noteHtml + '</div>';
       renderRepoFileList();
     } catch(err){
       resultEl.innerHTML = '<div class="alert" style="background:var(--red-lo);border:1px solid #EAB5B1;color:var(--red)">' + err.message + '</div>';
@@ -2776,6 +2806,47 @@ function processRepoCSVFile(file){
     }
   };
   reader.readAsText(file);
+}
+
+// Lets an already-prepped .xlsx go straight back into the repository as-is,
+// no CSV conversion -- for a file the bookkeeper downloaded and
+// hand-corrected, most commonly to override an order's Bank_Sweep_Date
+// (e.g. a late-day order whose card settlement didn't land in the bank's
+// sweep until the following business day, so it needs to be grouped with
+// the next day's deposit for bank matching while its own `date` column
+// stays on the true calendar sale date for revenue recognition). Uploads
+// under the file's own name with upsert, so re-submitting a correction to
+// the same file simply replaces what's already there.
+function processRepoXLSXFile(file){
+  var resultEl = $('repo-result');
+  if(!resultEl) return;
+  resultEl.innerHTML = '<div style="color:var(--ink-mid);font-size:13px">Reading file...</div>';
+  var reader = new FileReader();
+  reader.onload = async function(e){
+    try{
+      var wb = XLSX.read(e.target.result, {type:'array', cellDates:false});
+      var headerRow = null;
+      for(var si = 0; si < wb.SheetNames.length; si++){
+        var hr = (XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[si]], {header:1, range:0})[0]) || [];
+        if(hr.indexOf('order') !== -1 && hr.indexOf('date') !== -1){ headerRow = hr; break; }
+      }
+      if(!headerRow || headerRow.indexOf('Bank_Sweep_Date') === -1){
+        throw new Error('This .xlsx doesn\'t look like an already-prepped sweep file (no Bank_Sweep_Date column) -- drop the raw .csv export instead to convert it automatically.');
+      }
+      resultEl.innerHTML = '<div style="color:var(--ink-mid);font-size:13px">Uploading corrected file to repository...</div>';
+      var {error} = await _sb.storage.from('revenue-files').upload(file.name, file, {
+        contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        upsert: true
+      });
+      if(error) throw new Error('Upload failed: ' + error.message);
+      resultEl.innerHTML = '<div class="alert alert-inv">Uploaded hand-corrected file <strong>' + file.name + '</strong> to the repository, replacing any existing file with that name.</div>';
+      renderRepoFileList();
+    } catch(err){
+      resultEl.innerHTML = '<div class="alert" style="background:var(--red-lo);border:1px solid #EAB5B1;color:var(--red)">' + err.message + '</div>';
+      console.error(err);
+    }
+  };
+  reader.readAsArrayBuffer(file);
 }
 
 async function renderRepoFileList(){
