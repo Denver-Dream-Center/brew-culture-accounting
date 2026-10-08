@@ -2573,6 +2573,7 @@ function findSplitTenderRows(aoa){
       // "N/A" on every split-tender row), so any gift-card-involving split
       // needs the uploader to type it in by hand.
       needsGiftCardInput: hasGiftCard,
+      hasCreditDebit: hasCreditDebit,
       // Unique_Credit_Amt_Collected's formula assumes the entire collected
       // amount (net of any gift card) is credit/debit -- true whenever
       // credit/debit is the only non-gift-card tender, but wrong the
@@ -2701,6 +2702,18 @@ function submitSplitTenderPrompt(){
       }
       entry.creditAmount = Math.round(crVal * 100) / 100;
       sum += entry.creditAmount;
+    } else if(s.hasCreditDebit){
+      // No cash involved, so this order's credit/debit amount is fully
+      // derivable (total minus any gift card) -- the formula would compute
+      // the same number, but a plain override is written anyway. Once
+      // Gift_Card_Redeemed below is overwritten with a plain value (not a
+      // live formula), only a real spreadsheet app opening the file would
+      // ever re-run Unique_Credit_Amt_Collected's formula against it; this
+      // app's own import only ever reads the cached value baked in at
+      // generation time, which would otherwise stay stuck at the pre-override
+      // full amount -- silently overstating card revenue by the gift card
+      // amount and understating cash by the same amount (the bug this fixes).
+      entry.creditAmount = Math.round((s.totalCollected - (entry.giftCardAmount || 0)) * 100) / 100;
     }
     if(sum > s.totalCollected + 0.001){
       errEl.textContent = 'Amounts entered for ' + s.order + ' exceed the total collected (' + fmt(s.totalCollected) + ').';
