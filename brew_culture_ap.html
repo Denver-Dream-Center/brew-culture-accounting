@@ -371,7 +371,6 @@
   <input type="file" id="import-file-input" accept=".json" style="display:none" onchange="importData(this)">
   <input type="file" id="clover-file-input" accept=".xlsx,.xls" style="display:none" onchange="handleCloverFile(this)">
   <input type="file" id="loyalty-file-input" accept=".xlsx,.xls" style="display:none" onchange="handleLoyaltyFile(this)">
-  <input type="file" id="sweepprep-file-input" accept=".xlsx,.xls" style="display:none" onchange="handleSweepPrepFile(this)">
   <input type="file" id="repo-file-input" accept=".csv" style="display:none" onchange="handleRepoFile(this)">
   <input type="file" id="ledger-file-input" accept=".xlsx,.xls" style="display:none" onchange="handleLedgerFile(this)">
   <div class="main">
@@ -1951,6 +1950,7 @@ function revSidebarStats(){
 // REVENUE MODULE — CLOVER IMPORT
 // ═══════════════════════════════════════════════
 var _cloverParsed = null;  // holds parsed dayMap between parse and confirm
+var _cloverPreviewTarget = 'clover-parse-result';  // which element renderCloverPreview writes into -- the top Clover Import box normally, or 'repo-result' when triggered from a Revenue File Repository entry's Import button, so the review appears in place instead of jumping to the top of the page
 
 function renderRevImport(){
   $('topbar-actions').innerHTML = '';
@@ -1991,29 +1991,6 @@ function renderRevImport(){
       '</div>' +
     '</div>' +
     '<div class="card" style="margin-top:16px">' +
-      '<div class="card-header"><span class="card-title">Bank Sweep Prep Tool</span>' +
-        '<span style="font-size:12px;color:var(--ink-lo)">Reformats a raw Clover export for bank-sweep matching</span>' +
-      '</div>' +
-      '<div class="card-body">' +
-        '<div style="font-size:12px;color:var(--ink-mid);margin-bottom:12px">' +
-          'Drop the raw Clover daily sales file here first. It comes back reformatted with a ' +
-          '<strong>Bank_Sweep_Date</strong> column pre-filled from the sale date, dedup formulas for ' +
-          'Net/Tax/Tip/Amount Collected/Credit Collected, a Gift_Card_Redeemed column auto-filled for any ' +
-          'gift-card-tendered row, and a totals row \u2014 ready for you to move records between days by ' +
-          'overwriting the sweep date, and re-upload through the Clover Import above.' +
-        '</div>' +
-        '<div class="upload-zone" id="sweepprep-drop-zone" onclick="$$(\'sweepprep-file-input\').click()"' +
-          ' ondragover="event.preventDefault();this.classList.add(\'dragover\')"' +
-          ' ondragleave="this.classList.remove(\'dragover\')"' +
-          ' ondrop="event.preventDefault();this.classList.remove(\'dragover\');handleSweepPrepDrop(event.dataTransfer.files)">' +
-          '<div class="upload-icon">&#8679;</div>' +
-          '<div class="upload-title">Drop raw Clover export here or click to browse</div>' +
-          '<div class="upload-sub">Full Orders Detail export, straight from Clover *.xlsx</div>' +
-        '</div>' +
-        '<div id="sweepprep-result" style="margin-top:16px"></div>' +
-      '</div>' +
-    '</div>' +
-    '<div class="card" style="margin-top:16px">' +
       '<div class="card-header"><span class="card-title">Revenue File Repository</span>' +
         '<span style="font-size:12px;color:var(--ink-lo)">Drop the raw CSV — converts, renames, and reformats automatically</span>' +
       '</div>' +
@@ -2021,9 +1998,9 @@ function renderRevImport(){
         '<div style="font-size:12px;color:var(--ink-mid);margin-bottom:12px">' +
           'Drop the raw Full Orders Detail CSV straight from Clover (not the .xlsx version). It gets converted to ' +
           'Excel, named <span class="mono">Order_Revenue_by_Item_M-D-YY_sweep_prep_1.xlsx</span> from the sale date, ' +
-          'run through the same Bank Sweep Prep reformatting as the tool above, and pushed to the repository below ' +
-          '— ready for your bookkeeper to download, verify against POS totals, correct if needed, and submit ' +
-          'through Clover Import at the top of this page.' +
+          'run through the same bank-sweep reformatting the old manual tool used to do, and pushed to the repository ' +
+          'below — ready for your bookkeeper to download, verify against POS totals, correct if needed, and submit ' +
+          'with the Import button on the file itself.' +
         '</div>' +
         '<div class="upload-zone" id="repo-drop-zone" onclick="$$(\'repo-file-input\').click()"' +
           ' ondragover="event.preventDefault();this.classList.add(\'dragover\')"' +
@@ -2074,6 +2051,7 @@ function handleCloverFile(input){
 }
 
 function processCloverFile(file){
+  _cloverPreviewTarget = 'clover-parse-result';
   var resultEl = $('clover-parse-result');
   if(!resultEl) return;
   resultEl.innerHTML = '<div style="color:var(--ink-mid);font-size:13px">Reading file...</div>';
@@ -2093,7 +2071,7 @@ function processCloverFile(file){
 }
 
 function renderCloverPreview(dayMap){
-  var resultEl = $('clover-parse-result');
+  var resultEl = $(_cloverPreviewTarget);
   if(!resultEl) return;
   var existing = {};
   REV.settlements.forEach(function(s){ existing[s.date] = true; });
@@ -2187,7 +2165,7 @@ function renderCloverPreview(dayMap){
       '</tr></thead><tbody>' + rows + '</tbody></table>' +
     '</div>' +
     '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px">' +
-      '<button class="btn btn-secondary" onclick="_cloverParsed=null;$$(\'clover-parse-result\').innerHTML=\'\'">Cancel</button>' +
+      '<button class="btn btn-secondary" onclick="_cloverParsed=null;$$(\'' + _cloverPreviewTarget + '\').innerHTML=\'\'">Cancel</button>' +
       '<button class="btn btn-primary" onclick="confirmCloverImport()">&#10003; Confirm Import</button>' +
     '</div>';
 }
@@ -2471,62 +2449,16 @@ async function confirmLoyaltyImport(){
   }
 }
 
-// ═══════════════════════════════════════════════
-// REVENUE MODULE — BANK SWEEP PREP TOOL
-// Takes a raw Clover "Full Orders Detail" export and reformats it into the
-// bank-sweep-matching layout: inserts a Bank_Sweep_Date column pre-filled
-// from that row's sale date (still a plain editable value, so moving a
-// record onto a different bank-sweep day is just typing over it) plus six
-// Unique_*/Gift_Card_Redeemed columns with LIVE Excel formulas (not
-// precomputed values — this file is meant to be manually edited afterward,
-// moved between days, and re-totaled by Excel itself as records shift
-// around), then a totals row two rows below the last record. The result is
-// handed straight back as a download; nothing here touches the database at all.
-// ═══════════════════════════════════════════════
-function handleSweepPrepDrop(files){
-  if(files && files[0]) processSweepPrepFile(files[0]);
-}
-
-function handleSweepPrepFile(input){
-  if(input.files && input.files[0]) processSweepPrepFile(input.files[0]);
-  input.value = '';
-}
-
-// Shared by the manual Bank Sweep Prep Tool and the automated CSV
-// repository pipeline below: bumps "..._sweep_prep_<N>" to
-// "..._sweep_prep_<N+1>" (the user's own versioning convention for
-// tracking rounds of moving records between adjacent days), or appends a
-// plain "_sweep_prep" suffix if the name doesn't already have one.
+// Bumps "..._sweep_prep_<N>" to "..._sweep_prep_<N+1>" (the owner's own
+// versioning convention for tracking rounds of moving records between
+// adjacent days), or appends a plain "_sweep_prep" suffix if the name
+// doesn't already have one. Used by the automated CSV repository pipeline
+// below.
 function bumpSweepPrepVersion(baseName){
   var versionMatch = baseName.match(/^(.*_sweep_prep_)(\d+)$/);
   return versionMatch
     ? versionMatch[1] + (parseInt(versionMatch[2], 10) + 1)
     : baseName + '_sweep_prep';
-}
-
-function processSweepPrepFile(file){
-  var resultEl = $('sweepprep-result');
-  if(!resultEl) return;
-  resultEl.innerHTML = '<div style="color:var(--ink-mid);font-size:13px">Reading file...</div>';
-  var reader = new FileReader();
-  reader.onload = function(e){
-    try{
-      var baseName = file.name.replace(/\.xlsx$/i, '');
-      var outName = bumpSweepPrepVersion(baseName) + '.xlsx';
-      var wbOut = buildSweepPrepWorkbook(e.target.result);
-      var wbArr = XLSX.write(wbOut, {bookType:'xlsx', type:'array'});
-      var blob = new Blob([wbArr], {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
-      var url = URL.createObjectURL(blob);
-      var a = document.createElement('a');
-      a.href = url; a.download = outName; a.click();
-      URL.revokeObjectURL(url);
-      resultEl.innerHTML = '<div class="alert alert-inv">Reformatted file downloaded as <strong>' + outName + '</strong>. Move records between days as needed (overwrite Bank_Sweep_Date on those rows), then re-upload through the Clover Import above.</div>';
-    } catch(err){
-      resultEl.innerHTML = '<div class="alert" style="background:var(--red-lo);border:1px solid #EAB5B1;color:var(--red)">' + err.message + '</div>';
-      console.error(err);
-    }
-  };
-  reader.readAsArrayBuffer(file);
 }
 
 // ── REVENUE FILE REPOSITORY (CSV -> Excel -> sweep prep -> Supabase Storage) ──
@@ -2869,9 +2801,12 @@ async function downloadRepoFile(name){
 // renderCloverPreview, same _cloverParsed state, same Confirm Import
 // button) -- just sourced from Supabase Storage instead of a local
 // FileReader, so there's no separate review/submit flow to keep in sync
-// with the real one.
+// with the real one. Renders into #repo-result (between the drop zone and
+// the Repository Files list) rather than the top-of-page Clover Import
+// box, so the review appears right where the file was imported from.
 async function importRepoFile(name){
-  var resultEl = $('clover-parse-result');
+  _cloverPreviewTarget = 'repo-result';
+  var resultEl = $('repo-result');
   if(!resultEl) return;
   resultEl.scrollIntoView({behavior:'smooth', block:'center'});
   resultEl.innerHTML = '<div style="color:var(--ink-mid);font-size:13px">Downloading ' + name + ' from repository...</div>';
@@ -2899,6 +2834,15 @@ async function removeRepoFile(name){
   renderRepoFileList();
 }
 
+// Takes a raw Clover "Full Orders Detail" export and reformats it into the
+// bank-sweep-matching layout: inserts a Bank_Sweep_Date column pre-filled
+// from that row's sale date (still a plain editable value, so moving a
+// record onto a different bank-sweep day is just typing over it) plus six
+// Unique_*/Gift_Card_Redeemed columns with LIVE Excel formulas (so the file
+// still recalculates if later opened and edited by hand), then a totals
+// row two rows below the last record. Called exclusively by the automated
+// CSV repository pipeline below (the old standalone manual drop-and-
+// download tool was removed once that pipeline replaced it).
 function buildSweepPrepWorkbook(ab){
   var wb = XLSX.read(ab, {type:'array', cellDates:false});
   // Same sheet-detection approach as the main Clover importer — don't
