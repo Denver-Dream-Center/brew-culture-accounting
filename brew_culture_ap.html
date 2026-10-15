@@ -9397,14 +9397,14 @@ async function renderPayrollTimesheets(){
   $('content').innerHTML = html;
 }
 
-// Colorado overtime (7 CCR 1103-1, COMPS Order): 1.5x the regular rate for
-// the GREATER of (a) hours over 40 in the calendar week or (b) hours over
-// 12 in a single workday -- not additive, whichever method yields more OT
-// hours for the week wins. (The third CO trigger, 12 consecutive hours
-// regardless of workday boundaries, isn't handled -- shifts don't cross
-// midnight in this system, so it can't fire; flag if that ever changes.)
-// Only hourly-classified days count toward either threshold -- a salaried
-// day's hours are excluded entirely, not just zero-rated.
+// Overtime: 1.5x the regular rate for hours over 40 in the calendar week
+// only -- a single long day never triggers OT on its own, no matter how
+// many hours it is, as long as the week stays at or under 40. (Colorado's
+// COMPS Order also has a daily-over-12-hours trigger, which this
+// deliberately does NOT apply -- an explicit policy choice, not an
+// oversight; revisit if that compliance question is ever revisited.)
+// Only hourly-classified days count toward the 40-hour threshold -- a
+// salaried day's hours are excluded entirely, not just zero-rated.
 //
 // weekStart/weekEnd must be one calendar Monday-Sunday week (pay periods
 // here are always exactly two such weeks, so callers split a period in
@@ -9449,10 +9449,8 @@ function computeWeeklyOvertimeSplit(employeeId, weekStart, weekEnd, overrideDayS
   }
 
   const eligibleDays = days.filter(day=>day.otEligible);
-  const dailyOTSum = eligibleDays.reduce((s,day)=>s+Math.max(0, day.dailyHours-12), 0);
   const weeklyTotal = eligibleDays.reduce((s,day)=>s+day.dailyHours, 0);
-  const weeklyOTCandidate = Math.max(0, weeklyTotal-40);
-  const weekOTHours = Math.max(dailyOTSum, weeklyOTCandidate);
+  const weekOTHours = Math.max(0, weeklyTotal-40);
   const weekRegularHours = weeklyTotal - weekOTHours;
 
   let remainingOT = weekOTHours;
