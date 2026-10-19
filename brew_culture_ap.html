@@ -6060,6 +6060,14 @@ function ledgerDateToISO(val){
   return '';
 }
 
+// Bank -> account-number mapping for the raw "Account History" bank export
+// format (it has no Bank column of its own, just a masked account number
+// like "******5577"). Extend this when another account starts using this
+// upload path.
+var LEDGER_ACCOUNT_BANK_MAP = {
+  '******5577': 'SouthState Bank'
+};
+
 function processLedgerFile(file){
   showLoadingOverlay('Reading ledger file...');
   var reader = new FileReader();
@@ -6070,41 +6078,17 @@ function processLedgerFile(file){
       // can't guarantee matches Denver). Raw numeric serials only.
       var wb = XLSX.read(e.target.result, {type:'array', cellDates:false});
       var ws = wb.Sheets['Bank Ledger'] || wb.Sheets[wb.SheetNames[0]];
-      // The exported ledger has a 3-row banner before the real header (title, subtitle, header row)
-      var rows = XLSX.utils.sheet_to_json(ws, {raw:true, defval:'', range:2});
-
-      var parsed = rows.map(function(r){
-        var dateVal = r['Payment Date'];
-        var dateISO = ledgerDateToISO(dateVal);
-        if(!dateISO) return null;
-        var transType = String(r['Trans Type']||'').trim();
-        var grossRaw = parseFloat(r['Gross Amount']);
-        if(isNaN(grossRaw)) return null;
-        return {
-          row_id: parseInt(r['Row ID'],10) || 0,
-          pmnt_date: dateISO,
-          customer_vendor: String(r['Customer / Vendor']||'').trim(),
-          description: String(r['Description']||'').trim(),
-          era: 'dc', // default; pre-transfer rows reclassified manually after import
-          stmt_type: String(r['Statement Type']||'').trim(),
-          stmt_sec: String(r['Statement Sec']||'').trim(),
-          stmt_category: String(r['Statement Category']||'').trim(),
-          account: String(r['Account']||'').trim(),
-          note: '',
-          ck_num: String(r['Ck #']||'').trim(),
-          trans_type: transType === 'Credit' ? 'Credit' : 'Debit',
-          gross_amount: grossRaw,
-          bank: String(r['Bank']||'').trim()
-        };
-      }).filter(Boolean);
-
-      hideLoadingOverlay();
-      if(parsed.length === 0){
-        showToast('No valid rows found in file', 'warn');
-        return;
+      var headerRow = (XLSX.utils.sheet_to_json(ws, {header:1, range:0})[0]) || [];
+      // The bank's own raw "Account History" export (Post Date/Debit/Credit/
+      // Balance columns, no banner, no Row ID) is the normal upload source
+      // now. The older format -- this app's own prior "Bank Ledger"
+      // re-export, with a 3-row banner and a Row ID column -- is still
+      // accepted for backward compatibility.
+      if(headerRow.indexOf('Post Date') !== -1 && headerRow.indexOf('Account Number') !== -1){
+        processAccountHistoryWorkbook(ws);
+      } else {
+        processOldFormatLedgerWorkbook(ws);
       }
-      _ledgerParsed = parsed;
-      renderLedgerUploadPreview(parsed);
     } catch(err){
       hideLoadingOverlay();
       showToast('Parse error: ' + err.message, 'warn');
@@ -6112,6 +6096,267 @@ function processLedgerFile(file){
     }
   };
   reader.readAsArrayBuffer(file);
+}
+
+function processOldFormatLedgerWorkbook(ws){
+  // The exported ledger has a 3-row banner before the real header (title, subtitle, header row)
+  var rows = XLSX.utils.sheet_to_json(ws, {raw:true, defval:'', range:2});
+
+  var parsed = rows.map(function(r){
+    var dateVal = r['Payment Date'];
+    var dateISO = ledgerDateToISO(dateVal);
+    if(!dateISO) return null;
+    var transType = String(r['Trans Type']||'').trim();
+    var grossRaw = parseFloat(r['Gross Amount']);
+    if(isNaN(grossRaw)) return null;
+    return {
+      row_id: parseInt(r['Row ID'],10) || 0,
+      pmnt_date: dateISO,
+      customer_vendor: String(r['Customer / Vendor']||'').trim(),
+      description: String(r['Description']||'').trim(),
+      era: 'dc', // default; pre-transfer rows reclassified manually after import
+      stmt_type: String(r['Statement Type']||'').trim(),
+      stmt_sec: String(r['Statement Sec']||'').trim(),
+      stmt_category: String(r['Statement Category']||'').trim(),
+      account: String(r['Account']||'').trim(),
+      note: '',
+      ck_num: String(r['Ck #']||'').trim(),
+      trans_type: transType === 'Credit' ? 'Credit' : 'Debit',
+      gross_amount: grossRaw,
+      bank: String(r['Bank']||'').trim()
+    };
+  }).filter(Boolean);
+
+  hideLoadingOverlay();
+  if(parsed.length === 0){
+    showToast('No valid rows found in file', 'warn');
+    return;
+  }
+  _ledgerParsed = parsed;
+  renderLedgerUploadPreview(parsed);
+}
+
+// Parses the bank's own raw "Account History" export: one Description
+// field (no separate vendor/memo split, so it's used as customer_vendor
+// and the description field is left blank for the uploader to fill in
+// later), separate unsigned Debit/Credit columns (converted to this app's
+// signed-gross-amount convention: negative for debits, same as the manual
+// "Add Transaction" form), and a Status column -- only "Posted" rows are
+// imported; "Pending" rows are skipped and reported, since a pending
+// transaction can still change or reverse before it actually clears.
+function processAccountHistoryWorkbook(ws){
+  var rows = XLSX.utils.sheet_to_json(ws, {raw:true, defval:'', range:0});
+  var unmappedAccounts = {};
+  var pendingSkipped = 0;
+
+  var parsed = rows.map(function(r){
+    var dateISO = ledgerDateToISO(r['Post Date']);
+    if(!dateISO) return null;
+    var status = String(r['Status']||'').trim();
+    if(status && status.toLowerCase() !== 'posted'){
+      pendingSkipped++;
+      return null;
+    }
+    var acctNum = String(r['Account Number']||'').trim();
+    var bank = LEDGER_ACCOUNT_BANK_MAP[acctNum];
+    if(!bank){
+      unmappedAccounts[acctNum] = true;
+      return null;
+    }
+    var hasDebit = typeof r['Debit'] === 'number';
+    var hasCredit = typeof r['Credit'] === 'number';
+    if(hasDebit === hasCredit) return null; // need exactly one of the two
+    return {
+      pmnt_date: dateISO,
+      bank: bank,
+      customer_vendor: String(r['Description']||'').trim(),
+      description: '',
+      trans_type: hasDebit ? 'Debit' : 'Credit',
+      gross_amount: hasDebit ? -Math.abs(r['Debit']) : Math.abs(r['Credit']),
+      ck_num: String(r['Check']||'').trim(),
+      era: 'dc',
+      stmt_type: '', stmt_sec: '', stmt_category: '', account: '', note: ''
+    };
+  }).filter(Boolean);
+
+  hideLoadingOverlay();
+
+  var unmappedList = Object.keys(unmappedAccounts);
+  if(unmappedList.length > 0){
+    showToast('Unrecognized account number(s): ' + unmappedList.join(', ') + ' — add them to LEDGER_ACCOUNT_BANK_MAP before this file can be imported.', 'warn');
+    return;
+  }
+  if(parsed.length === 0){
+    showToast(pendingSkipped > 0
+      ? 'No posted rows found in file (' + pendingSkipped + ' pending row(s) skipped).'
+      : 'No valid rows found in file', 'warn');
+    return;
+  }
+
+  renderAccountHistoryPreview(parsed, pendingSkipped);
+}
+
+// Builds a dedupe key for matching a freshly-parsed Account History row
+// against what's already in bank_ledger -- this format has no Row ID at
+// all. Check number is preferred when present: it's the bank's own stable
+// identifier and survives the description/vendor text being hand-edited
+// after import (confirmed happening in practice -- a check row's own
+// generic bank text "Check" routinely gets renamed to something like
+// "Debit Check" / "Rent" once categorized, which would otherwise falsely
+// read as a new, unimported transaction on every later re-upload that
+// covers the same date range). Falls back to description text for
+// everything else.
+function ledgerRowDedupeKey(r){
+  var ck = (r.ck_num||'').trim();
+  var ident = ck ? ('ck:' + ck) : (r.customer_vendor||'').trim();
+  return r.pmnt_date + '|' + ident + '|' + (Math.round((parseFloat(r.gross_amount)||0)*100)/100).toFixed(2);
+}
+
+// Classifies freshly-parsed Account History rows against what's already in
+// REV.bankLedger: which are a confirmed overlap (already imported) vs
+// genuinely new. Matching is count-based (an existing-row-count map, each
+// match decrements it), not a boolean set, so two genuinely identical rows
+// on the same day (e.g. two same-amount daily sweeps) are each matched
+// once rather than collapsed into a single match.
+//
+// Also confirms the overlap's balance: this file's own net change
+// (credits minus debits) over the overlapping dates should exactly match
+// what's already recorded for those same dates -- the closest thing to an
+// independent balance check this format can offer, since its own Balance
+// column comes back blank on every row in practice.
+function classifyAccountHistoryRows(parsed){
+  var existingCounts = {};
+  REV.bankLedger.forEach(function(r){
+    var k = ledgerRowDedupeKey(r);
+    existingCounts[k] = (existingCounts[k]||0) + 1;
+  });
+
+  var newRows = [], overlapRows = [];
+  parsed.forEach(function(r){
+    var k = ledgerRowDedupeKey(r);
+    if(existingCounts[k] > 0){
+      existingCounts[k]--;
+      overlapRows.push(r);
+    } else {
+      newRows.push(r);
+    }
+  });
+
+  var overlapDates = {};
+  overlapRows.forEach(function(r){ overlapDates[r.bank+'|'+r.pmnt_date] = true; });
+  var fileOverlapNet = Math.round(overlapRows.reduce(function(s,r){ return s + (parseFloat(r.gross_amount)||0); }, 0) * 100) / 100;
+  var existingOverlapNet = Math.round(REV.bankLedger.reduce(function(s,r){
+    return overlapDates[r.bank+'|'+r.pmnt_date] ? s + (parseFloat(r.gross_amount)||0) : s;
+  }, 0) * 100) / 100;
+
+  // File is newest-first, so the first NEW row chronologically is the last
+  // one in file order -- sort ascending to find it.
+  var sortedNew = newRows.slice().sort(function(a,b){ return a.pmnt_date.localeCompare(b.pmnt_date); });
+
+  return {
+    newRows: newRows, overlapRows: overlapRows,
+    fileOverlapNet: fileOverlapNet, existingOverlapNet: existingOverlapNet,
+    balanceConfirmed: Math.abs(fileOverlapNet - existingOverlapNet) < 0.005,
+    firstNewRow: sortedNew.length ? sortedNew[0] : null,
+    lastNewRow: sortedNew.length ? sortedNew[sortedNew.length-1] : null
+  };
+}
+
+var _accountHistoryNewRows = null;
+
+function renderAccountHistoryPreview(parsed, pendingSkipped){
+  var c = classifyAccountHistoryRows(parsed);
+  _accountHistoryNewRows = c.newRows;
+
+  var dateMin = parsed.reduce(function(m,r){ return !m || r.pmnt_date < m ? r.pmnt_date : m; }, null);
+  var dateMax = parsed.reduce(function(m,r){ return !m || r.pmnt_date > m ? r.pmnt_date : m; }, null);
+
+  var balanceHtml = c.overlapRows.length === 0
+    ? '<div style="font-size:12px;color:var(--ink-mid)">No overlapping dates found with what’s already recorded — nothing to confirm a balance against.</div>'
+    : (c.balanceConfirmed
+      ? '<div class="alert alert-inv">Overlap confirmed: ' + c.overlapRows.length + ' row(s) already in the ledger match exactly — net ' + fmt(c.existingOverlapNet) + ' both in this file and already recorded.</div>'
+      : '<div class="alert" style="background:var(--red-lo);border:1px solid #EAB5B1;color:var(--red)">Overlap MISMATCH: this file’s overlapping rows net ' + fmt(c.fileOverlapNet) + ', but what’s already recorded for those same dates nets ' + fmt(c.existingOverlapNet) + ' — a ' + fmt(Math.abs(c.fileOverlapNet-c.existingOverlapNet)) + ' difference. Review before importing — something may have changed or been missed.</div>');
+
+  var startRowHtml = c.firstNewRow
+    ? '<div style="font-size:12px;color:var(--ink-mid);margin-top:8px">New transactions begin <strong>' + fmtDate(c.firstNewRow.pmnt_date) + '</strong> — "' + c.firstNewRow.customer_vendor + '" (' + fmt(Math.abs(c.firstNewRow.gross_amount)) + '), through ' + fmtDate(c.lastNewRow.pmnt_date) + '.</div>'
+    : '<div style="font-size:12px;color:var(--ink-mid);margin-top:8px">No new transactions to import — every posted row in this file is already in the ledger.</div>';
+
+  var pendingHtml = pendingSkipped > 0
+    ? '<div style="font-size:12px;color:var(--amber-dark,#8a6500);margin-top:8px">' + pendingSkipped + ' pending (not yet posted) row(s) skipped — re-upload once the bank marks them Posted.</div>'
+    : '';
+
+  openModal(
+    '<div class="modal" style="max-width:640px">' +
+      '<div class="modal-header">' +
+        '<div><div class="modal-title">Confirm Ledger Import</div>' +
+        '<div class="modal-sub">' + fmtDate(dateMin) + ' — ' + fmtDate(dateMax) + '</div></div>' +
+        '<button class="close-btn" onclick="_accountHistoryNewRows=null;closeModal()">&#215;</button>' +
+      '</div>' +
+      '<div class="modal-body">' +
+        '<div class="alert alert-inv" style="margin-bottom:12px">' +
+          'Found <strong>' + parsed.length + '</strong> posted row(s) — ' +
+          '<strong>' + c.newRows.length + ' new</strong>, ' + c.overlapRows.length + ' already in the ledger (skipped, not re-imported)' +
+        '</div>' +
+        balanceHtml +
+        startRowHtml +
+        pendingHtml +
+      '</div>' +
+      '<div class="modal-footer">' +
+        '<button class="btn btn-ghost" onclick="_accountHistoryNewRows=null;closeModal()">Cancel</button>' +
+        '<button class="btn btn-primary" ' + (c.newRows.length===0?'disabled':'') + ' onclick="confirmAccountHistoryImport()">&#10003; Import ' + c.newRows.length + ' New Row' + (c.newRows.length!==1?'s':'') + '</button>' +
+      '</div>' +
+    '</div>'
+  );
+}
+
+async function confirmAccountHistoryImport(){
+  if(!_accountHistoryNewRows || _accountHistoryNewRows.length === 0) return;
+  var rows = _accountHistoryNewRows;
+  closeModal();
+  showLoadingOverlay('Importing 0 / ' + rows.length + '...');
+
+  var nextRowId = REV.bankLedger.reduce(function(m,r){ return Math.max(m, r.row_id||0); }, 0) + 1;
+  var toInsert = rows.map(function(r){
+    var rowId = nextRowId++;
+    return {
+      id: 'BL-IMPORT-' + rowId,
+      row_id: rowId,
+      pmnt_date: r.pmnt_date,
+      bank: r.bank,
+      customer_vendor: r.customer_vendor,
+      description: r.description,
+      era: r.era,
+      note: r.note,
+      stmt_type: r.stmt_type,
+      stmt_sec: r.stmt_sec,
+      stmt_category: r.stmt_category,
+      account: r.account,
+      ck_num: r.ck_num,
+      trans_type: r.trans_type,
+      gross_amount: r.gross_amount
+    };
+  });
+
+  var CHUNK = 100;
+  var errors = 0;
+  for(var i = 0; i < toInsert.length; i += CHUNK){
+    var chunk = toInsert.slice(i, i + CHUNK);
+    var res = await _sb.from('bank_ledger').upsert(chunk, {onConflict:'id'});
+    if(res.error){ console.error('ledger import chunk error', res.error); errors++; }
+    showLoadingOverlay('Importing ' + Math.min(i+CHUNK, toInsert.length) + ' / ' + toInsert.length + '...');
+  }
+
+  await loadRevData();
+  hideLoadingOverlay();
+  _accountHistoryNewRows = null;
+
+  if(errors > 0){
+    showToast('Import completed with ' + errors + ' chunk error(s) — check console', 'warn');
+  } else {
+    showToast('Imported ' + toInsert.length + ' new ledger row(s)');
+  }
+  renderSidebar();
+  if(currentView === 'bank-ledger') renderBankLedger();
 }
 
 function renderLedgerUploadPreview(parsed){
