@@ -182,7 +182,6 @@
   .mod-card-badge{display:inline-block;margin-top:10px;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:600;background:var(--amber-lo);color:var(--amber)}
   .mod-card-badge.green{background:var(--green-lo);color:var(--green)}
   .mod-card-badge.blue{background:#E8F0FB;color:#2D5BA8}
-  .mod-card.mod-card-ledger:hover{border-color:#2D5BA8;box-shadow:0 4px 20px rgba(45,91,168,.15)}
   .mod-user-bar{position:absolute;top:16px;right:24px;display:flex;align-items:center;gap:12px;font-size:12px;color:var(--ink-mid)}
   /* Module header bar (inside main-app, above topbar) */
   .mod-bar{background:var(--accent);color:rgba(255,255,255,.7);font-size:12px;padding:0 20px;height:34px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
@@ -327,14 +326,8 @@
     <div class="mod-card" id="mod-card-accounting" onclick="launchModule('accounting')">
       <div class="mod-icon">&#8862;</div>
       <div class="mod-card-title">Accounting</div>
-      <div class="mod-card-sub">GL entries, trial balance, journal entries, and the Troy receivable.</div>
+      <div class="mod-card-sub">GL entries, trial balance, journal entries, the Troy receivable, and the bank ledger.</div>
       <div class="mod-card-badge">Accounting Module</div>
-    </div>
-    <div class="mod-card mod-card-ledger" id="mod-card-ledger" onclick="launchModule('ledger')">
-      <div class="mod-icon">&#8942;</div>
-      <div class="mod-card-title">Bank Ledger</div>
-      <div class="mod-card-sub">Glacier &amp; SouthState transactions, reconciled against AP and Revenue.</div>
-      <div class="mod-card-badge blue">Reconciliation</div>
     </div>
     <div class="mod-card mod-card-payroll" id="mod-card-payroll" onclick="launchModule('payroll')">
       <div class="mod-icon">&#9679;</div>
@@ -579,7 +572,7 @@ let _userRole = 'admin';
 // the one seeded in config) if the fetch fails, so a config-table hiccup
 // degrades to "safe defaults" rather than an undefined-permissions crash.
 const DEFAULT_ROLE_PERMISSIONS = {
-  admin: {modules:['ap','revenue','ledger','payroll','admin','accounting'], can_void_invoice:true, can_delete_gl:true, can_edit_closed_period:true, can_manage_users:true, can_export_backup:true},
+  admin: {modules:['ap','revenue','payroll','admin','accounting'], can_void_invoice:true, can_delete_gl:true, can_edit_closed_period:true, can_manage_users:true, can_export_backup:true},
   manager: {modules:['revenue'], can_void_invoice:false, can_delete_gl:false, can_edit_closed_period:false, can_manage_users:false, can_export_backup:false},
   bookkeeper: {modules:['ap','accounting'], can_void_invoice:false, can_delete_gl:false, can_edit_closed_period:false, can_manage_users:false, can_export_backup:true}
 };
@@ -611,7 +604,7 @@ async function loadRolePermissions(){
 // permissions. Call after _rolePerms is loaded and whenever the switcher
 // is (re)shown.
 function applyModulePermissions(){
-  ['ap','revenue','ledger','payroll','admin','accounting'].forEach(function(mod){
+  ['ap','revenue','payroll','admin','accounting'].forEach(function(mod){
     const card = document.getElementById('mod-card-'+mod);
     if(card) card.style.display = canAccessModule(mod) ? '' : 'none';
   });
@@ -1128,22 +1121,6 @@ function renderSidebar(){
       '<div class="sidebar-section">Jump To</div>' +
       (canAccessModule('ap')?'<button class="nav-item" onclick="launchModule(\'ap\')"><span class="nav-icon">&#9632;</span> AP Module</button>':'') +
       (canAccessModule('revenue')?'<button class="nav-item" onclick="launchModule(\'revenue\')"><span class="nav-icon">&#9650;</span> Revenue Module</button>':'') +
-      (canAccessModule('ledger')?'<button class="nav-item" onclick="launchModule(\'ledger\')"><span class="nav-icon">&#8942;</span> Bank Ledger</button>':'') +
-      (canAccessModule('accounting')?'<button class="nav-item" onclick="launchModule(\'accounting\')"><span class="nav-icon">&#8862;</span> Accounting Module</button>':'') +
-      (canAccessModule('admin')?'<button class="nav-item" onclick="launchModule(\'admin\')"><span class="nav-icon">&#9881;</span> Admin Module</button>':'');
-  } else if(currentModule === 'ledger'){
-    el.innerHTML =
-      '<div class="sidebar-header">' +
-        '<div class="sidebar-logo">Brew Culture</div>' +
-        '<div class="sidebar-title">Bank Ledger</div>' +
-        '<div class="sidebar-sub">Glacier \xb7 SouthState \xb7 Reconciliation</div>' +
-      '</div>' +
-      '<div class="sidebar-section">Ledger</div>' +
-      '<button class="nav-item active" onclick="showView(\'bank-ledger\')" id="nav-bank-ledger"><span class="nav-icon">&#8942;</span> Transactions</button>' +
-      '<div class="sidebar-section">Jump To</div>' +
-      (canAccessModule('ap')?'<button class="nav-item" onclick="launchModule(\'ap\')"><span class="nav-icon">&#9632;</span> AP Module</button>':'') +
-      (canAccessModule('revenue')?'<button class="nav-item" onclick="launchModule(\'revenue\')"><span class="nav-icon">&#9650;</span> Revenue Module</button>':'') +
-      (canAccessModule('payroll')?'<button class="nav-item" onclick="launchModule(\'payroll\')"><span class="nav-icon">&#9679;</span> Payroll Module</button>':'') +
       (canAccessModule('accounting')?'<button class="nav-item" onclick="launchModule(\'accounting\')"><span class="nav-icon">&#8862;</span> Accounting Module</button>':'') +
       (canAccessModule('admin')?'<button class="nav-item" onclick="launchModule(\'admin\')"><span class="nav-icon">&#9881;</span> Admin Module</button>':'');
   } else if(currentModule === 'revenue'){
@@ -1160,7 +1137,6 @@ function renderSidebar(){
       '<button class="nav-item" onclick="showView(\'rev-settlement\')" id="nav-rev-settlement"><span class="nav-icon">&#9632;</span> Settlement Log</button>' +
       '<button class="nav-item" onclick="showView(\'rev-cash\')" id="nav-rev-cash"><span class="nav-icon">&#9679;</span> Cash Log</button>' +
       '<div class="sidebar-section">Reconciliation</div>' +
-      (canAccessModule('ledger')?'<button class="nav-item" onclick="launchModule(\'ledger\')"><span class="nav-icon">&#8942;</span> Bank Ledger</button>':'') +
       (canAccessModule('payroll')?'<button class="nav-item" onclick="launchModule(\'payroll\')"><span class="nav-icon">&#9679;</span> Payroll Module</button>':'') +
       (canAccessModule('accounting')?'<button class="nav-item" onclick="launchModule(\'accounting\')"><span class="nav-icon">&#8862;</span> Accounting Module</button>':'') +
       (canAccessModule('admin')?'<button class="nav-item" onclick="launchModule(\'admin\')"><span class="nav-icon">&#9881;</span> Admin Module</button>':'') +
@@ -1189,7 +1165,6 @@ function renderSidebar(){
       '<div class="sidebar-section">Jump To</div>' +
       (canAccessModule('ap')?'<button class="nav-item" onclick="launchModule(\'ap\')"><span class="nav-icon">&#9632;</span> AP Module</button>':'') +
       (canAccessModule('revenue')?'<button class="nav-item" onclick="launchModule(\'revenue\')"><span class="nav-icon">&#9650;</span> Revenue Module</button>':'') +
-      (canAccessModule('ledger')?'<button class="nav-item" onclick="launchModule(\'ledger\')"><span class="nav-icon">&#8942;</span> Bank Ledger</button>':'') +
       (canAccessModule('payroll')?'<button class="nav-item" onclick="launchModule(\'payroll\')"><span class="nav-icon">&#9679;</span> Payroll Module</button>':'') +
       (canAccessModule('accounting')?'<button class="nav-item" onclick="launchModule(\'accounting\')"><span class="nav-icon">&#8862;</span> Accounting Module</button>':'');
   } else if(currentModule === 'accounting'){
@@ -1197,17 +1172,17 @@ function renderSidebar(){
       '<div class="sidebar-header">' +
         '<div class="sidebar-logo">Brew Culture</div>' +
         '<div class="sidebar-title">Accounting</div>' +
-        '<div class="sidebar-sub">GL \xb7 trial balance \xb7 Troy receivable</div>' +
+        '<div class="sidebar-sub">GL \xb7 trial balance \xb7 Troy receivable \xb7 bank ledger</div>' +
       '</div>' +
       '<div class="sidebar-section">Accounting</div>' +
       '<button class="nav-item" onclick="showView(\'gl\')" id="nav-gl"><span class="nav-icon">&#8862;</span> GL Entries</button>' +
       '<button class="nav-item" onclick="showView(\'trial-balance\')" id="nav-trial-balance"><span class="nav-icon">&#8801;</span> Trial Balance</button>' +
       '<button class="nav-item" onclick="showView(\'troy\')" id="nav-troy"><span class="nav-icon">&#9671;</span> 1300 \xb7 Troy Recv.</button>' +
+      '<button class="nav-item" onclick="showView(\'bank-ledger\')" id="nav-bank-ledger"><span class="nav-icon">&#8942;</span> Bank Ledger</button>' +
       '<button class="nav-item" onclick="openJEModal()"><span class="nav-icon">&#10022;</span> Journal Entry</button>' +
       '<div class="sidebar-section">Jump To</div>' +
       (canAccessModule('ap')?'<button class="nav-item" onclick="launchModule(\'ap\')"><span class="nav-icon">&#9632;</span> AP Module</button>':'') +
       (canAccessModule('revenue')?'<button class="nav-item" onclick="launchModule(\'revenue\')"><span class="nav-icon">&#9650;</span> Revenue Module</button>':'') +
-      (canAccessModule('ledger')?'<button class="nav-item" onclick="launchModule(\'ledger\')"><span class="nav-icon">&#8942;</span> Bank Ledger</button>':'') +
       (canAccessModule('payroll')?'<button class="nav-item" onclick="launchModule(\'payroll\')"><span class="nav-icon">&#9679;</span> Payroll Module</button>':'') +
       (canAccessModule('admin')?'<button class="nav-item" onclick="launchModule(\'admin\')"><span class="nav-icon">&#9881;</span> Admin Module</button>':'');
   } else {
@@ -1237,7 +1212,6 @@ function renderSidebar(){
       '<button class="nav-item" onclick="showView(\'pastry-skus\')" id="nav-pastry-skus"><span class="nav-icon">&#8801;</span> Pastry SKUs</button>' +
       '<div class="sidebar-section">Reconciliation</div>' +
       (canAccessModule('accounting')?'<button class="nav-item" onclick="launchModule(\'accounting\')"><span class="nav-icon">&#8862;</span> Accounting Module</button>':'') +
-      (canAccessModule('ledger')?'<button class="nav-item" onclick="launchModule(\'ledger\')"><span class="nav-icon">&#8942;</span> Bank Ledger</button>':'') +
       (canAccessModule('payroll')?'<button class="nav-item" onclick="launchModule(\'payroll\')"><span class="nav-icon">&#9679;</span> Payroll Module</button>':'') +
       (canAccessModule('admin')?'<button class="nav-item" onclick="launchModule(\'admin\')"><span class="nav-icon">&#9881;</span> Admin Module</button>':'') +
       '<div class="sidebar-stats" id="sidebar-stats"></div>';
@@ -1257,7 +1231,7 @@ async function launchModule(mod){
   currentModule = mod;
   document.getElementById('module-switcher').style.display = 'none';
   document.getElementById('main-app').style.display = 'flex';
-  var labels = {ap:'Accounts Payable', revenue:'Revenue', ledger:'Bank Ledger', payroll:'Payroll', admin:'Admin', accounting:'Accounting'};
+  var labels = {ap:'Accounts Payable', revenue:'Revenue', payroll:'Payroll', admin:'Admin', accounting:'Accounting'};
   document.getElementById('mod-bar-name').textContent = labels[mod] || mod;
   var email = _session && _session.user ? _session.user.email : '';
   document.getElementById('mod-bar-user').textContent = email;
@@ -1271,8 +1245,6 @@ async function launchModule(mod){
     showView('dashboard');
   } else if(mod === 'revenue'){
     showView('rev-dashboard');
-  } else if(mod === 'ledger'){
-    showView('bank-ledger');
   } else if(mod === 'payroll'){
     showView('payroll-employees');
   } else if(mod === 'admin'){
@@ -10319,8 +10291,8 @@ function showToast(msg){
 // ==================================================
 // ADMIN MODULE -- PHASE 1 (Users + Permissions)
 // ==================================================
-const ADMIN_PERM_MODULES = ['ap','revenue','ledger','payroll','admin','accounting'];
-const ADMIN_PERM_MODULE_LABELS = {ap:'Accounts Payable', revenue:'Revenue', ledger:'Bank Ledger', payroll:'Payroll', admin:'Admin', accounting:'Accounting'};
+const ADMIN_PERM_MODULES = ['ap','revenue','payroll','admin','accounting'];
+const ADMIN_PERM_MODULE_LABELS = {ap:'Accounts Payable', revenue:'Revenue', payroll:'Payroll', admin:'Admin', accounting:'Accounting'};
 const ADMIN_PERM_FLAGS = ['can_void_invoice','can_delete_gl','can_edit_closed_period','can_manage_users','can_export_backup'];
 const ADMIN_PERM_FLAG_LABELS = {
   can_void_invoice:'Void Invoice', can_delete_gl:'Delete GL Entry', can_edit_closed_period:'Edit Closed Period',
