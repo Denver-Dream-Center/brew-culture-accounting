@@ -1869,8 +1869,33 @@ async function postSettlementGL(s){
 }
 
 
+// PostgREST caps a single response at 1000 rows by default -- confirmed
+// hitting this for real: bank_ledger silently stopped loading its newest
+// rows once the table crossed 1000 (same root cause already fixed once
+// before for clover_orders, which hits it at far smaller row counts).
+// Pages through in ordered 1000-row chunks instead of trusting one
+// response has everything. A stable order column is required -- without
+// one, row order (and therefore which rows land in which page) isn't
+// guaranteed consistent across requests, which could silently skip or
+// duplicate rows at a page boundary.
+async function fetchAllRows(table, selectCols, orderCol, ascending){
+  var PAGE_SIZE = 1000;
+  var allRows = [];
+  var page = 0;
+  while(true){
+    var offset = page * PAGE_SIZE;
+    var res = await _sb.from(table).select(selectCols).order(orderCol, {ascending: ascending !== false}).range(offset, offset + PAGE_SIZE - 1);
+    if(res.error) return {error: res.error, data: allRows};
+    var rows = res.data || [];
+    allRows = allRows.concat(rows);
+    if(rows.length < PAGE_SIZE) break; // last page
+    page++;
+  }
+  return {error: null, data: allRows};
+}
+
 async function loadRevData(){
-  var res = await _sb.from('daily_settlement').select('*').order('settlement_date', {ascending:false});
+  var res = await fetchAllRows('daily_settlement', '*', 'settlement_date', false);
   if(!res.error && res.data){
     REV.settlements = res.data.map(function(r){
       return {
@@ -1894,11 +1919,11 @@ async function loadRevData(){
       };
     });
   }
-  var bl = await _sb.from('bank_ledger').select('*').order('pmnt_date', {ascending:true});
+  var bl = await fetchAllRows('bank_ledger', '*', 'pmnt_date', true);
   if(!bl.error && bl.data){
     REV.bankLedger = bl.data;
   }
-  var bm = await _sb.from('bank_ledger_match').select('*');
+  var bm = await fetchAllRows('bank_ledger_match', '*', 'id', true);
   if(!bm.error && bm.data){
     REV.bankMatches = bm.data;
   }
