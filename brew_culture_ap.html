@@ -6481,8 +6481,17 @@ var BL_BANKS       = ['SouthState Bank','Glacier Bank'];
 var BL_TRANS_TYPES = ['Credit','Debit'];
 var BL_STMT_TYPES  = ['','P&L','Balance Sheet'];
 var BL_STMT_SEC    = ['','1 Revenue','2 Expense'];
+// Current scheme (8 numbered sections) is what's actually in use for the
+// vast majority of categorized rows (958 of 975) -- confirmed against live
+// data. The flat labels below it predate that scheme and are kept only so
+// the small number of older rows still holding one (17, all pre-dating the
+// switch) continue to show their real value instead of falling back to
+// blank in this dropdown.
 var BL_STMT_CAT    = [
-  '','In Store Revenue','Online Revenue','Event Revenue',
+  '',
+  '1 Coffee Shop Revenue','1 Selling Expense','2 Facility','2 Other Revenue',
+  '3 Personnel','4 Product Expense','5 Other Sales Related','6 Other',
+  'In Store Revenue','Online Revenue','Event Revenue',
   'Loan from DDC','Payroll','Payroll Fees / Taxes','401k Contribution',
   'Coffee Exp','Food Exp','Milk Exp','Chai Exp','Syrup Exp',
   'Matcha Exp','Tea Exp','Credit Card Pmnt','Other Fees','Daily Sales Sweep'
