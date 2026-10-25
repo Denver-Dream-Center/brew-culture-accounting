@@ -226,6 +226,7 @@
   .match-pill-open{background:var(--yellow-lo);color:#9B6A10}
   .match-pill-matched{background:var(--green-lo);color:var(--green)}
   .match-pill-direct{background:#EAE6F4;color:#6B5B95}
+  .match-pill-partial{background:var(--red-lo);color:var(--red)}
   .match-row-list{max-height:340px;overflow-y:auto;border:1px solid var(--border);border-radius:var(--r);margin:12px 0}
   .match-row-item{display:flex;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid var(--border-lo);cursor:pointer;transition:background .1s}
   .match-row-item:last-child{border-bottom:none}
@@ -6591,7 +6592,9 @@ function renderBankLedger(){
       ? '<span class="match-pill match-pill-matched">Matched</span>'
       : status === 'direct'
         ? '<span class="match-pill match-pill-direct">Coded</span>'
-        : (mType ? '<span class="match-pill match-pill-open">Open</span>' : '');
+        : status === 'partial'
+          ? '<span class="match-pill match-pill-partial" title="Posted payments for this row don’t add up to the bank amount">Partial</span>'
+          : (mType ? '<span class="match-pill match-pill-open">Open</span>' : '');
     var actionBtn = '';
     if(status === 'open' && mType === 'ap'){
       actionBtn = '<button class="btn btn-ghost btn-sm" style="color:var(--amber)" onclick="openAPMatchModal(\'' + r.id + '\')">Match</button>';
@@ -6601,7 +6604,7 @@ function renderBankLedger(){
       actionBtn = '<button class="btn btn-ghost btn-sm" style="color:var(--amber)" onclick="openPayrollMatchModal(\'' + r.id + '\')">Match</button>';
     } else if(status === 'open' && mType === 'direct'){
       actionBtn = '<button class="btn btn-ghost btn-sm" style="color:var(--amber)" onclick="openDirectPostModal(\'' + r.id + '\')">Code to GL</button>';
-    } else if(status === 'matched' || status === 'direct'){
+    } else if(status === 'matched' || status === 'direct' || status === 'partial'){
       actionBtn = '<button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="unmatchBankRow(\'' + r.id + '\')">Unmatch</button>';
     }
     return '<tr>' +
@@ -6662,6 +6665,7 @@ function renderBankLedger(){
             '<option value="open"' + (filterStatus==='open'?' selected':'') + '>Open</option>' +
             '<option value="matched"' + (filterStatus==='matched'?' selected':'') + '>Matched</option>' +
             '<option value="direct"' + (filterStatus==='direct'?' selected':'') + '>Coded</option>' +
+            '<option value="partial"' + (filterStatus==='partial'?' selected':'') + '>Partial</option>' +
           '</select>' +
         '</div>' +
       '</div>' +
@@ -6939,13 +6943,39 @@ function blMatchType(row){
   return null;
 }
 
-// Status for a bank ledger row: 'open' | 'matched' | 'direct'
+// Status for a bank ledger row: 'open' | 'matched' | 'direct' | 'partial'
 // Note: era (dc/troy/dc-paid/mixed) is shown as a separate column/pill and
 // no longer participates in match status — a row can be both Troy-era and Matched.
+//
+// 'partial' is a diagnostic-only state: the AP match modal requires the
+// applied amounts (plus any booked variance) to equal the bank amount
+// before Confirm is even enabled, so a row matched through that modal is
+// always fully reconciled here, even when the INVOICE it paid is left at
+// status 'partial' (a partial payment of the invoice, not a partial match
+// of the bank row — those are different things). This only fires for a row
+// whose actual posted payment total doesn't add up to the bank amount,
+// which shouldn't happen via the modal; it exists so bad/legacy data is
+// visible rather than silently shown as a clean "Matched".
 function blRowStatus(rowId){
   var matches = REV.bankMatches.filter(function(m){ return m.bank_ledger_id === rowId; });
   if(matches.length === 0) return 'open';
   if(matches.some(function(m){ return m.match_kind === 'direct'; })) return 'direct';
+  var apMatches = matches.filter(function(m){ return m.match_kind === 'ap_payment'; });
+  if(apMatches.length > 0){
+    var row = REV.bankLedger.find(function(r){ return r.id === rowId; });
+    var gross = Math.abs(parseFloat(row && row.gross_amount) || 0);
+    // Sum actual recorded cash payments (not match.amount, which can differ
+    // from cash moved once a variance or credit rides on the same invoice's
+    // payment) -- excludes credit-applied subledger entries, which move no
+    // cash at all.
+    var cashSum = apMatches.reduce(function(s, m){
+      var pmt = DB.payments.find(function(p){ return p.id === m.payment_id; });
+      if(!pmt || pmt.method === 'Credit Applied') return s;
+      return s + (parseFloat(pmt.amount) || 0);
+    }, 0);
+    cashSum = Math.round(cashSum * 100) / 100;
+    if(Math.abs(cashSum - gross) >= 0.005) return 'partial';
+  }
   return 'matched';
 }
 
@@ -6966,16 +6996,23 @@ async function deleteBankMatchesForRow(rowId){
 }
 
 // ── AP MATCHING ─────────────────────────────────────────────────────────
-var _apMatchState = { rowId:null, vendorId:null, selectedInvoices:{} };
+// applyAmounts: invId -> dollar amount the uploader chose to apply to that
+// invoice (may be less than its open balance -- a true partial payment).
+// checkOrder: invoice ids in the order they were checked, real (payable)
+// invoices only -- drives the "smaller of balance / bank amount not yet
+// applied" prefill rule, and the default "post variance with" invoice.
+// varianceBooked: explicit opt-in -- a difference between the bank amount
+// and total applied is never posted unless this is checked.
+var _apMatchState = { rowId:null, vendorId:null, selectedInvoices:{}, checkOrder:[], applyAmounts:{}, varianceBooked:false, varianceInvoiceId:null, varianceLines:[], variance:0 };
 
 function openAPMatchModal(rowId){
   var row = REV.bankLedger.find(function(r){ return r.id === rowId; });
   if(!row) return;
-  _apMatchState = { rowId: rowId, vendorId:null, selectedInvoices:{}, varianceLines:[], variance:0 };
+  _apMatchState = { rowId: rowId, vendorId:null, selectedInvoices:{}, checkOrder:[], applyAmounts:{}, varianceBooked:false, varianceInvoiceId:null, varianceLines:[], variance:0 };
 
   var amtAbs = Math.abs(parseFloat(row.gross_amount)||0);
   openModal(
-    '<div class="modal" style="max-width:560px">' +
+    '<div class="modal" style="max-width:600px">' +
       '<div class="modal-header">' +
         '<div><div class="modal-title">Match to AP Invoice</div>' +
         '<div class="modal-sub">' + fmtDate(row.pmnt_date) + ' \u2014 ' + fmt(amtAbs) + ' \u2014 ' + (row.customer_vendor||'') + '</div></div>' +
@@ -7008,6 +7045,10 @@ function loadAPMatchInvoices(){
   var vendorId = $('ap-match-vendor').value;
   _apMatchState.vendorId = vendorId;
   _apMatchState.selectedInvoices = {};
+  _apMatchState.checkOrder = [];
+  _apMatchState.applyAmounts = {};
+  _apMatchState.varianceBooked = false;
+  _apMatchState.varianceInvoiceId = null;
   _apMatchState.varianceLines = [];
   var listEl = $('ap-match-invoices');
   if(!vendorId){ listEl.innerHTML=''; updateAPMatchSummary(); return; }
@@ -7032,11 +7073,24 @@ function loadAPMatchInvoices(){
     '<div class="match-row-list">' +
       openInvoices.map(function(inv){
         var isCredit = inv.balance < -0.005;
+        var isPartial = !isCredit && (inv.amountPaid||0) > 0.005;
         return '<div class="match-row-item" id="ap-inv-' + inv.id + '" onclick="toggleAPInvoiceSelect(\'' + inv.id + '\')">' +
           '<div class="match-row-check">&#10003;</div>' +
           '<div style="flex:1">' +
-            '<div style="font-weight:600;font-size:13px">' + (inv.invoiceNum||inv.id) + (isCredit?' <span style="font-weight:600;font-size:10px;color:var(--troy);background:var(--troy-lo);padding:1px 6px;border-radius:4px;margin-left:4px">CREDIT</span>':'') + '</div>' +
-            '<div style="font-size:11px;color:var(--ink-lo)">' + fmtDate(inv.date) + ' \u2014 ' + (isCredit?'Available: '+fmt(Math.abs(inv.balance)):'Balance: '+fmt(inv.balance)) + '</div>' +
+            '<div style="font-weight:600;font-size:13px">' + (inv.invoiceNum||inv.id) +
+              (isCredit?' <span style="font-weight:600;font-size:10px;color:var(--troy);background:var(--troy-lo);padding:1px 6px;border-radius:4px;margin-left:4px">CREDIT</span>':'') +
+              (isPartial?' <span style="font-weight:600;font-size:10px;color:var(--amber);background:var(--yellow-lo);padding:1px 6px;border-radius:4px;margin-left:4px">PARTIAL</span>':'') +
+            '</div>' +
+            '<div style="font-size:11px;color:var(--ink-lo)">' + fmtDate(inv.date) + ' \u2014 ' + (isCredit?'Available: '+fmt(Math.abs(inv.balance)):'Open balance: '+fmt(inv.balance)) + '</div>' +
+            (isCredit ? '' :
+              '<div style="margin-top:6px;display:flex;gap:12px;align-items:center;flex-wrap:wrap" onclick="event.stopPropagation()">' +
+                '<label style="font-size:11px;color:var(--ink-mid);display:flex;align-items:center;gap:4px">Apply ' +
+                  '<input type="number" step="0.01" min="0" style="width:90px" id="ap-apply-' + inv.id + '" disabled oninput="updateApplyAmount(\'' + inv.id + '\')">' +
+                '</label>' +
+                '<span style="font-size:11px;color:var(--ink-lo)">Remaining: <span class="mono" id="ap-remaining-' + inv.id + '">' + fmt(inv.balance) + '</span></span>' +
+              '</div>' +
+              '<div id="ap-apply-err-' + inv.id + '" style="color:var(--red);font-size:11px;margin-top:2px"></div>'
+            ) +
           '</div>' +
           '<div class="mono fw600"' + (isCredit?' style="color:var(--troy)"':'') + '>' + (isCredit?'\u2212':'') + fmt(Math.abs(inv.balance)) + '</div>' +
         '</div>';
@@ -7046,14 +7100,76 @@ function loadAPMatchInvoices(){
 
 function toggleAPInvoiceSelect(invId){
   var el = $('ap-inv-' + invId);
+  var inv = DB.invoices.find(function(i){ return i.id === invId; });
+  var isCredit = inv && inv.balance < -0.005;
   if(_apMatchState.selectedInvoices[invId]){
     delete _apMatchState.selectedInvoices[invId];
     el.classList.remove('selected');
+    if(!isCredit){
+      _apMatchState.checkOrder = _apMatchState.checkOrder.filter(function(id){ return id !== invId; });
+      delete _apMatchState.applyAmounts[invId];
+      var inputEl = $('ap-apply-' + invId);
+      if(inputEl){ inputEl.value = ''; inputEl.disabled = true; }
+      var remEl = $('ap-remaining-' + invId);
+      if(remEl && inv) remEl.textContent = fmt(inv.balance);
+      var errEl = $('ap-apply-err-' + invId);
+      if(errEl) errEl.textContent = '';
+      if(_apMatchState.varianceInvoiceId === invId){
+        _apMatchState.varianceInvoiceId = _apMatchState.checkOrder.length
+          ? _apMatchState.checkOrder[_apMatchState.checkOrder.length-1] : null;
+      }
+    }
   } else {
     _apMatchState.selectedInvoices[invId] = true;
     el.classList.add('selected');
+    if(!isCredit && inv){
+      var row = REV.bankLedger.find(function(r){ return r.id === _apMatchState.rowId; });
+      var amtAbs = Math.abs(parseFloat(row.gross_amount)||0);
+      var alreadyApplied = _apMatchState.checkOrder.reduce(function(s,id){ return s + (_apMatchState.applyAmounts[id]||0); }, 0);
+      var remainingBank = Math.max(0, Math.round((amtAbs - alreadyApplied)*100)/100);
+      var prefill = Math.round(Math.min(inv.balance, remainingBank)*100)/100;
+      _apMatchState.applyAmounts[invId] = prefill;
+      var inputEl = $('ap-apply-' + invId);
+      if(inputEl){ inputEl.disabled = false; inputEl.value = prefill.toFixed(2); }
+      var remEl = $('ap-remaining-' + invId);
+      if(remEl) remEl.textContent = fmt(Math.round((inv.balance-prefill)*100)/100);
+      _apMatchState.checkOrder.push(invId);
+      _apMatchState.varianceInvoiceId = invId;
+    }
   }
   updateAPMatchSummary();
+}
+
+function updateApplyAmount(invId){
+  var inputEl = $('ap-apply-' + invId);
+  var inv = DB.invoices.find(function(i){ return i.id === invId; });
+  if(!inputEl || !inv) return;
+  var val = parseFloat(inputEl.value);
+  if(isNaN(val) || val < 0) val = 0;
+  val = Math.round(val*100)/100;
+  _apMatchState.applyAmounts[invId] = val;
+  var remEl = $('ap-remaining-' + invId);
+  if(remEl) remEl.textContent = fmt(Math.round((inv.balance-val)*100)/100);
+  updateAPMatchSummary();
+}
+
+// Per-row validation: apply > 0, apply <= open balance (+0.005 slack for
+// rounding). Writes inline messages; returns whether every checked
+// (non-credit) row currently passes.
+function validateAPMatchRows(){
+  var ok = true;
+  (_apMatchState.checkOrder||[]).forEach(function(invId){
+    var inv = DB.invoices.find(function(i){ return i.id === invId; });
+    var errEl = $('ap-apply-err-' + invId);
+    if(!inv) return;
+    var amt = _apMatchState.applyAmounts[invId] || 0;
+    var msg = '';
+    if(amt <= 0) msg = 'Enter an amount to apply.';
+    else if(amt > inv.balance + 0.005) msg = 'Exceeds open balance of ' + fmt(inv.balance) + '.';
+    if(errEl) errEl.textContent = msg;
+    if(msg) ok = false;
+  });
+  return ok;
 }
 
 function updateAPMatchSummary(){
@@ -7070,26 +7186,33 @@ function updateAPMatchSummary(){
   }
 
   var selectedInvs = selectedIds.map(function(id){ return DB.invoices.find(function(i){ return i.id === id; }); }).filter(Boolean);
-  var total = selectedInvs.reduce(function(sum, inv){ return sum + inv.balance; }, 0);
   var creditsSelected = selectedInvs.filter(function(inv){ return inv.balance < -0.005; });
-  var creditTotal = creditsSelected.reduce(function(s,inv){ return s+Math.abs(inv.balance); }, 0);
-  var variance = Math.round((amtAbs - total) * 100) / 100;
-  _apMatchState.variance = variance;
-  if(Math.abs(variance) < 0.01) _apMatchState.varianceLines = [];
+  var creditTotal = Math.round(creditsSelected.reduce(function(s,inv){ return s+Math.abs(inv.balance); }, 0)*100)/100;
+  var payableInvs = selectedInvs.filter(function(inv){ return inv.balance > 0.005; });
+  var totalApplied = Math.round(payableInvs.reduce(function(s,inv){ return s + (_apMatchState.applyAmounts[inv.id]||0); }, 0)*100)/100;
+  // A selected credit reduces how much bank cash is needed to clear the
+  // same payable balances, same as today -- compared against (bank amount
+  // + credit), not the bank amount alone.
+  var difference = Math.round((amtAbs + creditTotal - totalApplied) * 100) / 100;
+  _apMatchState.variance = difference;
+  if(Math.abs(difference) < 0.005) _apMatchState.varianceBooked = false;
 
   sumEl.innerHTML =
     '<div class="match-summary-bar">' +
-      '<span>Bank Payment: <strong class="mono">' + fmt(amtAbs) + '</strong></span>' +
-      '<span>Selected Invoices: <strong class="mono">' + fmt(total) + '</strong></span>' +
-      '<span>Variance: <strong class="mono ' + (Math.abs(variance)<0.01?'match-variance-ok':'match-variance-bad') + '">' + (variance>=0?'+':'') + fmt(variance) + '</strong></span>' +
+      '<span>Bank Amount: <strong class="mono">' + fmt(amtAbs) + '</strong></span>' +
+      '<span>Total Applied: <strong class="mono">' + fmt(totalApplied) + '</strong></span>' +
+      '<span>Difference: <strong class="mono ' + (Math.abs(difference)<0.005?'match-variance-ok':'match-variance-bad') + '">' + (difference>=0?'+':'') + fmt(difference) + '</strong></span>' +
     '</div>' +
     (creditsSelected.length
       ? '<div style="font-size:12px;color:var(--troy);margin-top:6px">Includes ' + fmt(creditTotal) + ' credit from ' + creditsSelected.map(function(inv){ return inv.invoiceNum||inv.id; }).join(', ') + ' — will be cleared against this match, not booked as a variance.</div>'
       : '') +
     '<div id="ap-variance-block"></div>';
 
-  btnEl.disabled = false;
-  if(Math.abs(variance) >= 0.01) renderVarianceBlock(); else refreshVarianceRemaining();
+  if(Math.abs(difference) >= 0.005){
+    renderVarianceBlock(payableInvs);
+  } else {
+    recomputeAPMatchGate();
+  }
 }
 
 // Options list for the variance-allocation account picker (same account
@@ -7100,50 +7223,95 @@ function varAcctOptions(selected){
       .map(function(a){ return '<option value="'+a.acct+'"'+(a.acct===selected?' selected':'')+'>'+a.acct+' · '+a.name+'</option>'; }).join('');
 }
 
-function renderVarianceBlock(){
+// Explicit opt-in gate: a difference is never posted to any GL account
+// unless this checkbox is checked. "Post variance with" lets the user pick
+// which checked invoice's own JE carries the variance line(s) -- defaults
+// to the most recently checked payable invoice, same as the old
+// always-last-invoice behavior, but now overridable.
+function renderVarianceBlock(payableInvs){
   var block = $('ap-variance-block'); if(!block) return;
+  payableInvs = payableInvs || [];
+  if(!_apMatchState.varianceInvoiceId || !payableInvs.some(function(inv){ return inv.id === _apMatchState.varianceInvoiceId; })){
+    _apMatchState.varianceInvoiceId = payableInvs.length ? payableInvs[payableInvs.length-1].id : null;
+  }
+  var booked = !!_apMatchState.varianceBooked;
   var lines = _apMatchState.varianceLines || (_apMatchState.varianceLines = []);
+
+  var invOptions = payableInvs.map(function(inv){
+    return '<option value="'+inv.id+'"'+(inv.id===_apMatchState.varianceInvoiceId?' selected':'')+'>'+(inv.invoiceNum||inv.id)+'</option>';
+  }).join('');
+
   block.innerHTML =
     '<div style="margin-top:10px;padding:10px;background:var(--bg);border:1px solid var(--border);border-radius:var(--r)">' +
-      '<div style="font-size:12px;font-weight:600;margin-bottom:6px">Apply variance to account(s)</div>' +
-      '<div id="var-lines">' +
-        lines.map(function(l,i){
-          return '<div style="display:grid;grid-template-columns:2fr 1fr 28px;gap:6px;margin-bottom:6px;align-items:center">' +
-            '<select onchange="_apMatchState.varianceLines['+i+'].acct=this.value;refreshVarianceRemaining()">' + varAcctOptions(l.acct) + '</select>' +
-            '<input type="number" min="0" step="0.01" placeholder="0.00" value="'+(l.amount||'')+'" oninput="_apMatchState.varianceLines['+i+'].amount=+this.value;refreshVarianceRemaining()">' +
-            '<button class="rm-btn" onclick="removeVarianceLine('+i+')">×</button>' +
-          '</div>';
-        }).join('') +
-      '</div>' +
-      '<button class="btn btn-ghost btn-sm" onclick="addVarianceLine()">＋ Add line</button>' +
-      '<div id="var-remaining" style="font-size:12px;margin-top:8px"></div>' +
+      '<label style="display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600;cursor:pointer">' +
+        '<input type="checkbox" id="ap-variance-booked"' + (booked?' checked':'') + ' onchange="toggleVarianceBooked()"> Book difference to variance' +
+      '</label>' +
+      (booked
+        ? '<div style="margin-top:10px">' +
+            '<div class="form-group" style="margin-bottom:8px"><label>Post variance with</label>' +
+              '<select id="ap-variance-invoice" onchange="_apMatchState.varianceInvoiceId=this.value">' + invOptions + '</select>' +
+            '</div>' +
+            '<div style="font-size:12px;font-weight:600;margin-bottom:6px">Apply difference to account(s)</div>' +
+            '<div id="var-lines">' +
+              lines.map(function(l,i){
+                return '<div style="display:grid;grid-template-columns:2fr 1fr 28px;gap:6px;margin-bottom:6px;align-items:center">' +
+                  '<select onchange="_apMatchState.varianceLines['+i+'].acct=this.value;recomputeAPMatchGate()">' + varAcctOptions(l.acct) + '</select>' +
+                  '<input type="number" min="0" step="0.01" placeholder="0.00" value="'+(l.amount||'')+'" oninput="_apMatchState.varianceLines['+i+'].amount=+this.value;recomputeAPMatchGate()">' +
+                  '<button class="rm-btn" onclick="removeVarianceLine('+i+')">×</button>' +
+                '</div>';
+              }).join('') +
+            '</div>' +
+            '<button class="btn btn-ghost btn-sm" onclick="addVarianceLine()">＋ Add line</button>' +
+            '<div id="var-remaining" style="font-size:12px;margin-top:8px"></div>' +
+          '</div>'
+        : '') +
     '</div>';
-  refreshVarianceRemaining();
+  recomputeAPMatchGate();
+}
+
+function toggleVarianceBooked(){
+  var cb = $('ap-variance-booked');
+  _apMatchState.varianceBooked = !!(cb && cb.checked);
+  updateAPMatchSummary();
 }
 
 function addVarianceLine(){
   _apMatchState.varianceLines.push({acct:'', amount:0});
-  renderVarianceBlock();
+  updateAPMatchSummary();
 }
 
 function removeVarianceLine(i){
   _apMatchState.varianceLines.splice(i,1);
-  renderVarianceBlock();
+  updateAPMatchSummary();
 }
 
-function refreshVarianceRemaining(){
-  var variance = _apMatchState.variance||0;
-  var lines = _apMatchState.varianceLines||[];
+// Single source of truth for whether Confirm is enabled: every checked row
+// passes its own apply-amount validation, AND the difference is either
+// zero or explicitly booked (with its allocation lines, if any, valid).
+function recomputeAPMatchGate(){
+  var row = REV.bankLedger.find(function(r){ return r.id === _apMatchState.rowId; });
+  var btnEl = $('ap-match-confirm');
+  var errEl = $('ap-match-err');
+  if(!row || !btnEl) return;
+
+  var rowsValid = validateAPMatchRows();
+  var difference = _apMatchState.variance || 0;
+  var diffZero = Math.abs(difference) < 0.005;
+  var booked = !!_apMatchState.varianceBooked;
+  var diffOk = diffZero || booked;
+
+  var lines = _apMatchState.varianceLines || [];
   var allocated = Math.round(lines.reduce(function(s,l){ return s+(Math.abs(l.amount)||0); },0)*100)/100;
-  var remaining = Math.round((Math.abs(variance)-allocated)*100)/100;
-  var overAllocated = remaining < -0.004;
-  var badLine = lines.some(function(l){ return (Math.abs(l.amount)||0) > 0.004 && !l.acct; });
+  var remaining = Math.round((Math.abs(difference)-allocated)*100)/100;
+  var overAllocated = booked && !diffZero && remaining < -0.004;
+  var badLine = booked && !diffZero && lines.some(function(l){ return (Math.abs(l.amount)||0) > 0.004 && !l.acct; });
+
   var remEl = $('var-remaining');
   if(remEl){
-    if(Math.abs(variance) < 0.01){
+    if(diffZero || !booked){
       remEl.innerHTML = '';
     } else if(overAllocated){
-      remEl.innerHTML = '<span style="color:var(--red)">Allocated ('+fmt(allocated)+') exceeds the variance ('+fmt(Math.abs(variance))+') — reduce a line amount.</span>';
+      remEl.innerHTML = '<span style="color:var(--red)">Allocated ('+fmt(allocated)+') exceeds the difference ('+fmt(Math.abs(difference))+') — reduce a line amount.</span>';
     } else if(badLine){
       remEl.innerHTML = '<span style="color:var(--red)">Select an account for every line with an amount.</span>';
     } else if(remaining >= 0.005){
@@ -7152,8 +7320,13 @@ function refreshVarianceRemaining(){
       remEl.innerHTML = '<span style="color:var(--green)">Fully allocated.</span>';
     }
   }
-  var btnEl = $('ap-match-confirm');
-  if(btnEl && !btnEl.dataset.submitting) btnEl.disabled = overAllocated || badLine;
+
+  if(errEl) errEl.textContent = (Object.keys(_apMatchState.selectedInvoices).length && !diffOk)
+    ? 'Applied amounts must equal the bank amount, or book the difference to variance.' : '';
+
+  if(!btnEl.dataset.submitting){
+    btnEl.disabled = Object.keys(_apMatchState.selectedInvoices).length === 0 || !rowsValid || !diffOk || overAllocated || badLine;
+  }
 }
 
 async function confirmAPMatch(){
@@ -7172,8 +7345,6 @@ async function confirmAPMatch(){
 
   var amtAbs = Math.abs(parseFloat(row.gross_amount)||0);
   var invoices = selectedIds.map(function(id){ return DB.invoices.find(function(i){ return i.id === id; }); }).filter(Boolean);
-  var totalBalance = invoices.reduce(function(s,inv){ return s + inv.balance; }, 0);
-  var variance = Math.round((amtAbs - totalBalance) * 100) / 100;
 
   // Credit memos (negative balance) selected alongside real invoices don't
   // get their own cash leg -- there's no cash movement for a credit. Their
@@ -7193,13 +7364,44 @@ async function confirmAPMatch(){
     return;
   }
 
+  // What the uploader actually chose to apply per invoice -- may be less
+  // than the invoice's own balance, which is the point of this modal: a
+  // true partial payment, not every selected invoice paid in full.
+  var totalApplied = Math.round(payInvoices.reduce(function(s,inv){ return s + (Math.round((parseFloat(_apMatchState.applyAmounts[inv.id])||0)*100)/100); }, 0)*100)/100;
+  var variance = Math.round((amtAbs + creditTotal - totalApplied) * 100) / 100;
+
+  // Defense in depth -- Confirm should already be disabled unless this
+  // holds, but never silently absorb a mismatch into a GL posting.
+  var diffOk = Math.abs(variance) < 0.005 || _apMatchState.varianceBooked;
+  if(!diffOk){
+    hideLoadingOverlay();
+    var errEl1 = $('ap-match-err');
+    if(errEl1) errEl1.textContent = 'Applied amounts must equal the bank amount, or book the difference to variance.';
+    if(btnEl){ btnEl.disabled = false; btnEl.dataset.submitting=''; btnEl.textContent='Confirm Match'; }
+    return;
+  }
+  var applyOk = payInvoices.every(function(inv){
+    var amt = Math.round((parseFloat(_apMatchState.applyAmounts[inv.id])||0)*100)/100;
+    return amt > 0 && amt <= inv.balance + 0.005;
+  });
+  if(!applyOk){
+    hideLoadingOverlay();
+    var errEl2 = $('ap-match-err');
+    if(errEl2) errEl2.textContent = 'Check the apply amount on each selected invoice.';
+    if(btnEl){ btnEl.disabled = false; btnEl.dataset.submitting=''; btnEl.textContent='Confirm Match'; }
+    return;
+  }
+
   // User-allocated variance lines, plus whatever's left over booked to
   // 5080 (Unknown Variance Expense) so the match always balances even if
-  // nothing was allocated.
+  // nothing was allocated. Only matters when the uploader explicitly
+  // checked "Book difference to variance" -- diffOk above already
+  // guarantees variance is ~0 otherwise.
   var varSign = variance > 0 ? 1 : -1;
   var varLines = (_apMatchState.varianceLines||[]).filter(function(l){ return l.acct && Math.abs(l.amount||0) >= 0.005; });
   var allocated = Math.round(varLines.reduce(function(s,l){ return s+Math.abs(l.amount); },0)*100)/100;
   var unallocated = Math.max(0, Math.round((Math.abs(variance)-allocated)*100)/100);
+  var varianceInvoiceId = _apMatchState.varianceInvoiceId;
 
   showLoadingOverlay('Recording payment(s)...');
 
@@ -7207,14 +7409,18 @@ async function confirmAPMatch(){
   var pmtFailures = [], invFailures = [], glFailures = [];
   var lastPmtId = '';
 
-  // Pay each real invoice its own balance first (standard payment flow), then apply fee/rounding variance and any selected credit to the LAST invoice
+  // Pay each real invoice its own applied amount (which may be a true
+  // partial payment, leaving the invoice at status 'partial'). Any booked
+  // variance posts on whichever invoice the uploader chose ("post variance
+  // with"); any selected credit still folds into the LAST invoice, as before.
   for(var i = 0; i < payInvoices.length; i++){
     var inv = payInvoices[i];
     var isLast = (i === payInvoices.length - 1);
-    var apPortion = inv.balance; // the actual invoice liability being settled
-    var feeVariance = isLast ? variance : 0; // only the last invoice absorbs the fee/rounding variance
+    var isVarianceInv = _apMatchState.varianceBooked && inv.id === varianceInvoiceId;
+    var applyAmt = Math.round((parseFloat(_apMatchState.applyAmounts[inv.id])||0)*100)/100; // the actual invoice liability being settled, chosen by the uploader
+    var feeVariance = isVarianceInv ? variance : 0; // only the chosen invoice absorbs the booked fee/rounding variance
     var creditPortion = isLast ? creditTotal : 0; // ...and any selected credit
-    var payAmt = Math.max(0, apPortion + feeVariance - creditPortion);
+    var payAmt = Math.max(0, applyAmt + feeVariance - creditPortion);
     if(payAmt <= 0 && Math.abs(feeVariance) < 0.005 && creditPortion < 0.005) continue;
 
     // Era is derived from the invoice being paid, not hardcoded — a bank
@@ -7225,19 +7431,19 @@ async function confirmAPMatch(){
     var pmtId = await nextPaymentId();
     var pmt = {id:pmtId, era:invEra, invoiceId:inv.id, vendorId:inv.vendorId, date:row.pmnt_date,
                amount:payAmt, method:'ACH/Bank', ref:row.ck_num||'', memo:'Matched from bank ledger \u2014 ' + (row.customer_vendor||''), glPosted:true};
-    inv.amountPaid = (inv.amountPaid||0) + apPortion;
+    inv.amountPaid = (inv.amountPaid||0) + applyAmt;
     inv.balance = Math.max(0, inv.total - inv.amountPaid);
     if(inv.balance < 0.005){ inv.balance = 0; inv.status = 'paid'; } else inv.status = 'partial';
 
     var cashAcct = row.bank === 'Glacier Bank' ? '1010' : '1011';
     var cashName = row.bank === 'Glacier Bank' ? 'Glacier Bank' : 'SouthState Bank';
-    // The AP debit is capped at the invoice's own balance; any leftover
-    // (a vendor transaction fee, etc.) is booked to the accounts the user
-    // chose in the variance-allocation panel, with whatever's left over
-    // going to 5080 -- rather than being folded into the Accounts Payable
-    // debit. A selected credit clears separately below.
-    var jeEntries = [{acct:'2000',name:'Accounts Payable',dr:apPortion,cr:0}];
-    if(isLast && Math.abs(feeVariance) >= 0.005){
+    // The AP debit is capped at what was actually applied to this invoice;
+    // any booked variance (a vendor transaction fee, etc.) is booked to
+    // the accounts the user chose in the variance-allocation panel, with
+    // whatever's left over going to 5080 -- rather than being folded into
+    // the Accounts Payable debit. A selected credit clears separately below.
+    var jeEntries = [{acct:'2000',name:'Accounts Payable',dr:applyAmt,cr:0}];
+    if(isVarianceInv && Math.abs(feeVariance) >= 0.005){
       varLines.forEach(function(l){
         var amt = Math.abs(l.amount);
         var acctInfo = COA.find(function(a){ return a.acct===l.acct; });
@@ -7269,17 +7475,20 @@ async function confirmAPMatch(){
     var glOk=await saveGLToSB(je);
     if(!glOk)glFailures.push(inv.id+' ('+pmtId+')');
 
-    // Record the match link
+    // Record the match link. amount is the applied invoice amount, not the
+    // cash payAmt -- payAmt can include a variance/credit rider that
+    // belongs to the match as a whole, not to this one invoice's own
+    // applied portion (bank row status sums these against the bank amount).
     await saveBankMatch({
       id: 'BLM-' + Date.now() + '-' + i,
       bank_ledger_id: row.id,
       match_kind: 'ap_payment',
       payment_id: pmtId,
       invoice_id: inv.id,
-      amount: payAmt,
+      amount: applyAmt,
       created_at: new Date().toISOString()
     });
-    REV.bankMatches.push({id:'BLM-'+Date.now()+'-'+i, bank_ledger_id:row.id, match_kind:'ap_payment', payment_id:pmtId, invoice_id:inv.id, amount:payAmt});
+    REV.bankMatches.push({id:'BLM-'+Date.now()+'-'+i, bank_ledger_id:row.id, match_kind:'ap_payment', payment_id:pmtId, invoice_id:inv.id, amount:applyAmt});
   }
 
   // Close out any selected credit invoices. Their GL effect is already
