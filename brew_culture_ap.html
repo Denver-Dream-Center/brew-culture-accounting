@@ -730,7 +730,7 @@ async function loadAllData() {
 function mapInvoiceFromDB(r) {
   return {
     id: r.id, vendorId: r.vendor_id, invoiceNum: r.invoice_number,
-    date: r.invoice_date, dueDate: r.due_date, era: r.era, status: r.status,
+    date: r.invoice_date, dueDate: r.due_date, deliveryDate: r.delivery_date, era: r.era, status: r.status,
     lines: r.lines || [], total: r.total, amountPaid: r.amount_paid || 0,
     balance: r.balance || 0, memo: r.memo, glPosted: r.gl_posted
   };
@@ -739,7 +739,7 @@ function mapInvoiceFromDB(r) {
 function mapInvoiceToDB(inv) {
   return {
     id: inv.id, vendor_id: inv.vendorId, invoice_number: inv.invoiceNum,
-    invoice_date: inv.date, due_date: inv.dueDate, era: inv.era, status: inv.status,
+    invoice_date: inv.date, due_date: inv.dueDate, delivery_date: inv.deliveryDate || null, era: inv.era, status: inv.status,
     lines: inv.lines, total: inv.total, amount_paid: inv.amountPaid || 0,
     balance: inv.balance || 0, memo: inv.memo, gl_posted: inv.glPosted || false
   };
@@ -1005,6 +1005,67 @@ function findRule(description){
   if(!description)return null;
   const desc=description.toLowerCase();
   return DB.rules.find(r=>r.match&&desc.includes(r.match.toLowerCase()))||null;
+}
+
+function round2(n){ return Math.round((n||0)*100)/100; }
+
+// ═══════════════════════════════════════════════
+// BULK (5 LB UNIT) COFFEE BEAN NORMALIZATION
+// New Millennium bills bulk coffee per 5 lb unit (2267.96 g, the fifo_rules
+// multiplier on these ingredients) regardless of whether the invoice
+// describes it as a 5 lb pack, a small retail bag, or loose oz/lb. Auto-
+// extract and manual entry both need the line's qty converted to 5 lb
+// units before it reaches FIFO, since writeFIFOLayers() just multiplies
+// qty × the ingredient's rule multiplier with no unit awareness of its own.
+// ═══════════════════════════════════════════════
+const FIVE_LB_G = 2267.96;
+const BULK_QTY_WARN_THRESHOLD = 25; // qty (5 lb units) above this gets an amber "did you enter pounds?" confirm at save
+function isFiveLbIngredient(ingName){
+  const r = DB.rules.find(r=>r.ingredient===ingName);
+  return !!r && Math.abs(Number(r.multiplier) - FIVE_LB_G) < 0.01;
+}
+function is12ozBagDesc(desc){ return /\b12\s*\.?\s*oz/i.test(desc||''); }
+
+// Given an auto-extracted line {raw_description, unit, quantity, unit_price, line_total}
+// already identified as a bulk ingredient, work out the source unit and
+// convert to 5 lb units + price-per-5lb. Returns null if no case matches,
+// so the caller can leave the line unconverted and warn instead of guessing.
+function normalizeBulkLine(l){
+  const desc=(l.raw_description||'');
+  const unit=(l.unit||'');
+  const qty=l.quantity||1;
+  const unitPrice=l.unit_price||0;
+  const lineTotal=l.line_total!=null?l.line_total:(qty*unitPrice);
+  const src={srcQty:qty, srcUnit:l.unit||'', srcUnitPrice:unitPrice};
+  const hasOzFigure=s=>/\d+(?:\.\d+)?\s*oz\b/i.test(s||'');
+  const has5LbText=s=>/5\s*\.?\s*lbs?\b|5lb\b|bulk\s*wholebean/i.test(s||'');
+
+  if((has5LbText(desc)||has5LbText(unit)) && !hasOzFigure(desc) && !hasOzFigure(unit) && unitPrice>=20){
+    return {...src, qty:Math.round(qty*1e6)/1e6, unitCost:Math.round((lineTotal/qty)*1e4)/1e4, normNote:''};
+  }
+
+  const bagMatch=desc.match(/(\d+(?:\.\d+)?)\s*oz\.?\s*bag/i);
+  if(bagMatch && Math.round(parseFloat(bagMatch[1]))!==12){
+    const n=parseFloat(bagMatch[1]);
+    const oz=qty*n, fiveLb=oz/80;
+    return {...src, qty:Math.round(fiveLb*1e6)/1e6, unitCost:Math.round((lineTotal/fiveLb)*1e4)/1e4, normNote:'from '+qty+' × '+n+' oz @ $'+unitPrice};
+  }
+
+  const isOzUnit=/^oz|^ounce/i.test(unit);
+  const looseOzMatch=desc.match(/(\d+(?:\.\d+)?)\s*oz\b(?!\.?\s*bag)/i);
+  const isLowPriceOz=unitPrice>0 && unitPrice<3;
+  if(isOzUnit || looseOzMatch || isLowPriceOz){
+    const oz=qty, fiveLb=oz/80;
+    return {...src, qty:Math.round(fiveLb*1e6)/1e6, unitCost:Math.round((lineTotal/fiveLb)*1e4)/1e4, normNote:'from '+qty+' oz @ $'+unitPrice};
+  }
+
+  const isLbUnit=/^lb|^pound/i.test(unit);
+  if(isLbUnit){
+    const oz=qty*16, fiveLb=oz/80;
+    return {...src, qty:Math.round(fiveLb*1e6)/1e6, unitCost:Math.round((lineTotal/fiveLb)*1e4)/1e4, normNote:'from '+qty+' lb @ $'+unitPrice};
+  }
+
+  return null;
 }
 
 // ═══════════════════════════════════════════════
@@ -3866,7 +3927,7 @@ function renderFIFO(){
       <div class="card">
         <div class="card-header"><span class="card-title">All Delivery Layers</span><span style="font-size:12px;color:var(--ink-mid)">${layers.length} total</span></div>
         <div class="tbl-wrap"><table>
-          <thead><tr><th>Date</th><th>Ingredient</th><th>Category</th><th class="text-right">Received</th><th class="text-right">Remaining</th><th class="text-right">Cost</th><th>Invoice #</th><th>Vendor</th></tr></thead>
+          <thead><tr><th>Delivered</th><th>Ingredient</th><th>Category</th><th class="text-right">Received</th><th class="text-right">Remaining</th><th class="text-right">Cost</th><th>Invoice #</th><th>Vendor</th></tr></thead>
           <tbody>${rows||'<tr><td colspan="8" class="text-center" style="padding:24px;color:var(--ink-lo)">No deliveries yet</td></tr>'}</tbody>
         </table></div>
       </div>
@@ -4290,8 +4351,9 @@ function viewInvoice(id){
     </div>
     <div class="modal-body">
       ${eraNote}
-      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:16px;font-size:13px">
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px;margin-bottom:16px;font-size:13px">
         <div><div style="color:var(--ink-lo);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;margin-bottom:3px">Date</div>${fmtDate(inv.date)}</div>
+        <div><div style="color:var(--ink-lo);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;margin-bottom:3px">Delivered</div>${fmtDate(inv.deliveryDate||inv.date)}</div>
         <div><div style="color:var(--ink-lo);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;margin-bottom:3px">Due</div>${fmtDate(inv.dueDate)}</div>
         <div><div style="color:var(--ink-lo);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;margin-bottom:3px">Era</div>${ERA_LABELS[era]}</div>
       </div>
@@ -4451,11 +4513,15 @@ async function confirmApplyCredit(creditInvoiceId){
 // ═══════════════════════════════════════════════
 let lineItems=[];
 let _currentEditInvoiceId='';
+let _deliveryDateTouched=false;
+
+function syncDeliveryDate(v){ if(_deliveryDateTouched)return; const d=$('inv-delivery'); if(d) d.value=v; }
 
 function openInvoiceModal(editId){
   _currentEditInvoiceId=editId||'';
   if(!editId) _lastRebelBreadFile = null; // reset on new invoice
   const editing=editId?DB.invoices.find(i=>i.id===editId):null;
+  _deliveryDateTouched=!!(editing && editing.deliveryDate && editing.deliveryDate!==editing.date);
   lineItems=editing?editing.lines.map(l=>({...l})):[{description:'',acct:'',ingredient:'',qty:1,unitCost:0,total:0}];
   const era=editing?.era||ERA.DC;
   const vendorOpts=[...DB.vendors.filter(v=>v.active)].sort((a,b)=>a.name.localeCompare(b.name)).map(v=>`<option value="${v.id}" ${editing?.vendorId===v.id?'selected':''}>${v.name}</option>`).join('');
@@ -4486,7 +4552,8 @@ function openInvoiceModal(editId){
       <div class="form-grid" style="margin-bottom:14px">
         <div class="form-group"><label>Vendor *</label><select id="inv-vendor" onchange="onVendorChange(this.value)"><option value="">Select vendor…</option>${vendorOpts}</select></div>
         <div class="form-group"><label>Vendor Invoice #</label><input id="inv-num" placeholder="e.g. 102455" value="${editing?.invoiceNum||''}"></div>
-        <div class="form-group"><label>Invoice Date *</label><input type="date" id="inv-date" value="${editing?.date||todayStr()}" onchange="autoEraFromDate(this.value)"></div>
+        <div class="form-group"><label>Invoice Date *</label><input type="date" id="inv-date" value="${editing?.date||todayStr()}" onchange="autoEraFromDate(this.value);syncDeliveryDate(this.value)"></div>
+        <div class="form-group"><label>Delivered / Received Date</label><input type="date" id="inv-delivery" value="${editing?.deliveryDate||editing?.date||todayStr()}" onchange="_deliveryDateTouched=true"><span class="form-hint">Defaults to Invoice Date — set this when goods arrived weeks before/after the vendor's invoice.</span></div>
         <div class="form-group"><label>Due Date</label><input type="date" id="inv-due" value="${editing?.dueDate||''}"></div>
         <div class="form-group span-2">
           <label>Era — Who is responsible?</label>
@@ -4559,7 +4626,7 @@ async function runInvoiceExtraction(file){
     ?[{type:'document',source:{type:'base64',media_type:'application/pdf',data:b64}},{type:'text',text:'Extract invoice data as JSON.'}]
     :[{type:'image',source:{type:'base64',media_type:mediaType,data:b64}},{type:'text',text:'Extract invoice data as JSON.'}];
 
-  const sysPrompt='You are an invoice parser for a coffee shop. Extract all line items and return ONLY valid JSON (no markdown, no backticks) with this structure: {"invoice_date":"YYYY-MM-DD","vendor":"string","invoice_number":"string","invoice_tax_total":number,"lines":[{"raw_description":"string","matched_ingredient":"string or null","match_confidence":"exact|fuzzy|none","quantity":number,"unit":"string","unit_price":number,"line_total":number,"tax":number,"notes":"string or null"}]}. "quantity" is the actual number of units/cases received, as a plain number — some invoices show it as a single count, others as "cases / units" (e.g. "0 / 1" means 0 cases + 1 unit = 1 total); always sum to one number, never return the raw string. "unit_price" and "line_total" are the PRE-TAX price and quantity×price for that line, even if the invoice\'s printed total column for that line includes tax. "tax" is the tax amount charged on that specific line as printed (0 if none, or if tax is not broken out per line). "invoice_tax_total" is the total tax shown for the whole invoice near its subtotal/total (0 if none shown). Known ingredients: '+loadIngredients().map(i=>i.name).join(', ')+'. Match each line to the closest ingredient. exact=close name match, fuzzy=partial, none=no match. Return ONLY the JSON object.';
+  const sysPrompt='You are an invoice parser for a coffee shop. Extract all line items and return ONLY valid JSON (no markdown, no backticks) with this structure: {"invoice_date":"YYYY-MM-DD","delivery_date":"YYYY-MM-DD or null","vendor":"string","invoice_number":"string","invoice_tax_total":number,"lines":[{"raw_description":"string","matched_ingredient":"string or null","match_confidence":"exact|fuzzy|none","quantity":number,"unit":"string","unit_price":number,"line_total":number,"tax":number,"notes":"string or null"}]}. "quantity" is the actual number of units/cases received, as a plain number — some invoices show it as a single count, others as "cases / units" (e.g. "0 / 1" means 0 cases + 1 unit = 1 total); always sum to one number, never return the raw string. "unit_price" and "line_total" are the PRE-TAX price and quantity×price for that line, even if the invoice\'s printed total column for that line includes tax. "tax" is the tax amount charged on that specific line as printed (0 if none, or if tax is not broken out per line). "invoice_tax_total" is the total tax shown for the whole invoice near its subtotal/total (0 if none shown). "delivery_date" is when the goods actually arrived, which can be weeks after the invoice date — look for notes like "Roasted on 9/16/2026. Delivered on 9/17/2026", "This order was roasted and delivered on 1/21/2026", or "This roast is for 12/31/2025". Use the delivered date if the notes give one; otherwise use the roast date; otherwise null. Known ingredients: '+loadIngredients().map(i=>i.name).join(', ')+'. Match each line to the closest ingredient. exact=close name match, fuzzy=partial, none=no match. Return ONLY the JSON object.';
 
   try{
     const resp=await fetch(ANTHROPIC_ENDPOINT,{
@@ -4590,12 +4657,32 @@ async function runInvoiceExtraction(file){
       const match=DB.vendors.find(v=>v.name.toLowerCase().includes(parsed.vendor.toLowerCase())||parsed.vendor.toLowerCase().includes(v.name.toLowerCase()));
       if(match&&vendorEl){vendorEl.value=match.id;onVendorChange(match.id,false)}
     }
+    const delEl=$('inv-delivery');
+    if(delEl && !_deliveryDateTouched){
+      if(parsed.delivery_date) delEl.value=parsed.delivery_date;
+      else if(parsed.invoice_date) delEl.value=parsed.invoice_date;
+    }
     lineItems=(parsed.lines||[]).map(l=>{
       const rule=DB.rules.find(r=>l.raw_description&&l.raw_description.toLowerCase().includes(r.match.toLowerCase()));
-      const ingredient=rule?rule.ingredient:(l.matched_ingredient&&l.match_confidence!=='none'?l.matched_ingredient:'');
+      let ingredient=rule?rule.ingredient:(l.matched_ingredient&&l.match_confidence!=='none'?l.matched_ingredient:'');
+      // Never let a 12 oz retail bag land on a bulk (5 lb unit) ingredient --
+      // fall back to the AI's own suggestion only if that one isn't bulk too,
+      // otherwise leave it blank for the user to pick the retail ingredient.
+      if(ingredient && is12ozBagDesc(l.raw_description) && isFiveLbIngredient(ingredient)){
+        const aiIng=(l.matched_ingredient&&l.match_confidence!=='none')?loadIngredients().find(i=>i.name===l.matched_ingredient):null;
+        ingredient=(aiIng && aiIng.unit==='ea' && !isFiveLbIngredient(aiIng.name))?aiIng.name:'';
+      }
       const ing=ingredient?loadIngredients().find(i=>i.name===ingredient):null;
       const suggestedAcct=ing?CAT_GL[ing.cat]||'1440':'';
-      return{description:l.raw_description||'',acct:suggestedAcct,ingredient:ingredient||'',unit:l.unit||'',qty:l.quantity||1,unitCost:l.unit_price||0,total:l.line_total||((l.quantity||1)*(l.unit_price||0)),lineTax:Math.round((l.tax||0)*100)/100};
+      const line={description:l.raw_description||'',acct:suggestedAcct,ingredient:ingredient||'',unit:l.unit||'',qty:l.quantity||1,unitCost:l.unit_price||0,total:l.line_total||((l.quantity||1)*(l.unit_price||0)),lineTax:Math.round((l.tax||0)*100)/100};
+      if(ingredient && isFiveLbIngredient(ingredient)){
+        const norm=normalizeBulkLine(l);
+        if(norm){
+          line.qty=norm.qty; line.unitCost=norm.unitCost; line.total=l.line_total||((l.quantity||1)*(l.unit_price||0));
+          line.srcQty=norm.srcQty; line.srcUnit=norm.srcUnit; line.srcUnitPrice=norm.srcUnitPrice; line.normNote=norm.normNote;
+        }
+      }
+      return line;
     });
     if(lineItems.length===0)lineItems=[{description:'',acct:'',ingredient:'',qty:1,unitCost:0,total:0}];
 
@@ -4659,6 +4746,21 @@ function buildIngOptions(selectedName){
   return '<option value="">— no ingredient —</option>'+ings.map(i=>`<option value="${i.name}" ${i.name===(selectedName||'')?'selected':''}>${i.name} (${i.cat})</option>`).join('');
 }
 
+function bulkWarnText(i){
+  const line=lineItems[i];
+  const qty=line.qty||0;
+  if(line.ingredient && isFiveLbIngredient(line.ingredient) && qty>BULK_QTY_WARN_THRESHOLD){
+    return 'Qty is in 5 lb units — '+qty+' here means '+(qty*5).toFixed(1)+' lb. Did you enter pounds?';
+  }
+  return '';
+}
+function updateBulkWarn(i){
+  const el=$('bulk-warn-'+i);if(!el)return;
+  const t=bulkWarnText(i);
+  el.textContent=t;el.style.display=t?'block':'none';
+}
+function toggleBulk12ozOverride(i,checked){ lineItems[i].bulk12ozOverride=checked; }
+
 function renderLineItems(){
   const body=$('line-items-body');if(!body)return;
   body.innerHTML=lineItems.map((line,i)=>{
@@ -4675,6 +4777,20 @@ function renderLineItems(){
       :autoMatch
       ?`<div style="padding:8px 10px;background:var(--amber-lo);border:1px solid #E0B87A;border-radius:var(--r);font-size:11px;color:var(--amber);cursor:pointer" onclick="applyAutoMatch(${i},'${autoMatch.ingredient}')">⚡ apply: ${autoMatch.ingredient}</div>`
       :`<div style="padding:8px 10px;color:var(--ink-lo);font-size:12px;text-align:center">—</div>`;
+    // Bulk (5 lb unit) ingredient hints under the qty input -- conversion
+    // audit note, a generic "confirm units" nudge when nothing converted it,
+    // or a hard block + override when a 12 oz bag landed on a bulk ingredient.
+    const isBulk=line.ingredient&&isFiveLbIngredient(line.ingredient);
+    const is12oz=is12ozBagDesc(line.description);
+    let bulkStaticNote='';
+    if(isBulk&&is12oz){
+      bulkStaticNote=`<div style="font-size:10px;color:var(--red);margin-top:2px">12 oz bag mapped to bulk beans — use the retail bag ingredient.<br><label style="font-weight:400;cursor:pointer"><input type="checkbox" ${line.bulk12ozOverride?'checked':''} onchange="toggleBulk12ozOverride(${i},this.checked)" style="margin-right:4px;vertical-align:middle">Override</label></div>`;
+    }else if(isBulk&&line.normNote){
+      bulkStaticNote=`<div style="font-size:10px;color:var(--inv);margin-top:2px">${line.normNote}</div>`;
+    }else if(isBulk&&line.normNote===undefined){
+      bulkStaticNote=`<div style="font-size:10px;color:var(--amber);margin-top:2px">Bulk ingredient — confirm qty is in 5 lb units.</div>`;
+    }
+    const bulkWarn=bulkWarnText(i);
     return`<div class="line-item-row${line.ingredient?' has-ingredient':''}" id="line-row-${i}">
       <input placeholder="Description from invoice" value="${line.description||''}"
         oninput="lineItems[${i}].description=this.value;autoMatchIngredient(${i},this.value)">
@@ -4687,7 +4803,11 @@ function renderLineItems(){
           ${buildIngOptions(line.ingredient||"")}
         </select>
       </div>
-      <input type="number" min="0" step="any" value="${line.qty||1}" oninput="lineItems[${i}].qty=+this.value;updateLineTotal(${i});updateConvQty(${i})">
+      <div style="display:flex;flex-direction:column;gap:2px">
+        <input type="number" min="0" step="any" value="${line.qty||1}" oninput="lineItems[${i}].qty=+this.value;updateLineTotal(${i});updateConvQty(${i});updateBulkWarn(${i})">
+        ${bulkStaticNote}
+        <div id="bulk-warn-${i}" style="font-size:10px;color:var(--amber);margin-top:2px;display:${bulkWarn?'block':'none'}">${bulkWarn}</div>
+      </div>
       ${convQtyCell}
       <input type="number" min="0" step="0.01" value="${line.unitCost||''}" placeholder="0.00" oninput="lineItems[${i}].unitCost=+this.value;updateLineTotal(${i})">
       <div class="line-total" id="lt-${i}">${fmt((line.qty||1)*(line.unitCost||0))}</div>
@@ -4747,6 +4867,7 @@ function removeLine(i){if(lineItems.length===1)return;lineItems.splice(i,1);rend
 
 async function saveInvoice(editId){
   const vendorId=$('inv-vendor').value,date=$('inv-date').value,dueDate=$('inv-due').value;
+  const deliveryDate=$('inv-delivery')?.value||date;
   const memo=$('inv-memo').value.trim(),invoiceNum=$('inv-num').value.trim(),era=$('era-val').value||ERA.DC;
   const errEl=$('inv-err');
   if(!vendorId){errEl.textContent='Select a vendor.';showToast('Select a vendor — nothing was saved.');return}
@@ -4767,8 +4888,27 @@ async function saveInvoice(editId){
     showToast('"'+desc+'" needs a GL account — nothing was saved.');
     return;
   }
-  const lines=lineItems.map(l=>({...l,total:(l.qty||1)*(l.unitCost||0)}));
-  const subtotal=lines.reduce((s,l)=>s+l.total,0);
+  // A 12 oz retail bag can never post to a bulk (5 lb unit) ingredient --
+  // block save until the user picks the retail ingredient or explicitly
+  // overrides (the description can genuinely be wrong).
+  const badBulkIdx=lineItems.findIndex(l=>l.ingredient&&isFiveLbIngredient(l.ingredient)&&is12ozBagDesc(l.description)&&!l.bulk12ozOverride);
+  if(badBulkIdx>-1){
+    const desc=lineItems[badBulkIdx].description||('line '+(badBulkIdx+1));
+    errEl.textContent='"'+desc+'" is a 12 oz bag mapped to a bulk ingredient — pick the retail bag ingredient or check Override.';
+    const rowEl=document.getElementById('line-row-'+badBulkIdx);
+    if(rowEl){rowEl.scrollIntoView({behavior:'smooth',block:'center'});rowEl.style.outline='2px solid var(--red)';rowEl.style.outlineOffset='2px';setTimeout(()=>{rowEl.style.outline=''},2500);}
+    showToast('"'+desc+'" needs a retail ingredient or an Override — nothing was saved.');
+    return;
+  }
+  // Implausibly large bulk qty (likely lb entered instead of 5 lb units) --
+  // confirm rather than block, since large legitimate orders do happen.
+  const implausibleBulk=lineItems.filter(l=>l.ingredient&&isFiveLbIngredient(l.ingredient)&&(l.qty||0)>BULK_QTY_WARN_THRESHOLD);
+  if(implausibleBulk.length){
+    const msg=implausibleBulk.map(l=>'"'+(l.description||l.ingredient)+'": '+l.qty+' (5 lb units) = '+(l.qty*5).toFixed(1)+' lb').join('\n');
+    if(!confirm('Qty is in 5 lb units -- did you enter pounds?\n\n'+msg+'\n\nSave anyway?'))return;
+  }
+  const lines=lineItems.map(l=>({...l,total:round2((l.qty||1)*(l.unitCost||0))}));
+  const subtotal=round2(lines.reduce((s,l)=>s+l.total,0));
   const vName=vendorName(vendorId);
 
   const dup=findDuplicateInvoice(vendorId,invoiceNum,editId,{date,total:subtotal});
@@ -4784,7 +4924,7 @@ async function saveInvoice(editId){
     // Remove old FIFO layers for this invoice from Supabase
     await _sb.from('fifo_deliveries').delete().eq('ap_invoice_id', editId);
     DB.fifo=DB.fifo.filter(d=>d.apInvoiceId!==editId);
-    Object.assign(inv,{vendorId,invoiceNum,date,dueDate,memo,era,lines,subtotal,tax:0,total:subtotal,balance:subtotal-paid});
+    Object.assign(inv,{vendorId,invoiceNum,date,dueDate,deliveryDate,memo,era,lines,subtotal,tax:0,total:subtotal,balance:subtotal-paid});
     await saveInvoiceToSB(inv);
     // Remove old GL entries for this invoice
     await _sb.from('gl_entries').delete().eq('ref', editId);
@@ -4793,7 +4933,7 @@ async function saveInvoice(editId){
     fifoOk=await writeFIFOLayers(inv);
   }else{
     const id=await nextInvId();
-    const inv={id,vendorId,invoiceNum,date,dueDate,memo,era,lines,subtotal,tax:0,total:subtotal,amountPaid:0,balance:subtotal,status:'open',glPosted:true};
+    const inv={id,vendorId,invoiceNum,date,dueDate,deliveryDate,memo,era,lines,subtotal,tax:0,total:subtotal,amountPaid:0,balance:subtotal,status:'open',glPosted:true};
     await saveInvoiceToSB(inv);
     glOk=await postInvoiceGL(inv);
     fifoOk=await writeFIFOLayers(inv);
@@ -4844,7 +4984,7 @@ async function writeFIFOLayers(inv){
     const convertedQty=invoiceQty*multiplier;
     const layer={
       id:String(Date.now()+Math.random()),
-      date:inv.date,
+      date:inv.deliveryDate||inv.date,
       ingredient:line.ingredient,
       category:ing.cat,
       qty:convertedQty,
@@ -4874,7 +5014,12 @@ async function postInvoiceGL(inv){
     entries.push({acct:'1300',name:'Receivable — Prior Owner (Troy)',dr:inv.total,cr:0});
     entries.push({acct:'2000',name:'Accounts Payable',dr:0,cr:inv.total});
   }
-  const je={id:await nextGLId(),date:inv.date,ref:inv.id,era,memo:'A/P accrual'+(era==='troy'?' (Troy-era)':era==='dc-paid'?' (DC paid for Troy)':'')+' — '+vendorName(inv.vendorId)+' '+(inv.invoiceNum||inv.id),entries};
+  // Owner decision (10/25/26): inventory, expense and the payable are
+  // recognized when goods are delivered, not whatever date the vendor
+  // prints on the invoice, so the asset and the liability land in the
+  // same period. Falls back to the invoice date when no delivery date
+  // was entered (e.g. non-coffee vendors).
+  const je={id:await nextGLId(),date:inv.deliveryDate||inv.date,ref:inv.id,era,memo:'A/P accrual'+(era==='troy'?' (Troy-era)':era==='dc-paid'?' (DC paid for Troy)':'')+' — '+vendorName(inv.vendorId)+' '+(inv.invoiceNum||inv.id),entries};
   return await saveGLToSB(je);
 }
 
