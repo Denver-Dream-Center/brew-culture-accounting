@@ -671,7 +671,7 @@ async function sbInsert(table, records) {
 async function loadAllData() {
   showLoadingOverlay('Loading your data...');
   try {
-    const [vendors, invoices, payments, gl, fifo, rules,
+    const [vendors, invoices, payments, gl, fifo, rules, accounts,
            ingredients, recipes, pastryLog, pastrySkus,
            employees, employeePayRates, employeeStatusHistory, shiftLog,
            payrollRuns, payrollRunEmployees, payrollRunLineItems, purchaseOrders] = await Promise.all([
@@ -681,6 +681,7 @@ async function loadAllData() {
       sbGet('gl_entries', {order:'entry_date', asc:false}),
       sbGet('fifo_deliveries', {order:'delivery_date', asc:false}),
       sbGet('fifo_rules'),
+      sbGet('accounts', {order:'acct'}),
       sbGet('ingredients', {order:'name'}),
       sbGet('recipes', {order:'menu_item'}),
       sbGet('pastry_log', {order:'log_date', asc:false}),
@@ -702,6 +703,12 @@ async function loadAllData() {
     DB.gl = gl.map(mapGLFromDB);
     DB.fifo = fifo.map(mapFIFOFromDB);
     DB.rules = rules;
+    // Chart of accounts is database-driven (see getCOA()/acctLabel()); the
+    // hardcoded COA array below is kept only as a fallback if this load
+    // fails or comes back empty, so the app stays usable either way.
+    DB.accounts = accounts.map(a=>({acct:a.acct, name:a.name, type:a.type, active:a.active!==false, createdAt:a.created_at}));
+    DB.accountsLoadFailed = accounts.length === 0;
+    warnOnMissingAccounts();
     DB.ingredients = ingredients.map(function(i){return{name:i.name,unit:i.unit,cat:i.cat,notes:i.notes,active:i.active}});
     DB.recipes = recipes.map(function(r){return{menu_item:r.menu_item,category:r.category,sale_price:r.sale_price,ingredient_name:r.ingredient_name,quantity:r.quantity,unit:r.unit}});
     DB.pastryLog = pastryLog.map(mapPastryLogFromDB);
@@ -1125,7 +1132,51 @@ const todayStr=()=>new Date().toISOString().slice(0,10);
 const isOverdue=inv=>inv.status!=='paid'&&inv.status!=='void'&&inv.dueDate&&inv.dueDate<todayStr();
 const daysUntilDue=inv=>{if(!inv.dueDate)return null;return Math.ceil((new Date(inv.dueDate+'T12:00:00')-new Date())/86400000)};
 const vendorName=id=>{const v=DB.vendors.find(x=>x.id===id);return v?v.name:id};
-const acctLabel=c=>{const a=COA.find(x=>x.acct===c);return a?`${c} · ${a.name}`:c};
+// ═══════════════════════════════════════════════
+// CHART OF ACCOUNTS — database-driven, with the hardcoded COA array kept
+// only as a fallback if the accounts table fails to load or is empty.
+// ═══════════════════════════════════════════════
+function getCOA(opts){
+  opts=opts||{};
+  var list=(DB.accounts&&DB.accounts.length)?DB.accounts:COA;
+  if(!opts.includeInactive) list=list.filter(function(a){ return a.active!==false; });
+  return list.slice().sort(function(a,b){ return a.acct.localeCompare(b.acct); });
+}
+function acctName(acct){
+  var a=getCOA({includeInactive:true}).find(function(x){ return x.acct===acct; });
+  return a?a.name:null;
+}
+const acctLabel=c=>{const n=acctName(c);return n?(c+' · '+n):(c+' · (not in chart)')};
+// Dropdown options for a GL-account select. `selected` is a single acct
+// code or an array (for multi-selects). Always offers active accounts,
+// plus any inactive account(s) already selected -- marked "(inactive)" --
+// so an existing record keeps showing and saving correctly.
+function acctOptionsHtml(selected,filterFn){
+  var selList=Array.isArray(selected)?selected:(selected?[selected]:[]);
+  var active=getCOA().filter(filterFn||function(){return true});
+  var activeAccts=active.map(function(a){return a.acct});
+  var extra=getCOA({includeInactive:true}).filter(function(a){
+    return a.active===false && selList.indexOf(a.acct)>-1 && activeAccts.indexOf(a.acct)===-1;
+  });
+  var all=active.concat(extra).sort(function(a,b){ return a.acct.localeCompare(b.acct); });
+  return all.map(function(a){
+    return '<option value="'+a.acct+'"'+(selList.indexOf(a.acct)>-1?' selected':'')+'>'+a.acct+' · '+a.name+(a.active===false?' (inactive)':'')+'</option>';
+  }).join('');
+}
+// CAT_GL, VENDOR_DEFAULTS and BL_DIRECT_ACCT_MAP stay hardcoded (Admin
+// Module item, out of scope here) -- but every account they point at must
+// still exist in the chart, so warn once at load if one doesn't.
+function warnOnMissingAccounts(){
+  var known={};
+  getCOA({includeInactive:true}).forEach(function(a){ known[a.acct]=true; });
+  var refs={};
+  Object.values(CAT_GL).forEach(function(a){ refs[a]=true; });
+  Object.values(VENDOR_DEFAULTS).forEach(function(arr){ arr.forEach(function(a){ refs[a]=true; }); });
+  if(typeof BL_DIRECT_ACCT_MAP!=='undefined') Object.values(BL_DIRECT_ACCT_MAP).forEach(function(a){ refs[a]=true; });
+  Object.keys(refs).forEach(function(a){
+    if(!known[a]) console.warn('Account '+a+' is referenced by CAT_GL/VENDOR_DEFAULTS/BL_DIRECT_ACCT_MAP but is missing from the chart of accounts.');
+  });
+}
 function inferStatus(inv){if(inv.status==='void')return'void';if(inv.amountPaid<=0)return isOverdue(inv)?'overdue':'open';if(inv.amountPaid>=inv.total)return'paid';return'partial'}
 function badgeHtml(s){const c={open:'badge-open',partial:'badge-partial',paid:'badge-paid',void:'badge-void',overdue:'badge-overdue'};return`<span class="badge ${c[s]||'badge-open'}">${s.charAt(0).toUpperCase()+s.slice(1)}</span>`}
 function eraPill(e){const cfg={dc:['era-dc','● DC'],troy:['era-troy','◇ Troy'],'dc-paid':['era-dc-paid','↑ DC→Troy'],mixed:['era-mixed','◐ Mixed']};const[cls,lbl]=cfg[e]||['era-dc','DC'];return`<span class="era-pill ${cls}">${lbl}</span>`}
@@ -1239,6 +1290,7 @@ function renderSidebar(){
       '<div class="sidebar-section">Accounting</div>' +
       '<button class="nav-item" onclick="showView(\'gl\')" id="nav-gl"><span class="nav-icon">&#8862;</span> GL Entries</button>' +
       '<button class="nav-item" onclick="showView(\'trial-balance\')" id="nav-trial-balance"><span class="nav-icon">&#8801;</span> Trial Balance</button>' +
+      '<button class="nav-item" onclick="showView(\'chart-of-accounts\')" id="nav-chart-of-accounts"><span class="nav-icon">&#9776;</span> Chart of Accounts</button>' +
       '<button class="nav-item" onclick="showView(\'troy\')" id="nav-troy"><span class="nav-icon">&#9671;</span> 1300 \xb7 Troy Recv.</button>' +
       '<button class="nav-item" onclick="showView(\'bank-ledger\')" id="nav-bank-ledger"><span class="nav-icon">&#8942;</span> Bank Ledger</button>' +
       '<button class="nav-item" onclick="openJEModal()"><span class="nav-icon">&#10022;</span> Journal Entry</button>' +
@@ -3485,6 +3537,7 @@ function showView(view){
     payments:['Payments','Payment history'],
     gl:['GL Entries','Journal entries — all eras'],
     'trial-balance':['Trial Balance','All GL accounts \xb7 debit and credit totals'],
+    'chart-of-accounts':['Chart of Accounts','Every account \xb7 type \xb7 balance \xb7 activity'],
     troy:['1300 · Troy Receivable','Prior owner balance ledger'],
     fifo:['FIFO Deliveries','Inventory delivery log'],
     rules:['Matching Rules','Vendor product \u2192 ingredient mapping'],
@@ -3515,7 +3568,7 @@ function showView(view){
   var navEl=$('nav-'+view);if(navEl)navEl.classList.add('active');
   const renders={
     dashboard:renderDashboard,invoices:renderInvoices,vendors:renderVendors,
-    payments:renderPayments,gl:renderGL,'trial-balance':renderTrialBalance,troy:renderTroy,fifo:renderFIFO,
+    payments:renderPayments,gl:renderGL,'trial-balance':renderTrialBalance,'chart-of-accounts':renderChartOfAccounts,troy:renderTroy,fifo:renderFIFO,
     rules:renderRules,ingredients:renderIngredients,recipes:renderRecipes,
     ordering:renderOrdering,'ordering-new':renderOrderingNew,
     'pastry-close':renderPastryClose,'pastry-tracker':renderPastryTracker,
@@ -3803,7 +3856,7 @@ function renderTrialBalance(){
   const typeLabel={Asset:'Assets',Liability:'Liabilities',Equity:'Equity',Revenue:'Revenue',Expense:'Expenses'};
   let grandDr=0,grandCr=0;
   const sections=typeOrder.map(type=>{
-    const accts=COA.filter(a=>a.type===type&&totals[a.acct]&&(totals[a.acct].dr>0.004||totals[a.acct].cr>0.004));
+    const accts=getCOA({includeInactive:true}).filter(a=>a.type===type&&totals[a.acct]&&(totals[a.acct].dr>0.004||totals[a.acct].cr>0.004));
     if(accts.length===0)return'';
     let secDr=0,secCr=0;
     const rows=accts.map(a=>{
@@ -3840,6 +3893,218 @@ function renderTrialBalance(){
         <span style="font-size:13px;font-weight:700;color:${balanced?'var(--green)':'var(--red)'}">${balanced?'✓ Balanced':'Out of balance by '+fmt(Math.abs(diff))}</span>
       </div>
     </div></div>`;
+}
+
+// ═══════════════════════════════════════════════
+// CHART OF ACCOUNTS — read-only. The owner adds/changes accounts only by
+// asking Claude to write to the `accounts` table directly (enforced by RLS
+// too, not just by leaving create/edit/delete buttons out of this tab).
+// ═══════════════════════════════════════════════
+let coaFilter={q:'',type:'all',showInactive:false,asOf:todayStr()};
+
+// Per-account GL activity: dr/cr are summed only through `asOf` (matching
+// Trial Balance's "balance as of" semantics); lines/lastDate/glName are
+// all-time regardless of asOf, since those describe the account itself.
+function acctActivitySummary(asOf){
+  const m={};
+  DB.gl.forEach(je=>je.entries.forEach(e=>{
+    if(!m[e.acct])m[e.acct]={dr:0,cr:0,lines:0,lastDate:null,glName:e.name};
+    m[e.acct].lines++;
+    if(!m[e.acct].lastDate||je.date>m[e.acct].lastDate)m[e.acct].lastDate=je.date;
+    m[e.acct].glName=e.name;
+    if(!asOf||je.date<=asOf){m[e.acct].dr+=e.dr||0;m[e.acct].cr+=e.cr||0}
+  }));
+  return m;
+}
+
+// Best-effort link from a GL ref to the source record, only where the app
+// already has a view for it -- otherwise the ref is shown as plain text.
+function refLink(ref){
+  if(!ref)return null;
+  if(DB.invoices.some(i=>i.id===ref))return{label:ref,onclick:`viewInvoice('${ref}')`};
+  const pmt=DB.payments.find(p=>p.id===ref);
+  if(pmt)return{label:ref,onclick:`viewInvoice('${pmt.invoiceId}')`};
+  if(/-VOID$/.test(ref)){
+    const baseId=ref.replace(/-VOID$/,'');
+    if(DB.invoices.some(i=>i.id===baseId))return{label:ref,onclick:`viewInvoice('${baseId}')`};
+  }
+  const blMatch=/^(?:DIRECT|REV-VAR)-(.+)$/.exec(ref);
+  if(blMatch && REV.bankLedger && REV.bankLedger.some(r=>r.id===blMatch[1]))return{label:ref,onclick:`openBankLedgerModal('${blMatch[1]}')`};
+  const bm=REV.bankMatches&&REV.bankMatches.find(m=>m.id===ref);
+  if(bm)return{label:ref,onclick:`openBankLedgerModal('${bm.bank_ledger_id}')`};
+  return null;
+}
+function refCellHtml(ref){
+  const rl=refLink(ref);
+  return rl?`<a href="#" onclick="${rl.onclick};return false" style="color:var(--inv)">${rl.label}</a>`:(ref||'—');
+}
+
+function renderChartOfAccounts(){
+  $('topbar-actions').innerHTML=`<button class="btn btn-secondary" onclick="downloadCOA_CSV()">⬇ Download CSV</button>`;
+  const failBanner=DB.accountsLoadFailed?`<div class="alert" style="background:var(--red-lo);border:1px solid var(--red);color:var(--red);margin-bottom:16px">Chart of accounts failed to load — showing built-in list.</div>`:'';
+  const asOf=coaFilter.asOf||todayStr();
+  const activity=acctActivitySummary(asOf);
+  const accts=getCOA({includeInactive:true});
+
+  // Integrity panel: any code gl_entries actually uses that isn't in the chart.
+  const knownAccts={};accts.forEach(a=>{knownAccts[a.acct]=true});
+  const orphaned=Object.keys(activity).filter(a=>!knownAccts[a]).sort();
+  const integrityHtml=orphaned.length?`<div class="alert" style="background:var(--red-lo);border:1px solid var(--red);color:var(--red);margin-bottom:16px">
+    <strong>GL uses accounts not in the chart</strong>
+    <table style="width:100%;margin-top:8px"><thead><tr><th style="text-align:left;font-size:11px">Acct</th><th style="text-align:left;font-size:11px">Name (from GL)</th><th style="text-align:right;font-size:11px">Lines</th><th style="text-align:right;font-size:11px">Balance</th></tr></thead>
+    <tbody>${orphaned.map(a=>{const act=activity[a];return`<tr><td class="mono">${a}</td><td>${act.glName||'—'}</td><td class="text-right mono">${act.lines}</td><td class="text-right mono">${fmt(act.dr-act.cr)}</td></tr>`}).join('')}</tbody></table>
+    <div style="margin-top:6px;font-size:12px">Ask Claude to add ${orphaned.length===1?'this account':'these accounts'} to the chart.</div>
+  </div>`:'';
+
+  // Header tiles: count by type, plus inactive count.
+  const typeOrder=['Asset','Liability','Equity','Revenue','Expense'];
+  const typeCounts={};typeOrder.forEach(t=>{typeCounts[t]=accts.filter(a=>a.type===t&&a.active!==false).length});
+  const inactiveCount=accts.filter(a=>a.active===false).length;
+  const tilesHtml=`<div class="tiles" style="grid-template-columns:repeat(6,1fr);margin-bottom:16px">`+
+    typeOrder.map(t=>`<div class="tile"><div class="tile-label">${t}</div><div class="tile-val">${typeCounts[t]}</div></div>`).join('')+
+    `<div class="tile ${inactiveCount>0?'amber':''}"><div class="tile-label">Inactive</div><div class="tile-val">${inactiveCount}</div></div>`+
+  `</div>`;
+
+  // Filter bar
+  const filterHtml=`<div class="card" style="margin-bottom:16px"><div class="card-body" style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+    <input id="coa-search" placeholder="Search number or name…" value="${coaFilter.q||''}" oninput="coaFilter.q=this.value;renderChartOfAccounts()" style="flex:1;min-width:180px;padding:8px 10px;border:1px solid var(--border);border-radius:var(--r);font-size:13px">
+    <select id="coa-type" onchange="coaFilter.type=this.value;renderChartOfAccounts()" style="padding:8px 10px;border:1px solid var(--border);border-radius:var(--r);font-size:13px">
+      <option value="all" ${coaFilter.type==='all'?'selected':''}>All types</option>
+      ${typeOrder.map(t=>`<option value="${t}" ${coaFilter.type===t?'selected':''}>${t}</option>`).join('')}
+    </select>
+    <label style="display:flex;align-items:center;gap:6px;font-size:13px"><input type="checkbox" ${coaFilter.showInactive?'checked':''} onchange="coaFilter.showInactive=this.checked;renderChartOfAccounts()">Show inactive</label>
+    <label style="display:flex;align-items:center;gap:6px;font-size:13px">As of <input type="date" value="${asOf}" onchange="coaFilter.asOf=this.value;renderChartOfAccounts()" style="padding:6px 10px;border:1px solid var(--border);border-radius:var(--r);font-size:13px"></label>
+  </div></div>`;
+
+  // Rows, grouped by type in fixed order, each with a subtotal.
+  const q=(coaFilter.q||'').toLowerCase().trim();
+  const visible=accts.filter(a=>{
+    if(!coaFilter.showInactive&&a.active===false)return false;
+    if(coaFilter.type!=='all'&&a.type!==coaFilter.type)return false;
+    if(q&&!(a.acct.toLowerCase().includes(q)||a.name.toLowerCase().includes(q)))return false;
+    return true;
+  });
+  const sections=typeOrder.map(type=>{
+    const rows=visible.filter(a=>a.type===type);
+    if(rows.length===0)return'';
+    const normalDebit=type==='Asset'||type==='Expense';
+    let subtotal=0;
+    const rowsHtml=rows.map(a=>{
+      const act=activity[a.acct]||{dr:0,cr:0,lines:0,lastDate:null};
+      const net=normalDebit?(act.dr-act.cr):(act.cr-act.dr);
+      subtotal+=net;
+      const isCogs=a.type==='Expense'&&a.acct.startsWith('5');
+      return`<tr style="cursor:pointer" onclick="openAccountActivityModal('${a.acct}')">
+        <td class="mono">${a.acct}</td>
+        <td>${a.name}</td>
+        <td>${a.type}${isCogs?' <span class="tag">COGS</span>':''}</td>
+        <td>${normalDebit?'Debit':'Credit'}</td>
+        <td class="text-right mono" style="color:${net<-0.004?'var(--red)':'var(--ink)'}">${fmt(net)}</td>
+        <td class="text-right mono">${act.lines}</td>
+        <td>${act.lastDate?fmtDate(act.lastDate):'—'}</td>
+        <td>${a.active===false?'<span class="badge" style="background:var(--border-lo);color:var(--ink-lo)">Inactive</span>':'<span class="badge badge-paid">Active</span>'}</td>
+        <td style="font-size:12px;color:var(--ink-mid)">${a.createdAt?fmtDate(a.createdAt.slice(0,10)):'—'}</td>
+      </tr>`;
+    }).join('');
+    return`<div class="card" style="margin-bottom:10px">
+      <div class="card-header" style="background:var(--bg)"><span class="card-title">${type}</span></div>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Acct</th><th>Name</th><th>Type</th><th>Normal Bal.</th><th class="text-right">Balance as of</th><th class="text-right">GL Lines</th><th>Last Activity</th><th>Status</th><th>Added</th></tr></thead>
+        <tbody>${rowsHtml}</tbody>
+        <tfoot><tr style="border-top:1px solid var(--border)"><td colspan="4" style="font-weight:600;padding:6px 12px">Subtotal — ${type}</td><td class="text-right mono fw600" style="padding:6px 12px">${fmt(subtotal)}</td><td colspan="4"></td></tr></tfoot>
+      </table></div>
+    </div>`;
+  }).join('');
+
+  $('content').innerHTML=failBanner+tilesHtml+integrityHtml+filterHtml+
+    (sections||'<div class="empty-state"><div class="empty-icon">⊞</div><div>No accounts match this filter</div></div>')+
+    `<div style="text-align:center;font-size:12px;color:var(--ink-lo);margin-top:12px">Accounts are maintained by Claude directly in the database. To add or change an account, ask Claude.</div>`;
+}
+
+function downloadCOA_CSV(){
+  const asOf=coaFilter.asOf||todayStr();
+  const activity=acctActivitySummary(asOf);
+  const q=(coaFilter.q||'').toLowerCase().trim();
+  const typeOrder=['Asset','Liability','Equity','Revenue','Expense'];
+  const rows=getCOA({includeInactive:true}).filter(a=>{
+    if(!coaFilter.showInactive&&a.active===false)return false;
+    if(coaFilter.type!=='all'&&a.type!==coaFilter.type)return false;
+    if(q&&!(a.acct.toLowerCase().includes(q)||a.name.toLowerCase().includes(q)))return false;
+    return true;
+  }).sort((a,b)=>typeOrder.indexOf(a.type)-typeOrder.indexOf(b.type)||a.acct.localeCompare(b.acct));
+  const csvEsc=s=>'"'+String(s==null?'':s).replace(/"/g,'""')+'"';
+  const header=['Acct','Name','Type','Normal Balance','Balance as of '+asOf,'GL Lines','Last Activity','Status','Added'];
+  const lines=[header.map(csvEsc).join(',')];
+  rows.forEach(a=>{
+    const act=activity[a.acct]||{dr:0,cr:0,lines:0,lastDate:null};
+    const normalDebit=a.type==='Asset'||a.type==='Expense';
+    const net=normalDebit?(act.dr-act.cr):(act.cr-act.dr);
+    lines.push([a.acct,a.name,a.type,normalDebit?'Debit':'Credit',net.toFixed(2),act.lines,act.lastDate||'',a.active===false?'Inactive':'Active',a.createdAt?a.createdAt.slice(0,10):''].map(csvEsc).join(','));
+  });
+  const blob=new Blob([lines.join('\n')],{type:'text/csv'});
+  const url=URL.createObjectURL(blob);const link=document.createElement('a');
+  link.href=url;link.download='chart-of-accounts-'+todayStr()+'.csv';link.click();URL.revokeObjectURL(url);
+}
+
+let coaActivityFilter={from:'',to:'',page:0};
+function openAccountActivityModal(acct){
+  coaActivityFilter={from:'',to:'',page:0};
+  const a=getCOA({includeInactive:true}).find(x=>x.acct===acct);
+  openModal(`<div class="modal" style="max-width:860px">
+    <div class="modal-header">
+      <div><div class="modal-title">${acct} · ${a?a.name:'(not in chart)'}</div><div class="modal-sub">Account activity — read-only</div></div>
+      <button class="close-btn" onclick="closeModal()">×</button>
+    </div>
+    <div class="modal-body">
+      <div style="display:flex;gap:10px;margin-bottom:12px">
+        <label style="font-size:12px">From <input type="date" id="coa-act-from" onchange="coaActivityFilter.from=this.value;coaActivityFilter.page=0;renderAccountActivity('${acct}')" style="padding:6px 10px;border:1px solid var(--border);border-radius:var(--r);font-size:13px"></label>
+        <label style="font-size:12px">To <input type="date" id="coa-act-to" onchange="coaActivityFilter.to=this.value;coaActivityFilter.page=0;renderAccountActivity('${acct}')" style="padding:6px 10px;border:1px solid var(--border);border-radius:var(--r);font-size:13px"></label>
+      </div>
+      <div id="coa-activity-body"></div>
+    </div>
+    <div class="modal-footer"><button class="btn btn-ghost" onclick="closeModal()">Close</button></div>
+  </div>`);
+  renderAccountActivity(acct);
+}
+function renderAccountActivity(acct){
+  const body=$('coa-activity-body');if(!body)return;
+  // Running balance reads oldest-first (chronological), then the page is
+  // sliced and reversed for display so the newest 100 show on top, as spec'd.
+  const all=[];
+  DB.gl.forEach(je=>{
+    if(coaActivityFilter.from&&je.date<coaActivityFilter.from)return;
+    if(coaActivityFilter.to&&je.date>coaActivityFilter.to)return;
+    je.entries.forEach(e=>{ if(e.acct===acct) all.push({date:je.date,id:je.id,ref:je.ref,memo:je.memo,dr:e.dr||0,cr:e.cr||0}); });
+  });
+  all.sort((x,y)=>x.date.localeCompare(y.date)||x.id.localeCompare(y.id));
+  let running=0;
+  const withRunning=all.map(l=>{running+=(l.dr-l.cr);return{...l,running}});
+  withRunning.reverse(); // newest first
+  const pageSize=100;
+  const start=coaActivityFilter.page*pageSize;
+  const pageRows=withRunning.slice(start,start+pageSize);
+  const rowsHtml=pageRows.map(l=>`<tr>
+    <td style="font-size:12px">${fmtDate(l.date)}</td>
+    <td class="mono" style="font-size:12px;color:var(--ink-mid)">${l.id}</td>
+    <td style="font-size:12px">${refCellHtml(l.ref)}</td>
+    <td style="font-size:12px">${l.memo||'—'}</td>
+    <td class="text-right mono" style="font-size:12px">${l.dr>0.004?fmt(l.dr):''}</td>
+    <td class="text-right mono" style="font-size:12px">${l.cr>0.004?fmt(l.cr):''}</td>
+    <td class="text-right mono fw600" style="font-size:12px">${fmt(l.running)}</td>
+  </tr>`).join('');
+  const totalPages=Math.max(1,Math.ceil(withRunning.length/pageSize));
+  body.innerHTML=`<div class="tbl-wrap"><table>
+    <thead><tr><th>Date</th><th>GL ID</th><th>Ref</th><th>Memo</th><th class="text-right">Debit</th><th class="text-right">Credit</th><th class="text-right">Running Balance</th></tr></thead>
+    <tbody>${rowsHtml||'<tr><td colspan="7" class="text-center" style="padding:24px;color:var(--ink-lo)">No activity in this range</td></tr>'}</tbody>
+  </table></div>
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px;font-size:12px;color:var(--ink-mid)">
+    <span>${withRunning.length} line${withRunning.length!==1?'s':''} total</span>
+    <div style="display:flex;gap:8px;align-items:center">
+      <button class="btn btn-ghost btn-sm" ${coaActivityFilter.page<=0?'disabled':''} onclick="coaActivityFilter.page--;renderAccountActivity('${acct}')">‹ Newer</button>
+      <span>Page ${coaActivityFilter.page+1} of ${totalPages}</span>
+      <button class="btn btn-ghost btn-sm" ${coaActivityFilter.page>=totalPages-1?'disabled':''} onclick="coaActivityFilter.page++;renderAccountActivity('${acct}')">Older ›</button>
+    </div>
+  </div>`;
 }
 
 // ═══════════════════════════════════════════════
@@ -4796,7 +5061,7 @@ function renderLineItems(){
         oninput="lineItems[${i}].description=this.value;autoMatchIngredient(${i},this.value)">
       <select id="acct-sel-${i}" onchange="lineItems[${i}].acct=this.value">
         <option value="">Account…</option>
-        ${COA.filter(a=>a.type!=='Liability'&&a.type!=='Equity'&&a.type!=='Revenue').map(a=>`<option value="${a.acct}" ${line.acct===a.acct?'selected':''}>${a.acct} · ${a.name}</option>`).join('')}
+        ${acctOptionsHtml(line.acct,a=>a.type!=='Liability'&&a.type!=='Equity'&&a.type!=='Revenue')}
       </select>
       <div class="ing-cell">
         <select id="ing-sel-${i}" onchange="lineItems[${i}].ingredient=this.value;onIngredientChange(${i})">
@@ -5008,7 +5273,7 @@ async function postInvoiceGL(inv){
   const era=inv.era||ERA.DC;const entries=[];
   const byAcct={};inv.lines.forEach(l=>{byAcct[l.acct]=(byAcct[l.acct]||0)+l.total});
   if(era===ERA.DC){
-    Object.entries(byAcct).forEach(([acct,amt])=>{const a=COA.find(x=>x.acct===acct);entries.push({acct,name:a?.name||acct,dr:amt,cr:0})});
+    Object.entries(byAcct).forEach(([acct,amt])=>{entries.push({acct,name:acctName(acct)||acct,dr:amt,cr:0})});
     entries.push({acct:'2000',name:'Accounts Payable',dr:0,cr:inv.total});
   }else{
     entries.push({acct:'1300',name:'Receivable — Prior Owner (Troy)',dr:inv.total,cr:0});
@@ -5050,7 +5315,7 @@ function openPaymentModal(invoiceId){
       <div class="form-group"><label>Amount *</label><input type="number" id="pmt-amount" min="0.01" step="0.01" placeholder="0.00" value="${pre?pre.balance.toFixed(2):''}"></div>
       <div class="form-group"><label>Method</label><select id="pmt-method"><option>ACH</option><option>Check</option><option>Credit Card</option><option>Cash</option><option>Payroll Deduction</option><option>Other</option></select></div>
       <div class="form-group"><label>Reference / Check #</label><input id="pmt-ref" placeholder="ACH trace, check #…"></div>
-      <div class="form-group"><label>Cash Account</label><select id="pmt-cash">${COA.filter(a=>a.acct.startsWith('1')&&a.acct!=='1300'&&a.acct!=='1015'&&a.acct!=='1016'&&a.acct!=='1017').map(a=>`<option value="${a.acct}" ${a.acct==='1010'?'selected':''}>${a.acct} · ${a.name}</option>`).join('')}</select></div>
+      <div class="form-group"><label>Cash Account</label><select id="pmt-cash">${acctOptionsHtml('1010',a=>a.acct.startsWith('1')&&a.acct!=='1300'&&a.acct!=='1015'&&a.acct!=='1016'&&a.acct!=='1017')}</select></div>
       <div class="form-group span-2"><label>Memo</label><input id="pmt-memo" placeholder="Payment notes…"></div>
     </div>
     <div id="pmt-preview" style="margin-top:8px"></div></div>
@@ -5094,7 +5359,7 @@ async function savePayment(){
   const pmt={id:pmtId,era,invoiceId,vendorId:inv.vendorId,date,amount,method,ref,memo,glPosted:true};
   inv.amountPaid=(inv.amountPaid||0)+amount;inv.balance=Math.max(0,inv.total-inv.amountPaid);
   if(inv.balance<0.005){inv.balance=0;inv.status='paid'}else inv.status='partial';
-  const cashName=COA.find(a=>a.acct===cashAcct)?.name||cashAcct;
+  const cashName=acctName(cashAcct)||cashAcct;
   const je={id:await nextGLId(),date,ref:pmtId,era,
     memo:'Payment'+(era==='dc-paid'?' (DC→Troy)':era==='troy'?' (Troy-era)':'')+' — '+vendorName(inv.vendorId)+' '+(ref||pmtId),
     entries:[{acct:'2000',name:'Accounts Payable',dr:amount,cr:0},{acct:cashAcct,name:cashName,dr:0,cr:amount}]};
@@ -5155,9 +5420,8 @@ function openJEModal(defaultAcct){
 function selectJEEra(val,cls,el,sfx){document.querySelectorAll('#era-sel-je .era-opt').forEach(o=>o.className='era-opt');el.classList.add(cls);const h=$('era-val-je');if(h)h.value=val}
 function renderJELines(){
   const body=$('je-lines-body');if(!body)return;
-  const acctOpts=COA.map(a=>`<option value="${a.acct}">${a.acct} · ${a.name}</option>`).join('');
   body.innerHTML=jeLines.map((l,i)=>`<div class="je-row">
-    <select onchange="jeLines[${i}].acct=this.value"><option value="">Account…</option>${acctOpts.replace(`value="${l.acct}"`,`value="${l.acct}" selected`)}</select>
+    <select onchange="jeLines[${i}].acct=this.value"><option value="">Account…</option>${acctOptionsHtml(l.acct)}</select>
     <input placeholder="Line memo" value="${l.memo||''}" oninput="jeLines[${i}].memo=this.value">
     <input type="number" min="0" step="0.01" placeholder="0.00" value="${l.dr||''}" oninput="jeLines[${i}].dr=+this.value;jeLines[${i}].cr=0;updateJEBal()">
     <input type="number" min="0" step="0.01" placeholder="0.00" value="${l.cr||''}" oninput="jeLines[${i}].cr=+this.value;jeLines[${i}].dr=0;updateJEBal()">
@@ -5176,7 +5440,7 @@ async function saveJE(){
   if(jeLines.some(l=>!l.acct)){errEl.textContent='All lines need an account.';return}
   const dr=jeLines.reduce((s,l)=>s+(l.dr||0),0);const cr=jeLines.reduce((s,l)=>s+(l.cr||0),0);
   if(Math.abs(dr-cr)>0.005){errEl.textContent=`Out of balance by ${fmt(Math.abs(dr-cr))}.`;return}
-  const je={id:await nextGLId(),date,ref:jeRef,era,memo,entries:jeLines.map(l=>({acct:l.acct,name:COA.find(a=>a.acct===l.acct)?.name||l.acct,dr:l.dr||0,cr:l.cr||0,...(l.memo?{memo:l.memo}:{})}))};
+  const je={id:await nextGLId(),date,ref:jeRef,era,memo,entries:jeLines.map(l=>({acct:l.acct,name:acctName(l.acct)||l.acct,dr:l.dr||0,cr:l.cr||0,...(l.memo?{memo:l.memo}:{})}))};
   const glOk=await saveGLToSB(je);
   if(!glOk){
     errEl.textContent='Save failed — the entry was not posted. Check your connection and try again.';
@@ -5205,7 +5469,7 @@ function openVendorModal(editId){
       <div class="form-group"><label>Phone</label><input id="vnd-phone" value="${editing?.phone||''}"></div>
       <div class="form-group span-2">
         <label>Default GL Accounts (Ctrl/⌘-click for multiple)</label>
-        <select id="vnd-accts" multiple size="5">${COA.map(a=>`<option value="${a.acct}" ${editing?.defaultAccts?.includes(a.acct)?'selected':''}>${a.acct} · ${a.name}</option>`).join('')}</select>
+        <select id="vnd-accts" multiple size="5">${acctOptionsHtml(editing?.defaultAccts||[])}</select>
       </div>
       <div class="form-group span-2"><label>Notes</label><textarea id="vnd-notes" rows="2">${editing?.notes||''}</textarea></div>
     </div></div>
@@ -6860,9 +7124,7 @@ function openBankLedgerModal(editId){
   var glSection = '';
   if(editId && blStatus === 'open'){
     var suggestedAcct = BL_DIRECT_ACCT_MAP[row.account] || '';
-    var glAcctOptions = COA.map(function(a){
-      return '<option value="' + a.acct + '"' + (a.acct===suggestedAcct?' selected':'') + '>' + a.acct + ' \xb7 ' + a.name + '</option>';
-    }).join('');
+    var glAcctOptions = acctOptionsHtml(suggestedAcct);
     var routeNote = '';
     if(blMType === 'ap'){
       routeNote = '<div class="alert" style="background:var(--amber-lo);border:1px solid var(--amber);font-size:12px;margin-bottom:10px">' +
@@ -7364,8 +7626,7 @@ function updateAPMatchSummary(){
 // filter used elsewhere for GL-postable accounts).
 function varAcctOptions(selected){
   return '<option value="">Account…</option>' +
-    COA.filter(function(a){ return a.type!=='Liability' && a.type!=='Equity' && a.type!=='Revenue'; })
-      .map(function(a){ return '<option value="'+a.acct+'"'+(a.acct===selected?' selected':'')+'>'+a.acct+' · '+a.name+'</option>'; }).join('');
+    acctOptionsHtml(selected,function(a){ return a.type!=='Liability' && a.type!=='Equity' && a.type!=='Revenue'; });
 }
 
 // Explicit opt-in gate: a difference is never posted to any GL account
@@ -7591,10 +7852,10 @@ async function confirmAPMatch(){
     if(isVarianceInv && Math.abs(feeVariance) >= 0.005){
       varLines.forEach(function(l){
         var amt = Math.abs(l.amount);
-        var acctInfo = COA.find(function(a){ return a.acct===l.acct; });
+        var lineAcctName = acctName(l.acct)||l.acct;
         jeEntries.push(varSign>0
-          ? {acct:l.acct,name:acctInfo?acctInfo.name:l.acct,dr:amt,cr:0}
-          : {acct:l.acct,name:acctInfo?acctInfo.name:l.acct,dr:0,cr:amt});
+          ? {acct:l.acct,name:lineAcctName,dr:amt,cr:0}
+          : {acct:l.acct,name:lineAcctName,dr:0,cr:amt});
       });
       if(unallocated >= 0.005){
         jeEntries.push(varSign>0
@@ -7751,9 +8012,7 @@ function openDirectPostModal(rowId){
   var amtAbs = Math.abs(parseFloat(row.gross_amount)||0);
   var isCredit = row.trans_type === 'Credit';
   var suggested = BL_DIRECT_ACCT_MAP[row.account] || '';
-  var acctOptions = COA.map(function(a){
-    return '<option value="' + a.acct + '"' + (a.acct===suggested?' selected':'') + '>' + a.acct + ' \xb7 ' + a.name + '</option>';
-  }).join('');
+  var acctOptions = acctOptionsHtml(suggested);
   var hint = suggested
     ? 'Suggested based on category "' + row.account + '" - change it if that is not right.'
     : 'No default account for "' + (row.account||'this category') + '" - pick the right one.';
@@ -7792,8 +8051,7 @@ function openDirectPostModal(rowId){
 // "Code to GL" button/modal and the inline GL section in the edit modal,
 // so the two paths can never drift apart.
 async function postBankRowToGL(row, acct, memoInput){
-  var acctInfo = COA.find(function(a){ return a.acct===acct; });
-  var acctName = acctInfo ? acctInfo.name : acct;
+  var glAcctName = acctName(acct) || acct;
   var amtAbs = Math.abs(parseFloat(row.gross_amount)||0);
   var cashAcct = row.bank === 'Glacier Bank' ? '1010' : '1011';
   var cashName = row.bank === 'Glacier Bank' ? 'Glacier Bank' : 'SouthState Bank';
@@ -7802,11 +8060,11 @@ async function postBankRowToGL(row, acct, memoInput){
   // Credit (money in, e.g. a loan draw or non-Clover revenue): Dr bank / Cr account.
   // Debit (money out, e.g. rent, utilities, payroll, a fee, a tax remittance): Dr account / Cr bank.
   var entries = isCredit
-    ? [{acct:cashAcct,name:cashName,dr:amtAbs,cr:0},{acct:acct,name:acctName,dr:0,cr:amtAbs}]
-    : [{acct:acct,name:acctName,dr:amtAbs,cr:0},{acct:cashAcct,name:cashName,dr:0,cr:amtAbs}];
+    ? [{acct:cashAcct,name:cashName,dr:amtAbs,cr:0},{acct:acct,name:glAcctName,dr:0,cr:amtAbs}]
+    : [{acct:acct,name:glAcctName,dr:amtAbs,cr:0},{acct:cashAcct,name:cashName,dr:0,cr:amtAbs}];
 
   var je = {id:await nextGLId(), date:row.pmnt_date, ref:'DIRECT-'+row.id, era:ERA.DC,
-    memo:memoInput||((row.customer_vendor||'(no vendor)')+' - '+acctName),
+    memo:memoInput||((row.customer_vendor||'(no vendor)')+' - '+glAcctName),
     entries:entries};
   var glOk = await saveGLToSB(je);
   if(!glOk) return false;
@@ -7836,9 +8094,8 @@ async function confirmDirectPost(rowId){
     return;
   }
 
-  var acctInfo = COA.find(function(a){ return a.acct===acct; });
   closeModal();
-  showToast('Coded to '+acct+' \xb7 '+(acctInfo?acctInfo.name:acct));
+  showToast('Coded to '+acct+' \xb7 '+(acctName(acct)||acct));
   if(currentView === 'bank-ledger') renderBankLedger();
 }
 
