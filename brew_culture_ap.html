@@ -822,7 +822,8 @@ function mapEmployeeFromDB(r) {
     tipClassification: r.tip_classification, hireDate: r.hire_date,
     termDate: r.term_date, active: r.active !== false,
     homebaseName: r.homebase_name, notes: r.notes,
-    tipsOffsetSalary: r.tips_offset_salary === true
+    tipsOffsetSalary: r.tips_offset_salary === true,
+    tipEligible: r.tip_eligible !== false, tipEligibleStartDate: r.tip_eligible_start_date
   };
 }
 
@@ -832,7 +833,8 @@ function mapEmployeeToDB(e) {
     tip_classification: e.tipClassification, hire_date: e.hireDate || null,
     term_date: e.termDate || null, active: e.active !== false,
     homebase_name: e.homebaseName || null, notes: e.notes || null,
-    tips_offset_salary: e.tipsOffsetSalary === true
+    tips_offset_salary: e.tipsOffsetSalary === true,
+    tip_eligible: e.tipEligible !== false, tip_eligible_start_date: e.tipEligibleStartDate || null
   };
 }
 
@@ -840,7 +842,8 @@ function mapStatusFromDB(r) {
   return {
     id: r.id, employeeId: r.employee_id, employmentType: r.employment_type,
     tipClassification: r.tip_classification, effectiveStartDate: r.effective_start_date,
-    effectiveEndDate: r.effective_end_date, reason: r.reason
+    effectiveEndDate: r.effective_end_date, reason: r.reason,
+    tipEligible: r.tip_eligible !== false
   };
 }
 
@@ -848,7 +851,8 @@ function mapStatusToDB(r) {
   return {
     id: r.id, employee_id: r.employeeId, employment_type: r.employmentType,
     tip_classification: r.tipClassification, effective_start_date: r.effectiveStartDate,
-    effective_end_date: r.effectiveEndDate || null, reason: r.reason || null
+    effective_end_date: r.effectiveEndDate || null, reason: r.reason || null,
+    tip_eligible: r.tipEligible !== false
   };
 }
 
@@ -935,7 +939,13 @@ function mapPayRateToDB(r) {
 const load=k=>{try{return JSON.parse(localStorage.getItem(k)||'null')}catch{return null}};
 const save=(k,v)=>localStorage.setItem(k,JSON.stringify(v));
 
-function nextSeq(p){const s=load('bc_seq')||{};s[p]=(s[p]||0)+1;save('bc_seq',s);return`${p}-${String(s[p]).padStart(4,'0')}`}
+// nextSeq() (a per-browser localStorage counter) is retired as of
+// 2026-10-29 -- it was the root cause of the STAT-0002 ownership
+// collision (10/29/26) and, before that, the Jacob Crouch/Al Clark/
+// Curtis Moyer overwrites (9/17/26). Every ID is now either DB-issued
+// (nextEmployeeId/nextPayRateId/nextStatusId/nextShiftId, all backed by a
+// Postgres sequence) or derived from the live table state (nextGLId,
+// nextInvId, nextPaymentId, below).
 // Was: derived from DB.gl.length (client-side cache), which could hand out
 // an id that already exists in gl_entries if the local cache ever drifted
 // from the database (e.g. after unmatch reversals deleted rows elsewhere
@@ -5433,14 +5443,19 @@ function updateJEBal(){const dr=jeLines.reduce((s,l)=>s+(l.dr||0),0);const cr=je
 function addJELine(){jeLines.push({acct:'',memo:'',dr:0,cr:0});renderJELines()}
 function removeJELine(i){if(jeLines.length<=2)return;jeLines.splice(i,1);renderJELines()}
 async function saveJE(){
-  const date=$('je-date').value,memo=$('je-memo').value.trim(),era=$('era-val-je').value||ERA.TROY,jeRef=$('je-ref').value.trim()||nextSeq('JE');
+  const date=$('je-date').value,memo=$('je-memo').value.trim(),era=$('era-val-je').value||ERA.TROY,jeRefInput=$('je-ref').value.trim();
   const errEl=$('je-err');
   if(!date){errEl.textContent='Date required.';return}
   if(!memo){errEl.textContent='Memo required.';return}
   if(jeLines.some(l=>!l.acct)){errEl.textContent='All lines need an account.';return}
   const dr=jeLines.reduce((s,l)=>s+(l.dr||0),0);const cr=jeLines.reduce((s,l)=>s+(l.cr||0),0);
   if(Math.abs(dr-cr)>0.005){errEl.textContent=`Out of balance by ${fmt(Math.abs(dr-cr))}.`;return}
-  const je={id:await nextGLId(),date,ref:jeRef,era,memo,entries:jeLines.map(l=>({acct:l.acct,name:acctName(l.acct)||l.acct,dr:l.dr||0,cr:l.cr||0,...(l.memo?{memo:l.memo}:{})}))};
+  const glId=await nextGLId();
+  // No manual reference entered -- use the DB-issued GL id itself rather
+  // than a localStorage nextSeq('JE') label, which could collide with
+  // another browser's counter the same way STAT-/SHFT- ids did.
+  const jeRef=jeRefInput||glId;
+  const je={id:glId,date,ref:jeRef,era,memo,entries:jeLines.map(l=>({acct:l.acct,name:acctName(l.acct)||l.acct,dr:l.dr||0,cr:l.cr||0,...(l.memo?{memo:l.memo}:{})}))};
   const glOk=await saveGLToSB(je);
   if(!glOk){
     errEl.textContent='Save failed — the entry was not posted. Check your connection and try again.';
@@ -9268,8 +9283,27 @@ function currentEmployeeStatus(employeeId){ return statusAsOf(employeeId, todayS
 function employeeStatusHistoryList(employeeId){
   return DB.employeeStatusHistory.filter(r=>r.employeeId===employeeId).sort((a,b)=>b.effectiveStartDate.localeCompare(a.effectiveStartDate));
 }
+// Shared tip-eligibility lookup -- never reimplement this check inline.
+// Same effective-dating logic as statusAsOf: the status row covering
+// dateStr is authoritative; employees.tipEligible is only a fallback for
+// an employee with no status row covering that date.
+function tipEligibleAsOf(employeeId, dateStr){
+  const status = statusAsOf(employeeId, dateStr);
+  if(status) return status.tipEligible;
+  const emp = DB.employees.find(e=>e.id===employeeId);
+  return emp ? emp.tipEligible!==false : true;
+}
 
 async function saveStatusToSB(status){
+  // Upsert here is for editing a row whose ID is already known-good (a
+  // brand-new row goes through insertStatusToSB instead). Belt-and-suspenders
+  // with the DB's trg_owner_immutable trigger: refuse client-side too,
+  // rather than let a bug send an owner-changing update to the server at all.
+  const existing = DB.employeeStatusHistory.find(r=>r.id===status.id);
+  if(existing && existing.employeeId!==status.employeeId){
+    console.error('saveStatusToSB refused: would change employee_id', existing.employeeId, '->', status.employeeId);
+    return false;
+  }
   const ok = await sbUpsert('employee_status_history', mapStatusToDB(status));
   if(ok){
     const idx = DB.employeeStatusHistory.findIndex(r=>r.id===status.id);
@@ -9313,11 +9347,28 @@ async function nextPayRateId(){
   if(error){ console.error('nextPayRateId error', error); throw error; }
   return data;
 }
+// Same fix, extended 10/29/26 to status-history and shift-log rows: the
+// live app still handed these out via nextSeq('STAT')/nextSeq('SHFT') (a
+// per-browser localStorage counter) and saved them with an upsert, which is
+// exactly what let STAT-0002 get silently reassigned from Norah Lipnick to
+// Jose Orozco. next_status_id()/next_shift_id() pull from a Postgres
+// sequence instead, same as the employee/pay-rate fix above.
+async function nextStatusId(){
+  const {data, error} = await _sb.rpc('next_status_id');
+  if(error){ console.error('nextStatusId error', error); throw error; }
+  return data;
+}
+async function nextShiftId(){
+  const {data, error} = await _sb.rpc('next_shift_id');
+  if(error){ console.error('nextShiftId error', error); throw error; }
+  return data;
+}
 
-// True inserts for brand-new employee/pay-rate rows (as opposed to
-// saveEmployeeToSB/savePayRateToSB above, which upsert and are for editing a
-// row whose ID is already known-good). An insert fails loudly on a
-// primary-key collision instead of silently overwriting another record.
+// True inserts for brand-new employee/pay-rate/status/shift rows (as
+// opposed to saveEmployeeToSB/savePayRateToSB/saveStatusToSB/saveShiftToSB,
+// which upsert and are for editing a row whose ID is already known-good).
+// An insert fails loudly on a primary-key collision instead of silently
+// overwriting another record.
 async function insertEmployeeToSB(emp){
   const ok = await sbInsert('employees', mapEmployeeToDB(emp));
   if(ok){
@@ -9331,6 +9382,16 @@ async function insertPayRateToSB(rate){
   if(ok) DB.employeePayRates.push(rate);
   return ok;
 }
+async function insertStatusToSB(status){
+  const ok = await sbInsert('employee_status_history', mapStatusToDB(status));
+  if(ok) DB.employeeStatusHistory.push(status);
+  return ok;
+}
+async function insertShiftToSB(shift){
+  const ok = await sbInsert('shift_log', mapShiftToDB(shift));
+  if(ok) DB.shiftLog.push(shift);
+  return ok;
+}
 
 function renderPayrollEmployees(){
   $('topbar-actions').innerHTML=`<button class="btn btn-primary" onclick="openEmployeeModal()">＋ New Employee</button>`;
@@ -9341,10 +9402,12 @@ function renderPayrollEmployees(){
     const status=currentEmployeeStatus(e.id);
     const typeLabel = {hourly:'Hourly',salaried:'Salaried',volunteer:'Volunteer'}[status?.employmentType||e.employmentType]||e.employmentType;
     const tipLabel = {hourly:'Hourly pool',manager:'Manager rule',volunteer:'Volunteer rule'}[status?.tipClassification||e.tipClassification]||e.tipClassification;
+    const tipEligible = status ? status.tipEligible : e.tipEligible!==false;
     return `<tr onclick="openEmployeeModal('${e.id}')" style="cursor:pointer">
       <td>${e.name}</td>
       <td>${typeLabel}</td>
       <td>${tipLabel}</td>
+      <td>${tipEligible?'<span class="badge badge-paid">Tip eligible</span>':'<span class="badge badge-void">Not tip eligible</span>'}</td>
       <td class="mono">${rateStr}</td>
       <td>${e.active?'<span class="badge badge-paid">Active</span>':'<span class="badge badge-void">Inactive</span>'}</td>
       <td>${e.hireDate?fmtDate(e.hireDate):'—'}</td>
@@ -9353,8 +9416,8 @@ function renderPayrollEmployees(){
   $('content').innerHTML = `<div class="card">
     <div class="card-header"><span class="card-title">Employees</span><span style="font-size:12px;color:var(--ink-mid)">${emps.length} total</span></div>
     <div class="tbl-wrap"><table>
-      <thead><tr><th>Name</th><th>Employment Type</th><th>Tip Classification</th><th>Current Rate</th><th>Status</th><th>Hire Date</th></tr></thead>
-      <tbody>${rows||'<tr><td colspan="6" class="text-center" style="padding:32px;color:var(--ink-lo)">No employees yet</td></tr>'}</tbody>
+      <thead><tr><th>Name</th><th>Employment Type</th><th>Tip Classification</th><th>Tips</th><th>Current Rate</th><th>Status</th><th>Hire Date</th></tr></thead>
+      <tbody>${rows||'<tr><td colspan="7" class="text-center" style="padding:32px;color:var(--ink-lo)">No employees yet</td></tr>'}</tbody>
     </table></div>
   </div>`;
 }
@@ -9363,6 +9426,48 @@ function onEmpTypeChange(){
   const t = $('emp-type').value;
   const tipSel = $('emp-tip');
   if(tipSel) tipSel.value = t; // default tip classification mirrors employment type; user can still override
+  // Volunteers: tip eligibility stays off and locked -- volunteer tip
+  // handling is its own Volunteer Tip Revenue rule, unrelated to this flag.
+  const elig = $('emp-tip-eligible');
+  if(elig){
+    if(t==='volunteer'){ elig.checked=false; elig.disabled=true; }
+    else { elig.disabled=false; }
+    onTipEligibleToggle();
+  }
+}
+
+let _empTipDateTouched=false;
+function syncEmpTipDate(v){ if(_empTipDateTouched)return; const d=$('emp-tip-eligible-date'); if(d) d.value=v||todayStr(); }
+function onTipEligibleToggle(){
+  const checked = $('emp-tip-eligible').checked;
+  const wrap = $('emp-tip-eligible-date-wrap');
+  if(wrap) wrap.style.display = checked ? '' : 'none';
+}
+// Walks back through consecutive tip_eligible=true rows from the current
+// one to find when this eligible streak actually began -- not just the
+// current row's own start date, which may be from an unrelated later
+// employment-type change that merely carried eligibility forward.
+function tipEligibleSinceDate(employeeId){
+  const current = currentEmployeeStatus(employeeId);
+  if(!current || !current.tipEligible) return null;
+  const sorted = employeeStatusHistoryList(employeeId).slice().sort((a,b)=>a.effectiveStartDate.localeCompare(b.effectiveStartDate));
+  const idx = sorted.findIndex(r=>r.id===current.id);
+  if(idx<0) return current.effectiveStartDate;
+  let since = current.effectiveStartDate;
+  for(let i=idx-1;i>=0;i--){
+    if(!sorted[i].tipEligible) break;
+    since = sorted[i].effectiveStartDate;
+  }
+  return since;
+}
+// Read-only tip-status line for the employee list/profile header.
+function tipStatusLabel(employeeId){
+  const status = currentEmployeeStatus(employeeId);
+  const emp = DB.employees.find(e=>e.id===employeeId);
+  const eligible = status ? status.tipEligible : (emp ? emp.tipEligible!==false : true);
+  if(!eligible) return 'Tips: not eligible';
+  const since = status ? tipEligibleSinceDate(employeeId) : (emp?.tipEligibleStartDate||null);
+  return 'Tips: eligible'+(since?' since '+fmtDate(since):'');
 }
 
 function renderPayRateHistoryTable(employeeId){
@@ -9406,6 +9511,7 @@ function renderStatusHistoryTable(employeeId){
 function openEmployeeModal(editId){
   const editing = editId ? DB.employees.find(e=>e.id===editId) : null;
   const status = editing ? currentEmployeeStatus(editing.id) : null;
+  _empTipDateTouched=false;
   const typeLabel = {hourly:'Hourly',salaried:'Salaried',volunteer:'Volunteer'};
   const tipLabel = {hourly:'Hourly (tip-pool eligible)',manager:'Manager (excluded unless alone)',volunteer:'Volunteer (Volunteer Tip Revenue rule)'};
   openModal(`<div class="modal" style="max-width:600px">
@@ -9419,7 +9525,8 @@ function openEmployeeModal(editId){
       <div class="form-group span-2">
         <label>Current Status</label>
         <div class="line-total">${typeLabel[status?.employmentType]||'—'} · ${tipLabel[status?.tipClassification]||'—'}${status?' — effective '+fmtDate(status.effectiveStartDate):''}</div>
-        <span class="form-hint">To change employment type or tip classification, use "Change Status" below so the effective date is captured.</span>
+        <div class="line-total" style="margin-top:4px">${tipStatusLabel(editing.id)}</div>
+        <span class="form-hint">To change employment type, tip classification or tip eligibility, use "Change Status" below so the effective date is captured.</span>
       </div>
       `:`
       <div class="form-group"><label>Employment Type *</label><select id="emp-type" onchange="onEmpTypeChange()">
@@ -9432,8 +9539,17 @@ function openEmployeeModal(editId){
         <option value="manager">Manager (excluded unless alone)</option>
         <option value="volunteer">Volunteer (Volunteer Tip Revenue rule)</option>
       </select><span class="form-hint">Usually mirrors Employment Type, but can be overridden</span></div>
+      <div class="form-group span-2" style="flex-direction:row;align-items:center;gap:8px">
+        <input type="checkbox" id="emp-tip-eligible" style="width:auto" checked onchange="onTipEligibleToggle()">
+        <label style="margin:0" id="emp-tip-eligible-label">Eligible for tips</label>
+      </div>
+      <div class="form-group span-2" id="emp-tip-eligible-date-wrap">
+        <label>Tip eligibility began *</label>
+        <input type="date" id="emp-tip-eligible-date" value="${todayStr()}" onchange="_empTipDateTouched=true">
+        <span class="form-hint">Defaults to Hire Date — editable</span>
+      </div>
       `}
-      <div class="form-group"><label>Hire Date</label><input type="date" id="emp-hire" value="${editing?.hireDate||''}"></div>
+      <div class="form-group"><label>Hire Date</label><input type="date" id="emp-hire" value="${editing?.hireDate||''}" ${editing?'':'onchange="syncEmpTipDate(this.value)"'}></div>
       <div class="form-group"><label>Term Date</label><input type="date" id="emp-term" value="${editing?.termDate||''}"></div>
       <div class="form-group"><label>Homebase Name</label><input id="emp-homebase" value="${editing?.homebaseName||''}" placeholder="Name as it appears in Homebase"></div>
       <div class="form-group"><label>Status</label><select id="emp-active">
@@ -9524,18 +9640,41 @@ async function saveEmployee(editId){
   }
   data.employmentType=$('emp-type').value;
   data.tipClassification=$('emp-tip').value;
+  const tipEligibleChecked=$('emp-tip-eligible').checked;
+  const hireOrToday=$('emp-hire').value||todayStr();
+  // "Eligible for tips" unchecked needs no date -- ineligible from the
+  // start. Checked defaults to hire date, but is editable: if the owner
+  // pushes eligibility to start later than hire date, that's a second
+  // status row (ineligible from hire, then eligible from that later date)
+  // rather than one row dated on hire.
+  const tipDate=tipEligibleChecked?($('emp-tip-eligible-date').value||hireOrToday):hireOrToday;
+  data.tipEligible=tipEligibleChecked && tipDate<=hireOrToday;
+  data.tipEligibleStartDate=hireOrToday;
   let newId;
   try{ newId = await nextEmployeeId(); }
   catch(e){ $('emp-err').textContent='Could not generate an employee ID. Check connection and try again.'; return; }
   const employee = {id:newId, ...data};
   const ok = await insertEmployeeToSB(employee); // true insert -- fails loudly on an ID collision instead of overwriting
   if(!ok){$('emp-err').textContent='Could not create employee — ID collision, please retry.';return}
-  const status={
-    id:nextSeq('STAT'), employeeId:employee.id, employmentType:employee.employmentType,
-    tipClassification:employee.tipClassification, effectiveStartDate:employee.hireDate||todayStr(),
-    effectiveEndDate:null, reason:'Initial setup'
-  };
-  await saveStatusToSB(status);
+  const statusRows=[];
+  if(!tipEligibleChecked || tipDate<=hireOrToday){
+    statusRows.push({employeeId:employee.id, employmentType:employee.employmentType,
+      tipClassification:employee.tipClassification, tipEligible:tipEligibleChecked,
+      effectiveStartDate:hireOrToday, effectiveEndDate:null, reason:'Initial setup'});
+  }else{
+    statusRows.push({employeeId:employee.id, employmentType:employee.employmentType,
+      tipClassification:employee.tipClassification, tipEligible:false,
+      effectiveStartDate:hireOrToday, effectiveEndDate:addDays(tipDate,-1), reason:'Initial setup'});
+    statusRows.push({employeeId:employee.id, employmentType:employee.employmentType,
+      tipClassification:employee.tipClassification, tipEligible:true,
+      effectiveStartDate:tipDate, effectiveEndDate:null, reason:'Tip eligibility began'});
+  }
+  for(const row of statusRows){
+    let statusId;
+    try{ statusId = await nextStatusId(); }
+    catch(e){ showToast('Employee saved, but a status row could not be created — add it from the employee record.','warn'); break; }
+    await insertStatusToSB({id:statusId, ...row});
+  }
   const rateInput=$('emp-rate').value;
   if(rateInput===''){closeModal();renderPayrollEmployees();showToast('Employee saved — add a starting pay rate from the employee record.');return}
   const rateVal=parseFloat(rateInput);
@@ -9565,13 +9704,14 @@ function openStatusChangeModal(employeeId){
   const current = currentEmployeeStatus(employeeId);
   const typeLabel = {hourly:'Hourly',salaried:'Salaried',volunteer:'Volunteer'};
   const tipLabel = {hourly:'Hourly pool',manager:'Manager rule',volunteer:'Volunteer rule'};
+  const currentlyEligible = current ? current.tipEligible : true;
   openModal(`<div class="modal" style="max-width:480px">
     <div class="modal-header">
       <div><div class="modal-title">Change Status</div><div class="modal-sub">${employeeName(employeeId)}</div></div>
       <button class="close-btn" onclick="closeModal()">×</button>
     </div>
     <div class="modal-body"><div class="form-grid">
-      ${current?`<div class="form-group span-2"><label>Current Status</label><div class="line-total">${typeLabel[current.employmentType]||current.employmentType} · ${tipLabel[current.tipClassification]||current.tipClassification} — effective ${fmtDate(current.effectiveStartDate)}</div></div>`:''}
+      ${current?`<div class="form-group span-2"><label>Current Status</label><div class="line-total">${typeLabel[current.employmentType]||current.employmentType} · ${tipLabel[current.tipClassification]||current.tipClassification} — effective ${fmtDate(current.effectiveStartDate)}</div><div class="line-total" style="margin-top:4px">${tipStatusLabel(employeeId)}</div></div>`:''}
       <div class="form-group"><label>New Employment Type *</label><select id="stat-type" onchange="onStatTypeChange()">
         <option value="hourly">Hourly</option>
         <option value="salaried">Salaried</option>
@@ -9582,7 +9722,12 @@ function openStatusChangeModal(employeeId){
         <option value="manager">Manager (excluded unless alone)</option>
         <option value="volunteer">Volunteer (Volunteer Tip Revenue rule)</option>
       </select></div>
-      <div class="form-group span-2"><label>Effective Start Date *</label><input type="date" id="stat-start" value="${todayStr()}"></div>
+      <div class="form-group span-2" style="flex-direction:row;align-items:center;gap:8px">
+        <input type="checkbox" id="stat-tip-eligible" style="width:auto" ${currentlyEligible?'checked':''} onchange="onStatTipEligibleToggle()">
+        <label style="margin:0" id="stat-tip-eligible-label">Eligible for tips</label>
+      </div>
+      <div class="form-group span-2"><label id="stat-start-label">Effective Start Date *</label><input type="date" id="stat-start" value="${todayStr()}" onchange="onStatTipEligibleToggle()"></div>
+      <div id="stat-tip-eligible-hint" class="form-hint" style="margin-top:-8px"></div>
       <div class="form-group span-2"><label>Reason</label><input id="stat-reason" placeholder="e.g. volunteer moved to paid position"></div>
     </div></div>
     <div class="modal-footer">
@@ -9591,38 +9736,91 @@ function openStatusChangeModal(employeeId){
       <button class="btn btn-primary" onclick="saveStatusChange('${employeeId}')">Save Status Change</button>
     </div>
   </div>`);
+  onStatTipEligibleToggle();
 }
 
 function onStatTypeChange(){
   const t = $('stat-type').value;
   const tipSel = $('stat-tip');
   if(tipSel) tipSel.value = t; // default tip classification mirrors employment type; user can still override
+  const elig = $('stat-tip-eligible');
+  if(elig){
+    if(t==='volunteer'){ elig.checked=false; elig.disabled=true; }
+    else { elig.disabled=false; }
+    onStatTipEligibleToggle();
+  }
+}
+
+// No separate date input for the eligibility change -- it shares the one
+// Effective Start Date above (one status row, one date). This just relabels
+// that field and shows a hint when the checkbox state differs from today's
+// eligibility, so it's clear what the chosen date actually governs.
+function onStatTipEligibleToggle(){
+  const checkbox=$('stat-tip-eligible'), hint=$('stat-tip-eligible-hint'), label=$('stat-start-label');
+  if(!checkbox||!hint||!label)return;
+  const wasEligible=checkbox.dataset.initial==='1'||(checkbox.dataset.initial===undefined&&checkbox.checked);
+  if(checkbox.dataset.initial===undefined) checkbox.dataset.initial = checkbox.checked?'1':'0';
+  const nowChecked=checkbox.checked;
+  const initiallyEligible=checkbox.dataset.initial==='1';
+  if(nowChecked===initiallyEligible){ label.textContent='Effective Start Date *'; hint.textContent=''; return; }
+  if(nowChecked){ label.textContent='Tip eligibility began *'; hint.textContent='Tips begin on this date.'; }
+  else { label.textContent='Not eligible as of *'; hint.textContent='Tips stop on this date; nothing before it changes.'; }
 }
 
 async function saveStatusChange(employeeId){
   const empType=$('stat-type').value, tipClass=$('stat-tip').value;
+  const tipEligible=$('stat-tip-eligible').checked;
   const startDate=$('stat-start').value; if(!startDate){$('stat-err').textContent='Effective date required.';return}
-  // Close out the currently open-ended status, ending the day before the new one starts
   const current = currentEmployeeStatus(employeeId);
+
+  // Warn if this date falls inside a pay period that already has a
+  // submitted payroll run -- tips re-flow automatically at view time, but
+  // that run's stored numbers won't move on their own.
+  const periodStart=payPeriodStartFor(startDate), periodEnd=payPeriodEndFor(startDate);
+  const existingRun = DB.payrollRuns.find(r=>r.periodStart && r.periodEnd && r.periodStart<=periodEnd && r.periodEnd>=periodStart);
+  if(existingRun){
+    if(!confirm('This changes tips for a period that already has a payroll run ('+existingRun.id+'). Review the run.\n\nSave anyway?')) return;
+  }
+
+  // Close out the currently open-ended status, ending the day before the
+  // new one starts -- unless the new date is on/before the current row's
+  // own start date, in which case there's no prior row to close and the
+  // current row should be updated in place rather than duplicated.
+  let updateInPlace=false;
   if(current && !current.effectiveEndDate){
     const endDate = addDays(startDate, -1);
     if(endDate >= current.effectiveStartDate){
       current.effectiveEndDate = endDate;
       await saveStatusToSB(current);
+    } else if(startDate === current.effectiveStartDate){
+      updateInPlace=true;
     }
   }
-  const status={
-    id:nextSeq('STAT'), employeeId, employmentType:empType,
-    tipClassification:tipClass, effectiveStartDate:startDate,
-    effectiveEndDate:null, reason:$('stat-reason').value.trim()||null
-  };
-  await saveStatusToSB(status);
+  let ok;
+  if(updateInPlace){
+    const status={...current, employmentType:empType, tipClassification:tipClass, tipEligible,
+      reason:$('stat-reason').value.trim()||null};
+    ok = await saveStatusToSB(status);
+  }else{
+    let statusId;
+    try{ statusId = await nextStatusId(); }
+    catch(e){ $('stat-err').textContent='Could not generate a status ID. Check connection and try again.'; return; }
+    const status={
+      id:statusId, employeeId, employmentType:empType,
+      tipClassification:tipClass, tipEligible, effectiveStartDate:startDate,
+      effectiveEndDate:null, reason:$('stat-reason').value.trim()||null
+    };
+    ok = await insertStatusToSB(status); // true insert -- fails loudly on an ID collision instead of overwriting
+  }
+  if(!ok){ $('stat-err').textContent='Save failed — the status change was not recorded. Check your connection and try again.'; return; }
   // Keep the employees table's denormalized current fields in sync for
   // quick display/filtering elsewhere
   const emp = DB.employees.find(e=>e.id===employeeId);
   if(emp){
     emp.employmentType = empType;
     emp.tipClassification = tipClass;
+    emp.tipEligible = tipEligible;
+    if(tipEligible) emp.tipEligibleStartDate = tipEligibleSinceDate(employeeId) || startDate;
     await saveEmployeeToSB(emp);
   }
   closeModal();openEmployeeModal(employeeId);
@@ -9657,6 +9855,14 @@ function shiftsForDate(dateStr){
 }
 
 async function saveShiftToSB(shift){
+  // Upsert here is for editing a row whose ID is already known-good (a
+  // brand-new row goes through insertShiftToSB instead). Belt-and-suspenders
+  // with the DB's trg_owner_immutable trigger.
+  const existing = DB.shiftLog.find(s=>s.id===shift.id);
+  if(existing && existing.employeeId!==shift.employeeId){
+    console.error('saveShiftToSB refused: would change employee_id', existing.employeeId, '->', shift.employeeId);
+    return false;
+  }
   const ok = await sbUpsert('shift_log', mapShiftToDB(shift));
   if(ok){
     const idx = DB.shiftLog.findIndex(s=>s.id===shift.id);
@@ -9811,18 +10017,26 @@ function computeTipSplitForDay(dateStr, rawRows){
     const present = rows.filter(r=>timeToMinutes(r.clockIn)<=segStart && timeToMinutes(r.clockOut)>=segEnd);
     if(!present.length) continue;
     const presentIds = [...new Set(present.map(r=>r.employeeId))];
+    // Tip-ineligible employees (e.g. Jose Orozco, hourly but not in the tip
+    // pool) still count as present for hours/wages -- that's computed
+    // elsewhere from `rows`/`present`, untouched here -- but are removed
+    // before the hourly/manager/volunteer hierarchy decides who the pool
+    // goes to. If they're the only one(s) on the clock, nobody is eligible
+    // and the segment falls through to the same Volunteer Tip Revenue rule
+    // as an actual volunteer-only segment, never to the ineligible employee.
+    const tipEligibleIds = presentIds.filter(id=>tipEligibleAsOf(id, dateStr));
     const classOf = {};
-    presentIds.forEach(id=>{
+    tipEligibleIds.forEach(id=>{
       const status = statusAsOf(id, dateStr);
       const emp = DB.employees.find(e=>e.id===id);
       classOf[id] = status ? status.tipClassification : (emp?emp.tipClassification:null);
     });
-    const hourlyIds = presentIds.filter(id=>classOf[id]==='hourly');
-    const managerIds = presentIds.filter(id=>classOf[id]==='manager');
+    const hourlyIds = tipEligibleIds.filter(id=>classOf[id]==='hourly');
+    const managerIds = tipEligibleIds.filter(id=>classOf[id]==='manager');
     let eligible;
     if(hourlyIds.length) eligible = hourlyIds;
     else if(managerIds.length) eligible = managerIds;
-    else eligible = []; // volunteer(s)-only segment
+    else eligible = []; // volunteer(s)-only, or nobody tip-eligible, segment
 
     let poolDollars = 0;
     orderRows.forEach(o=>{
@@ -10044,6 +10258,10 @@ function renderShiftRows(){
       const tipAmt = dayTips.perRowMap.get(row);
       if(tipAmt!==undefined) tipsText = fmt(tipAmt);
     }
+    const rowTipEligible = row.employeeId ? tipEligibleAsOf(row.employeeId, shiftLogDate) : true;
+    const tipsCellHtml = rowTipEligible
+      ? `<div class="mono" style="font-size:12px;color:var(--ink-mid);text-align:right">${tipsText}</div>`
+      : `<div class="mono" style="font-size:12px;color:var(--ink-lo);text-align:right" title="Not tip eligible">—</div>`;
     return `<div style="display:grid;grid-template-columns:2fr 1fr 1fr 0.8fr 0.9fr 0.9fr 36px;gap:8px;margin-bottom:8px;align-items:center${rowOT?';background:#fff3cd;border-radius:var(--r)':''}" ${rowOT?`title="Includes ${rowOT.otHours.toFixed(2)} overtime hour(s) at 1.5x rate"`:''}>
     <select ${dateSelected?'':'disabled'} onchange="shiftFormRows[${i}].employeeId=this.value;renderShiftRows()">
       <option value="">${dateSelected?'Select employee…':'Select a date first'}</option>
@@ -10053,7 +10271,7 @@ function renderShiftRows(){
     <input type="time" ${dateSelected?'':'disabled'} value="${row.clockOut||''}" onchange="shiftFormRows[${i}].clockOut=this.value;renderShiftRows()">
     <div class="mono" style="font-size:12px;color:${rowOT?'var(--amber-dark,#8a6500)':'var(--ink-mid)'};text-align:right">${hoursText}${rowOT?' ⚠':''}</div>
     <div class="mono" style="font-size:12px;color:var(--ink-mid);text-align:right">${payText}</div>
-    <div class="mono" style="font-size:12px;color:var(--ink-mid);text-align:right">${tipsText}</div>
+    ${tipsCellHtml}
     <button class="rm-btn" onclick="removeShiftRow(${i})">×</button>
   </div>`;
   }).join('');
@@ -10100,11 +10318,18 @@ async function saveShiftDay(){
   }
   let allOk=true;
   for(const r of validRows){
-    const shift = r.shiftId
-      ? {...DB.shiftLog.find(s=>s.id===r.shiftId), employeeId:r.employeeId, workDate:shiftLogDate, clockIn:r.clockIn, clockOut:r.clockOut||null}
-      : {id:nextSeq('SHFT'), employeeId:r.employeeId, workDate:shiftLogDate, clockIn:r.clockIn, clockOut:r.clockOut||null, source:'manual', notes:null};
-    const ok = await saveShiftToSB(shift);
-    if(!ok) allOk=false;
+    if(r.shiftId){
+      const shift = {...DB.shiftLog.find(s=>s.id===r.shiftId), employeeId:r.employeeId, workDate:shiftLogDate, clockIn:r.clockIn, clockOut:r.clockOut||null};
+      const ok = await saveShiftToSB(shift); // editing a known-good ID -- upsert is correct here
+      if(!ok) allOk=false;
+    }else{
+      let shiftId;
+      try{ shiftId = await nextShiftId(); }
+      catch(e){ allOk=false; continue; }
+      const shift = {id:shiftId, employeeId:r.employeeId, workDate:shiftLogDate, clockIn:r.clockIn, clockOut:r.clockOut||null, source:'manual', notes:null};
+      const ok = await insertShiftToSB(shift); // true insert -- fails loudly on an ID collision instead of overwriting
+      if(!ok) allOk=false;
+    }
   }
   hideLoadingOverlay();
   if(!allOk){errEl.textContent='One or more rows failed to save — check your connection and try again.';return}
