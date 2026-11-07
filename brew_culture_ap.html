@@ -7331,6 +7331,59 @@ function syncBLStmtSec(){
   }
 }
 
+// Shared by the plain Save path and the Save & Post to GL path: reads the
+// Split panel's inputs (when present in the DOM) and validates the parts
+// sum to the row total. Returns null when the Split panel isn't present
+// (new rows, or era !== 'split') -- caller should skip split handling
+// entirely in that case. Otherwise returns {ok:true, troyAmt, dcAmt,
+// dcAcct, basis, memoInput} or {ok:false, error}.
+function readSplitPartsFromForm(rowTotal){
+  var troyEl = $('bl-split-troy');
+  if(!troyEl) return null;
+  var troyAmt = Math.abs(parseFloat(troyEl.value)||0);
+  var dcAmt = Math.abs(parseFloat(($('bl-split-dc')||{}).value)||0);
+  var dcAcct = ($('bl-split-dc-acct')||{}).value || '';
+  var basis = (($('bl-split-basis')||{}).value||'').trim();
+  var memoInput = (($('bl-split-memo')||{}).value||'').trim();
+
+  if(troyAmt <= 0 && dcAmt <= 0) return {ok:false, error:'Enter the Troy and/or DC part amounts.'};
+  if(dcAmt > 0 && !dcAcct) return {ok:false, error:'Select a GL account for the DC part.'};
+  var sum = Math.round((troyAmt+dcAmt)*100)/100;
+  var diff = Math.round((sum-rowTotal)*100)/100;
+  if(Math.abs(diff) > 0.005){
+    return {ok:false, error:'Troy ('+fmt(troyAmt)+') + DC ('+fmt(dcAmt)+') = '+fmt(sum)+', which is off by '+fmt(Math.abs(diff))+' from the row total '+fmt(rowTotal)+'. Fix the parts before saving.'};
+  }
+  return {ok:true, troyAmt:troyAmt, dcAmt:dcAmt, dcAcct:dcAcct, basis:basis, memoInput:memoInput};
+}
+
+// Upserts the Troy/DC bank_ledger_split rows for a bank_ledger row, reusing
+// existing part ids (edit in place) or allocating new ones via
+// nextBankSplitIds. Updates REV.bankSplits on success.
+async function persistSplitParts(rowId, parts){
+  var existingParts = blRowSplits(rowId);
+  var troyPartRow = existingParts.find(function(s){ return s.era === 'troy'; });
+  var dcPartRow = existingParts.find(function(s){ return s.era === 'dc'; });
+  var needed = (troyPartRow?0:1) + (dcPartRow?0:1);
+  var newIds = needed>0 ? await nextBankSplitIds(needed) : [];
+  var ni = 0;
+  var nowIso = new Date().toISOString();
+  var troyRec = {
+    id: troyPartRow ? troyPartRow.id : newIds[ni++],
+    bank_ledger_id: rowId, era: 'troy', amount: parts.troyAmt, gl_account: '1300',
+    basis: parts.basis, memo: parts.memoInput, created_at: troyPartRow ? troyPartRow.created_at : nowIso
+  };
+  var dcRec = {
+    id: dcPartRow ? dcPartRow.id : newIds[ni++],
+    bank_ledger_id: rowId, era: 'dc', amount: parts.dcAmt, gl_account: parts.dcAcct,
+    basis: parts.basis, memo: parts.memoInput, created_at: dcPartRow ? dcPartRow.created_at : nowIso
+  };
+  var ok = await saveBankSplitParts([troyRec, dcRec]);
+  if(!ok) return false;
+  REV.bankSplits = REV.bankSplits.filter(function(s){ return s.bank_ledger_id !== rowId; });
+  REV.bankSplits.push(troyRec, dcRec);
+  return true;
+}
+
 async function saveBankLedgerModal(editId){
   var errEl = $('bl-err');
   var pmntDate = $('bl-pmnt-date').value;
@@ -7363,6 +7416,16 @@ async function saveBankLedgerModal(editId){
   // Store amount as signed: negative for debits
   var grossAmt = transType === 'Debit' ? -Math.abs(amtRaw) : Math.abs(amtRaw);
 
+  // When era is Split and the Split panel is present (existing, open row),
+  // its parts are validated and saved here too -- plain Save must not
+  // silently discard whatever was typed into the Troy/DC fields.
+  var splitErrEl = $('bl-split-err');
+  var splitParts = (newEra === 'split') ? readSplitPartsFromForm(Math.abs(grossAmt)) : null;
+  if(splitParts && !splitParts.ok){
+    if(splitErrEl) splitErrEl.textContent = splitParts.error; else errEl.textContent = splitParts.error;
+    return;
+  }
+
   var id = editId || ('BL-' + Date.now());
   // Preserve row_id for existing rows
   var existingRow = editId ? REV.bankLedger.find(function(r){ return r.id === editId; }) : null;
@@ -7387,13 +7450,24 @@ async function saveBankLedgerModal(editId){
 
   showLoadingOverlay('Saving...');
   var ok = await saveBankLedgerRow(row);
-  hideLoadingOverlay();
-  if(!ok){ errEl.textContent = 'Save failed. Check console.'; return; }
+  if(!ok){ hideLoadingOverlay(); errEl.textContent = 'Save failed. Check console.'; return; }
 
   // Update in-memory cache
   var idx = REV.bankLedger.findIndex(function(r){ return r.id === id; });
   if(idx >= 0) REV.bankLedger[idx] = row;
   else REV.bankLedger.push(row);
+
+  if(splitParts && splitParts.ok){
+    var partsOk = await persistSplitParts(id, splitParts);
+    hideLoadingOverlay();
+    if(!partsOk){
+      if(splitErrEl) splitErrEl.textContent = 'Row saved, but split parts failed to save. Check console and try again.';
+      else errEl.textContent = 'Row saved, but split parts failed to save. Check console and try again.';
+      return;
+    }
+  } else {
+    hideLoadingOverlay();
+  }
 
   closeModal();
   showToast(editId ? 'Transaction updated' : 'Transaction added');
@@ -8281,20 +8355,13 @@ async function saveAndPostSplitToGL(editId){
   if(!vendor)  { mainErr.textContent='Customer/Vendor required.'; return; }
   if(!amtRaw)  { mainErr.textContent='Amount required.'; return; }
 
-  var troyAmt = Math.abs(parseFloat($('bl-split-troy').value)||0);
-  var dcAmt = Math.abs(parseFloat($('bl-split-dc').value)||0);
-  var dcAcct = $('bl-split-dc-acct').value;
-  var basis = $('bl-split-basis').value.trim();
-  var memoInput = $('bl-split-memo').value.trim();
-
-  if(troyAmt <= 0 && dcAmt <= 0){ splitErr.textContent='Enter the Troy and/or DC part amounts.'; return; }
-  if(dcAmt > 0 && !dcAcct){ splitErr.textContent='Select a GL account for the DC part.'; return; }
-  var sum = Math.round((troyAmt+dcAmt)*100)/100;
-  var diff = Math.round((sum-amtRaw)*100)/100;
-  if(Math.abs(diff) > 0.005){
-    splitErr.textContent = 'Troy ('+fmt(troyAmt)+') + DC ('+fmt(dcAmt)+') = '+fmt(sum)+', which is off by '+fmt(Math.abs(diff))+' from the row total '+fmt(amtRaw)+'. Fix the parts before saving.';
+  var splitParts = readSplitPartsFromForm(amtRaw);
+  if(!splitParts || !splitParts.ok){
+    splitErr.textContent = splitParts ? splitParts.error : 'Split panel not found.';
     return;
   }
+  var troyAmt = splitParts.troyAmt, dcAmt = splitParts.dcAmt, dcAcct = splitParts.dcAcct,
+      basis = splitParts.basis, memoInput = splitParts.memoInput;
 
   var grossAmt = transType === 'Debit' ? -Math.abs(amtRaw) : Math.abs(amtRaw);
   var existingRow = REV.bankLedger.find(function(r){ return r.id === editId; });
@@ -8322,28 +8389,8 @@ async function saveAndPostSplitToGL(editId){
   var idx = REV.bankLedger.findIndex(function(r){ return r.id === editId; });
   if(idx >= 0) REV.bankLedger[idx] = row; else REV.bankLedger.push(row);
 
-  var existingParts = blRowSplits(editId);
-  var troyPartRow = existingParts.find(function(s){ return s.era === 'troy'; });
-  var dcPartRow = existingParts.find(function(s){ return s.era === 'dc'; });
-  var needed = (troyPartRow?0:1) + (dcPartRow?0:1);
-  var newIds = needed>0 ? await nextBankSplitIds(needed) : [];
-  var ni = 0;
-  var nowIso = new Date().toISOString();
-  var troyRec = {
-    id: troyPartRow ? troyPartRow.id : newIds[ni++],
-    bank_ledger_id: editId, era: 'troy', amount: troyAmt, gl_account: '1300',
-    basis: basis, memo: memoInput, created_at: troyPartRow ? troyPartRow.created_at : nowIso
-  };
-  var dcRec = {
-    id: dcPartRow ? dcPartRow.id : newIds[ni++],
-    bank_ledger_id: editId, era: 'dc', amount: dcAmt, gl_account: dcAcct,
-    basis: basis, memo: memoInput, created_at: dcPartRow ? dcPartRow.created_at : nowIso
-  };
-
-  var partsOk = await saveBankSplitParts([troyRec, dcRec]);
+  var partsOk = await persistSplitParts(editId, splitParts);
   if(!partsOk){ hideLoadingOverlay(); splitErr.textContent='Row saved, but split parts failed to save. Check console and try again.'; return; }
-  REV.bankSplits = REV.bankSplits.filter(function(s){ return s.bank_ledger_id !== editId; });
-  REV.bankSplits.push(troyRec, dcRec);
 
   var postOk = await postSplitRowToGL(row, troyAmt, dcAmt, dcAcct, memoInput);
   hideLoadingOverlay();
