@@ -7198,7 +7198,6 @@ function renderBankLedger(){
       '<td>' + eraPill(era) + splitBadge + '</td>' +
       '<td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (r.customer_vendor||'') + '</td>' +
       '<td style="max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink-mid);font-size:12px">' + (r.description||'') + '</td>' +
-      '<td style="font-size:11px">' + (r.stmt_category||'') + '</td>' +
       '<td style="font-size:11px;color:var(--ink-mid)">' + (r.bank==='Glacier Bank'?'Glacier':'SouthState') + '</td>' +
       '<td class="text-right mono fw600" style="color:' + amtColor + '">' + amtSign + fmt(amt) + '</td>' +
       '<td class="text-right mono" style="color:' + runBalColor + '">' + fmt(runBal) + '</td>' +
@@ -7259,13 +7258,128 @@ function renderBankLedger(){
         : '<div class="tbl-wrap"><table>' +
           '<thead><tr>' +
             '<th>#</th><th>Date</th><th>Era</th><th>Vendor / Customer</th><th>Description</th>' +
-            '<th>Category</th><th>Bank</th>' +
+            '<th>Bank</th>' +
             '<th class="text-right">Amount</th><th class="text-right">Balance</th><th>Status</th><th></th>' +
           '</tr></thead>' +
           '<tbody>' + tableRows + '</tbody>' +
           '</table></div>'
       ) +
     '</div>';
+}
+
+// ── Read-only GL Coding section (edit modal) ────────────────────────────
+// Shows what a bank-ledger row was actually booked as: split parts (if
+// any are on file, posted or not), the GL entry for a direct/split
+// posting, or the matched invoice(s)/settlement(s)/payroll run(s) for a
+// matched row -- found strictly through the row's own match records,
+// using the same ref conventions unmatchBankRow() uses to reverse them,
+// never guessed by amount. Returns '' when there's nothing to show (a
+// plain open row with no saved parts and no matches).
+function glEntryTableHtml(glEntry){
+  var totalDr = 0, totalCr = 0;
+  var rows = (glEntry.entries||[]).map(function(e){
+    totalDr += parseFloat(e.dr)||0; totalCr += parseFloat(e.cr)||0;
+    return '<tr>' +
+      '<td class="mono" style="font-size:12px;padding:3px 0">' + e.acct + '</td>' +
+      '<td style="font-size:12px;padding:3px 0">' + (e.name||acctName(e.acct)||'') + '</td>' +
+      '<td class="text-right mono" style="font-size:12px;padding:3px 0">' + (e.dr?fmt(e.dr):'') + '</td>' +
+      '<td class="text-right mono" style="font-size:12px;padding:3px 0">' + (e.cr?fmt(e.cr):'') + '</td>' +
+    '</tr>';
+  }).join('');
+  return '<div style="font-size:12px;color:var(--ink-mid);margin-bottom:6px">' + glEntry.id + ' · ' + fmtDate(glEntry.date) + ' · ' + (glEntry.memo||'') + '</div>' +
+    '<table style="width:100%;border-collapse:collapse;margin-bottom:10px">' +
+      '<thead><tr style="font-size:11px;color:var(--ink-lo)"><th style="text-align:left;padding:3px 0">Account</th><th style="text-align:left">Name</th><th class="text-right">Debit</th><th class="text-right">Credit</th></tr></thead>' +
+      '<tbody>' + rows + '</tbody>' +
+      '<tfoot><tr style="font-weight:600;border-top:1px solid var(--border)">' +
+        '<td colspan="2" style="padding-top:4px;font-size:12px">Total</td>' +
+        '<td class="text-right mono" style="padding-top:4px;font-size:12px">' + fmt(totalDr) + '</td>' +
+        '<td class="text-right mono" style="padding-top:4px;font-size:12px">' + fmt(totalCr) + '</td>' +
+      '</tr></tfoot>' +
+    '</table>';
+}
+
+function apMatchesHtml(apMatches){
+  var rows = apMatches.map(function(m){
+    var inv = DB.invoices.find(function(i){ return i.id === m.invoice_id; });
+    var pmt = DB.payments.find(function(p){ return p.id === m.payment_id; });
+    var label = inv ? ((inv.invoiceNum||inv.id) + ' — ' + vendorName(inv.vendorId)) : (m.invoice_id || '(invoice not found)');
+    return '<div style="display:flex;justify-content:space-between;font-size:12px;padding:4px 0;border-bottom:1px solid var(--border)">' +
+      '<span>' + label + (pmt ? (' · ' + fmtDate(pmt.date) + ' · ' + pmt.method) : '') + '</span>' +
+      '<span class="mono">' + fmt(m.amount) + '</span>' +
+    '</div>';
+  }).join('');
+  var glTables = apMatches
+    .map(function(m){ return DB.gl.find(function(g){ return g.ref === m.payment_id; }); })
+    .filter(Boolean)
+    .map(glEntryTableHtml).join('');
+  return rows + (glTables ? ('<div style="margin-top:8px">' + glTables + '</div>') : '');
+}
+
+function revMatchesHtml(revMatches){
+  var rows = revMatches.map(function(m){
+    return '<div style="display:flex;justify-content:space-between;font-size:12px;padding:4px 0;border-bottom:1px solid var(--border)">' +
+      '<span>Clover settlement ' + fmtDate(m.settlement_date) + '</span>' +
+      '<span class="mono">' + fmt(m.amount) + '</span>' +
+    '</div>';
+  }).join('');
+  var glTables = revMatches
+    .map(function(m){ return DB.gl.find(function(g){ return g.ref === m.id; }); })
+    .filter(Boolean)
+    .map(glEntryTableHtml).join('');
+  return rows + (glTables ? ('<div style="margin-top:8px">' + glTables + '</div>') : '');
+}
+
+function payrollMatchesHtml(payrollMatches, editId){
+  var rows = payrollMatches.map(function(m){
+    var run = DB.payrollRuns.find(function(r){ return r.id === m.payroll_run_id; });
+    var label = run ? ('Run ' + (run.runNumber||run.id) + ' · ' + fmtDate(run.checkDate)) : (m.payroll_run_id || '(run not found)');
+    return '<div style="display:flex;justify-content:space-between;font-size:12px;padding:4px 0;border-bottom:1px solid var(--border)">' +
+      '<span>' + label + '</span>' +
+      '<span class="mono">' + fmt(m.amount) + '</span>' +
+    '</div>';
+  }).join('');
+  var gl = DB.gl.find(function(g){ return g.ref === 'PAYROLL-'+editId; });
+  return rows + (gl ? ('<div style="margin-top:8px">' + glEntryTableHtml(gl) + '</div>') : '');
+}
+
+function buildGLCodingSection(editId, row){
+  if(!editId) return '';
+  var matches = blRowMatches(editId);
+  var apMatches = matches.filter(function(m){ return m.match_kind === 'ap_payment'; });
+  var revMatches = matches.filter(function(m){ return m.match_kind === 'clover_revenue'; });
+  var directMatches = matches.filter(function(m){ return m.match_kind === 'direct'; });
+  var payrollMatches = matches.filter(function(m){ return m.match_kind === 'payroll_run'; });
+
+  var html = '';
+
+  var splitParts = blRowSplits(editId);
+  if(splitParts.length){
+    var troyPart = splitParts.find(function(s){ return s.era === 'troy'; });
+    var dcParts = splitParts.filter(function(s){ return s.era === 'dc'; });
+    var troyAmt = troyPart ? Math.abs(parseFloat(troyPart.amount)||0) : 0;
+    var dcLabel = dcParts.map(function(p){ return p.gl_account + ' ' + fmt(Math.abs(parseFloat(p.amount)||0)); }).join(', ') || '—';
+    html += '<div style="font-size:12px;margin-bottom:4px"><strong>Troy</strong> ' + fmt(troyAmt) + ' / <strong>DC</strong> ' + dcLabel + '</div>';
+    if(troyPart && troyPart.basis){
+      html += '<div style="font-size:11px;color:var(--ink-mid);margin-bottom:10px">Basis: ' + troyPart.basis + '</div>';
+    }
+  }
+
+  if(directMatches.length){
+    var dGl = DB.gl.find(function(g){ return g.ref === 'DIRECT-'+editId; });
+    if(dGl) html += glEntryTableHtml(dGl);
+  } else if(apMatches.length){
+    html += apMatchesHtml(apMatches);
+  } else if(revMatches.length){
+    html += revMatchesHtml(revMatches);
+  } else if(payrollMatches.length){
+    html += payrollMatchesHtml(payrollMatches, editId);
+  }
+
+  if(!html) return '';
+  return '<div style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">' +
+    '<div style="font-weight:600;font-size:13px;margin-bottom:10px">GL Coding</div>' +
+    html +
+  '</div>';
 }
 
 function openBankLedgerModal(editId){
@@ -7297,6 +7411,16 @@ function openBankLedgerModal(editId){
   // unmatched first (its GL entry already exists and era is derived from it).
   var blStatus = editId ? blRowStatus(editId) : null;
   var blMType = editId ? blMatchType(row) : null;
+
+  // Account (routing category) only matters while the row is still open and
+  // not a Split -- a matched/coded row's categorization already happened,
+  // and a Split row's GL routing comes from its own Troy/DC accounts, not
+  // this field. Hidden otherwise; its stored value is preserved on save.
+  var showAccountField = (!editId || blStatus === 'open') && v('era','dc') !== 'split';
+  var accountFieldHtml = showAccountField
+    ? '<div class="form-group span-2"><label>Account <span style="font-weight:400;color:var(--ink-lo)">(drives AP/Revenue matching)</span></label><select id="bl-account">' + selOpts(BL_ACCOUNT_VALUES, v('account')) + '</select></div>'
+    : '';
+
   var glSection = '';
   // Reset the multi-account GL line editor state on every modal open so a
   // previous row's lines never bleed into this one.
@@ -7378,10 +7502,12 @@ function openBankLedgerModal(editId){
 
     var showSplit = v('era','dc') === 'split';
     glSection =
+      buildGLCodingSection(editId, row) +
       '<div id="bl-gl-single-section" style="display:' + (showSplit?'none':'block') + '">' + singleGlSection + '</div>' +
       '<div id="bl-gl-split-section" style="display:' + (showSplit?'block':'none') + '">' + splitGlSection + '</div>';
   } else if(editId && blStatus !== 'open'){
-    glSection = '<div style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border);font-size:12px;color:var(--ink-mid)">' +
+    glSection = buildGLCodingSection(editId, row) +
+      '<div style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border);font-size:12px;color:var(--ink-mid)">' +
       'This transaction is already ' + (blStatus==='matched'?'matched':'coded') + ' to the GL. ' +
       'Click <strong>Unmatch</strong> on the ledger row first if you need to change how it was booked.' +
     '</div>';
@@ -7404,10 +7530,7 @@ function openBankLedgerModal(editId){
           '<div class="form-group"><label>Gross Amount *</label><input type="number" id="bl-amount" step="0.01" min="0" value="' + (row ? Math.abs(parseFloat(row.gross_amount)||0) : '') + '" placeholder="0.00" oninput="updateSplitCheck()"></div>' +
           eraField +
           '<div class="form-group"><label>Ck#</label><input id="bl-ck" value="' + v('ck_num') + '" placeholder="Check number"></div>' +
-          '<div class="form-group"><label>Statement Type</label><select id="bl-stmt-type" onchange="syncBLStmtSec()">' + selOpts(BL_STMT_TYPES, v('stmt_type')) + '</select></div>' +
-          '<div class="form-group"><label>Statement Section</label><select id="bl-stmt-sec">' + selOpts(BL_STMT_SEC, v('stmt_sec')) + '</select></div>' +
-          '<div class="form-group span-2"><label>Statement Category</label><select id="bl-stmt-cat">' + selOpts(BL_STMT_CAT, v('stmt_category')) + '</select></div>' +
-          '<div class="form-group span-2"><label>Account <span style="font-weight:400;color:var(--ink-lo)">(drives AP/Revenue matching)</span></label><select id="bl-account">' + selOpts(BL_ACCOUNT_VALUES, v('account')) + '</select></div>' +
+          accountFieldHtml +
           '<div class="form-group span-2"><label>Note</label><input id="bl-note" value="' + v('note') + '" placeholder="Optional free-text note"></div>' +
         '</div>' +
         '<div id="bl-err" style="color:var(--red);font-size:12px;margin-top:8px"></div>' +
@@ -7420,17 +7543,6 @@ function openBankLedgerModal(editId){
       '</div>' +
     '</div>'
   );
-}
-
-function syncBLStmtSec(){
-  var t = $('bl-stmt-type');
-  var s = $('bl-stmt-sec');
-  if(!t || !s) return;
-  if(t.value === 'P&L' && !s.value){
-    // auto-suggest based on trans type
-    var tt = $('bl-trans-type');
-    s.value = (tt && tt.value === 'Credit') ? '1 Revenue' : '2 Expense';
-  }
 }
 
 // Reads a multi-account GL line editor's state (set by readSingleGLLinesFromForm
@@ -7592,10 +7704,10 @@ async function saveBankLedgerModal(editId){
     customer_vendor: vendor,
     description: $('bl-desc').value.trim(),
     era: newEra,
-    stmt_type: $('bl-stmt-type').value,
-    stmt_sec: $('bl-stmt-sec').value,
-    stmt_category: $('bl-stmt-cat').value,
-    account: $('bl-account').value,
+    stmt_type: existingRow ? existingRow.stmt_type : '',
+    stmt_sec: existingRow ? existingRow.stmt_sec : '',
+    stmt_category: existingRow ? existingRow.stmt_category : '',
+    account: ($('bl-account') ? $('bl-account').value : (existingRow ? existingRow.account||'' : '')),
     note: $('bl-note').value.trim(),
     ck_num: $('bl-ck').value.trim(),
     trans_type: transType,
@@ -8539,10 +8651,10 @@ async function saveAndPostSplitToGL(editId){
     customer_vendor: vendor,
     description: $('bl-desc').value.trim(),
     era: 'split',
-    stmt_type: $('bl-stmt-type').value,
-    stmt_sec: $('bl-stmt-sec').value,
-    stmt_category: $('bl-stmt-cat').value,
-    account: $('bl-account').value,
+    stmt_type: existingRow ? existingRow.stmt_type : '',
+    stmt_sec: existingRow ? existingRow.stmt_sec : '',
+    stmt_category: existingRow ? existingRow.stmt_category : '',
+    account: ($('bl-account') ? $('bl-account').value : (existingRow ? existingRow.account||'' : '')),
     note: $('bl-note').value.trim(),
     ck_num: $('bl-ck').value.trim(),
     trans_type: transType,
@@ -8636,10 +8748,10 @@ async function saveAndPostToGL(editId){
     customer_vendor: vendor,
     description: $('bl-desc').value.trim(),
     era: newEra,
-    stmt_type: $('bl-stmt-type').value,
-    stmt_sec: $('bl-stmt-sec').value,
-    stmt_category: $('bl-stmt-cat').value,
-    account: $('bl-account').value,
+    stmt_type: existingRow ? existingRow.stmt_type : '',
+    stmt_sec: existingRow ? existingRow.stmt_sec : '',
+    stmt_category: existingRow ? existingRow.stmt_category : '',
+    account: ($('bl-account') ? $('bl-account').value : (existingRow ? existingRow.account||'' : '')),
     note: $('bl-note').value.trim(),
     ck_num: $('bl-ck').value.trim(),
     trans_type: transType,
