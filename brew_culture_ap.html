@@ -4621,18 +4621,110 @@ function selectEraBL(val,cls,el,sfx){
     if(val==='split')updateSplitCheck();
   }
 }
-// Typing one split-part amount fills the other as the remainder of the row
-// total, so the two normally stay in sync without the user doing the math.
+
+// ── Multi-account GL line editor ────────────────────────────────────────
+// Lets the "Book to General Ledger" section and the Split panel's DC Part
+// each be divided across more than one GL account. State is keyed by a
+// prefix ('bl-gl' for the single-account section, 'bl-split-dc' for the
+// Split panel's DC part); each entry is an array of {acct, amt}. Reset to
+// {} whenever openBankLedgerModal builds a fresh set of sections.
+var _glLineState = {};
+
+function glLineRowHtml(prefix, i, line, removable){
+  return '<div style="display:flex;gap:8px;align-items:flex-end;margin-bottom:8px">' +
+    '<div class="form-group" style="flex:2;margin:0"><label style="font-size:11px">' + (i===0?'GL Account *':'GL Account') + '</label>' +
+      '<select id="' + prefix + '-acct-' + i + '" onchange="onGLLineChange(\'' + prefix + '\')">' +
+        '<option value="">-- Select account --</option>' + acctOptionsHtml(line.acct) +
+      '</select></div>' +
+    '<div class="form-group" style="flex:1;margin:0"><label style="font-size:11px">Amount</label>' +
+      '<input type="number" step="0.01" min="0" id="' + prefix + '-amt-' + i + '" value="' + (line.amt||'') + '" placeholder="0.00" oninput="onGLLineChange(\'' + prefix + '\')"></div>' +
+    (removable ? '<button type="button" class="btn btn-ghost btn-sm" onclick="removeGLLine(\'' + prefix + '\',' + i + ')" title="Remove">&#215;</button>' : '<span style="width:34px;display:inline-block"></span>') +
+  '</div>';
+}
+
+function renderGLLines(prefix){
+  var container = $(prefix + '-lines');
+  if(!container) return;
+  if(!_glLineState[prefix] || _glLineState[prefix].length === 0) _glLineState[prefix] = [{acct:'', amt:''}];
+  var lines = _glLineState[prefix];
+  container.innerHTML = lines.map(function(l,i){ return glLineRowHtml(prefix, i, l, lines.length > 1); }).join('');
+  onGLLineChange(prefix);
+}
+
+function syncGLLinesFromDOM(prefix){
+  var lines = _glLineState[prefix];
+  if(!lines) return;
+  lines.forEach(function(l, i){
+    var a = $(prefix+'-acct-'+i), m = $(prefix+'-amt-'+i);
+    if(a) l.acct = a.value;
+    if(m) l.amt = m.value;
+  });
+}
+
+function addGLLine(prefix){
+  syncGLLinesFromDOM(prefix);
+  if(!_glLineState[prefix]) _glLineState[prefix] = [];
+  _glLineState[prefix].push({acct:'', amt:''});
+  renderGLLines(prefix);
+}
+
+function removeGLLine(prefix, i){
+  syncGLLinesFromDOM(prefix);
+  if(!_glLineState[prefix] || _glLineState[prefix].length <= 1) return;
+  _glLineState[prefix].splice(i, 1);
+  renderGLLines(prefix);
+}
+
+// Routes to the right running-total check after any line edit, and --
+// for the DC part specifically -- keeps the old "Troy auto-fills the lone
+// DC line" convenience working when there's still just one DC account.
+function onGLLineChange(prefix){
+  syncGLLinesFromDOM(prefix);
+  if(prefix === 'bl-gl'){
+    updateSingleGLCheck();
+  } else if(prefix === 'bl-split-dc'){
+    var dcLines = _glLineState['bl-split-dc'] || [];
+    if(dcLines.length === 1){
+      var totalEl = $('bl-amount'), troyEl = $('bl-split-troy');
+      if(totalEl && troyEl){
+        var total = Math.abs(parseFloat(totalEl.value)||0);
+        var d = Math.abs(parseFloat(dcLines[0].amt)||0);
+        troyEl.value = Math.max(0, Math.round((total-d)*100)/100).toFixed(2);
+      }
+    }
+    updateSplitCheck();
+  }
+}
+
+function updateSingleGLCheck(){
+  var el = $('bl-gl-check');
+  if(!el) return;
+  syncGLLinesFromDOM('bl-gl');
+  var total = Math.abs(parseFloat(($('bl-amount')||{}).value)||0);
+  var sum = Math.round((_glLineState['bl-gl']||[]).reduce(function(s,l){ return s+Math.abs(parseFloat(l.amt)||0); },0)*100)/100;
+  if(sum===0){ el.innerHTML=''; return; }
+  var diff = Math.round((sum-total)*100)/100;
+  el.innerHTML = (Math.abs(diff)<=0.005)
+    ? '<span style="color:var(--green)">Lines total '+fmt(sum)+' ✓ matches row total '+fmt(total)+'</span>'
+    : '<span style="color:var(--red)">Lines total '+fmt(sum)+' — off by '+fmt(Math.abs(diff))+' from row total '+fmt(total)+'</span>';
+}
+
+// Typing the Troy amount fills the lone DC line as the remainder of the
+// row total (same convenience as before) -- only unambiguous while there's
+// still a single DC account; once a second is added, the running check
+// takes over and the user reconciles manually.
 function onSplitAmountInput(which){
-  var totalEl=$('bl-amount'),troyEl=$('bl-split-troy'),dcEl=$('bl-split-dc');
-  if(!totalEl||!troyEl||!dcEl)return;
+  if(which !== 'troy') { updateSplitCheck(); return; }
+  var totalEl=$('bl-amount');
+  if(!totalEl) return;
   var total=Math.abs(parseFloat(totalEl.value)||0);
-  if(which==='troy'){
-    var t=Math.abs(parseFloat(troyEl.value)||0);
-    dcEl.value=Math.max(0,Math.round((total-t)*100)/100).toFixed(2);
-  } else {
-    var d=Math.abs(parseFloat(dcEl.value)||0);
-    troyEl.value=Math.max(0,Math.round((total-d)*100)/100).toFixed(2);
+  syncGLLinesFromDOM('bl-split-dc');
+  var dcLines = _glLineState['bl-split-dc'] || [];
+  if(dcLines.length === 1){
+    var t=Math.abs(parseFloat(($('bl-split-troy')||{}).value)||0);
+    dcLines[0].amt = Math.max(0,Math.round((total-t)*100)/100).toFixed(2);
+    var amtEl = $('bl-split-dc-amt-0');
+    if(amtEl) amtEl.value = dcLines[0].amt;
   }
   updateSplitCheck();
 }
@@ -4641,7 +4733,8 @@ function updateSplitCheck(){
   if(!el)return;
   var total=Math.abs(parseFloat(($('bl-amount')||{}).value)||0);
   var t=Math.abs(parseFloat(($('bl-split-troy')||{}).value)||0);
-  var d=Math.abs(parseFloat(($('bl-split-dc')||{}).value)||0);
+  syncGLLinesFromDOM('bl-split-dc');
+  var d=Math.round((_glLineState['bl-split-dc']||[]).reduce(function(s,l){ return s+Math.abs(parseFloat(l.amt)||0); },0)*100)/100;
   var sum=Math.round((t+d)*100)/100;
   var diff=Math.round((sum-total)*100)/100;
   if(t===0&&d===0){ el.innerHTML=''; return; }
@@ -7205,9 +7298,11 @@ function openBankLedgerModal(editId){
   var blStatus = editId ? blRowStatus(editId) : null;
   var blMType = editId ? blMatchType(row) : null;
   var glSection = '';
+  // Reset the multi-account GL line editor state on every modal open so a
+  // previous row's lines never bleed into this one.
+  _glLineState = {};
   if(editId && blStatus === 'open'){
     var suggestedAcct = BL_DIRECT_ACCT_MAP[row.account] || '';
-    var glAcctOptions = acctOptionsHtml(suggestedAcct);
     var routeNote = '';
     if(blMType === 'ap'){
       routeNote = '<div class="alert" style="background:var(--amber-lo);border:1px solid var(--amber);font-size:12px;margin-bottom:10px">' +
@@ -7222,31 +7317,39 @@ function openBankLedgerModal(editId){
         '<button class="btn btn-ghost btn-sm" style="margin-left:4px" onclick="closeModal();openRevMatchModal(\'' + editId + '\')">Open Revenue Match instead</button>' +
       '</div>';
     }
+    var rowTotal = Math.abs(parseFloat(row.gross_amount)||0);
+
+    // Single-account GL section: starts with one line (the suggested
+    // account, prefilled with the full row amount) -- "+ Add Account"
+    // divides the posting across multiple GL accounts.
+    _glLineState['bl-gl'] = [{ acct: suggestedAcct, amt: rowTotal ? rowTotal.toFixed(2) : '' }];
+    var singleLinesHtml = _glLineState['bl-gl'].map(function(l,i){ return glLineRowHtml('bl-gl', i, l, false); }).join('');
     var singleGlSection =
       '<div style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">' +
         '<div style="font-weight:600;font-size:13px;margin-bottom:10px">Book to General Ledger</div>' +
         routeNote +
-        '<div class="form-grid">' +
-          '<div class="form-group span-2"><label>GL Account *</label>' +
-            '<select id="bl-gl-acct"><option value="">-- Select account --</option>' + glAcctOptions + '</select>' +
-            '<span class="form-hint">' + (suggestedAcct ? 'Suggested based on category "' + row.account + '" \u2014 change it if that is not right.' : 'No default suggestion for "' + (row.account||'this category') + '" \u2014 pick the right account.') + '</span>' +
-          '</div>' +
-          '<div class="form-group span-2"><label>GL Memo</label><input id="bl-gl-memo" placeholder="Optional \u2014 defaults to vendor and account"></div>' +
-        '</div>' +
+        '<div class="form-hint" style="margin-bottom:8px">' + (suggestedAcct ? 'Suggested based on category "' + row.account + '" \u2014 change it if that is not right, or add more accounts to split this posting.' : 'No default suggestion for "' + (row.account||'this category') + '" \u2014 pick the right account, or add more to split this posting.') + '</div>' +
+        '<div id="bl-gl-lines">' + singleLinesHtml + '</div>' +
+        '<button type="button" class="btn btn-ghost btn-sm" onclick="addGLLine(\'bl-gl\')">+ Add Account</button>' +
+        '<div id="bl-gl-check" style="font-size:12px;margin-top:8px"></div>' +
+        '<div class="form-group" style="margin-top:12px"><label>GL Memo</label><input id="bl-gl-memo" placeholder="Optional \u2014 defaults to vendor and account"></div>' +
         '<div id="bl-gl-err" style="color:var(--red);font-size:12px;margin-top:8px"></div>' +
       '</div>';
 
     // Split panel: a row straddling the 11/3/25 transfer gets a Troy part
-    // (always -> 1300) and a DC part (any account). Both single- and
-    // split- sections are rendered together and toggled via display:none
-    // -- selectEraBL swaps which one is visible as the era control changes.
-    var rowTotal = Math.abs(parseFloat(row.gross_amount)||0);
+    // (always -> 1300) and a DC part, which can itself be divided across
+    // multiple GL accounts. Both single- and split- sections are rendered
+    // together and toggled via display:none -- selectEraBL swaps which one
+    // is visible as the era control changes.
     var existingSplitParts = blRowSplits(editId);
     var troyPartRow = existingSplitParts.find(function(s){ return s.era === 'troy'; });
-    var dcPartRow = existingSplitParts.find(function(s){ return s.era === 'dc'; });
+    var existingDcRows = existingSplitParts.filter(function(s){ return s.era === 'dc'; });
     var troyAmtInit = troyPartRow ? Math.abs(parseFloat(troyPartRow.amount)||0) : 0;
-    var dcAmtInit = dcPartRow ? Math.abs(parseFloat(dcPartRow.amount)||0) : 0;
-    var dcAcctOptions = acctOptionsHtml(dcPartRow ? dcPartRow.gl_account : '');
+    var dcAmtInit = existingDcRows.reduce(function(s,r){ return s+Math.abs(parseFloat(r.amount)||0); }, 0);
+    _glLineState['bl-split-dc'] = existingDcRows.length
+      ? existingDcRows.map(function(r){ return { acct: r.gl_account||'', amt: Math.abs(parseFloat(r.amount)||0) || '' }; })
+      : [{ acct:'', amt:'' }];
+    var dcLinesHtml = _glLineState['bl-split-dc'].map(function(l,i){ return glLineRowHtml('bl-split-dc', i, l, _glLineState['bl-split-dc'].length>1); }).join('');
     var needsSplitBadge = (v('era','dc') === 'split' && existingSplitParts.length === 0)
       ? '<div class="alert" style="background:var(--red-lo);border:1px solid var(--red);font-size:12px;margin-bottom:10px;color:var(--red);font-weight:600">' +
           'Needs split amounts \u2014 this row was migrated from the old "DC Paid for Troy" placeholder. ' +
@@ -7263,13 +7366,12 @@ function openBankLedgerModal(editId){
       '<div style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">' +
         '<div style="font-weight:600;font-size:13px;margin-bottom:10px">Split: Troy Part / DC Part</div>' +
         needsSplitBadge +
-        '<div class="form-grid">' +
-          '<div class="form-group"><label>Troy Part (\u2192 1300) *</label><input type="number" id="bl-split-troy" step="0.01" min="0" value="' + (troyAmtInit||'') + '" placeholder="0.00" oninput="onSplitAmountInput(\'troy\')"></div>' +
-          '<div class="form-group"><label>DC Part *</label><input type="number" id="bl-split-dc" step="0.01" min="0" value="' + (dcAmtInit||'') + '" placeholder="0.00" oninput="onSplitAmountInput(\'dc\')"></div>' +
-          '<div class="form-group span-2"><label>DC Part GL Account *</label><select id="bl-split-dc-acct"><option value="">-- Select account --</option>' + dcAcctOptions + '</select></div>' +
-          '<div class="form-group span-2"><label>Basis</label><input id="bl-split-basis" value="' + (troyPartRow ? (troyPartRow.basis||'') : '') + '" placeholder="e.g. how the Troy/DC amounts were computed"></div>' +
-          '<div class="form-group span-2"><label>GL Memo</label><input id="bl-split-memo" placeholder="Optional \u2014 defaults to vendor and accounts"></div>' +
-        '</div>' +
+        '<div class="form-group"><label>Troy Part (\u2192 1300) *</label><input type="number" id="bl-split-troy" step="0.01" min="0" value="' + (troyAmtInit||'') + '" placeholder="0.00" oninput="onSplitAmountInput(\'troy\')"></div>' +
+        '<div style="font-weight:600;font-size:12px;margin:14px 0 8px">DC Part \u2014 GL Account(s)</div>' +
+        '<div id="bl-split-dc-lines">' + dcLinesHtml + '</div>' +
+        '<button type="button" class="btn btn-ghost btn-sm" onclick="addGLLine(\'bl-split-dc\')">+ Add Account</button>' +
+        '<div class="form-group span-2" style="margin-top:12px"><label>Basis</label><input id="bl-split-basis" value="' + (troyPartRow ? (troyPartRow.basis||'') : '') + '" placeholder="e.g. how the Troy/DC amounts were computed"></div>' +
+        '<div class="form-group span-2"><label>GL Memo</label><input id="bl-split-memo" placeholder="Optional \u2014 defaults to vendor and accounts"></div>' +
         '<div id="bl-split-check" style="font-size:12px;margin-top:8px">' + splitCheckInit + '</div>' +
         '<div id="bl-split-err" style="color:var(--red);font-size:12px;margin-top:8px"></div>' +
       '</div>';
@@ -7331,56 +7433,108 @@ function syncBLStmtSec(){
   }
 }
 
+// Reads a multi-account GL line editor's state (set by readSingleGLLinesFromForm
+// / readSplitPartsFromForm below) into a clean {acct, amt} list, dropping
+// fully-blank rows (an unused "+ Add Account" row the user didn't fill in)
+// and flagging a row that has an amount but no account chosen.
+function collectGLLines(prefix){
+  syncGLLinesFromDOM(prefix);
+  var raw = _glLineState[prefix] || [];
+  var lines = [];
+  for(var i=0;i<raw.length;i++){
+    var amt = Math.abs(parseFloat(raw[i].amt)||0);
+    var acct = raw[i].acct || '';
+    if(!acct && amt<=0) continue;
+    if(amt<=0) continue;
+    if(!acct) return {error:'Select a GL account for each line with an amount.'};
+    lines.push({acct:acct, amt:amt});
+  }
+  return {lines:lines};
+}
+
+// Used by saveAndPostToGL (single-account "Book to General Ledger"
+// section): validates the GL lines sum to the row total. Returns null when
+// the section isn't present in the DOM (editId null, or row not 'open').
+function readSingleGLLinesFromForm(rowTotal){
+  if(!$('bl-gl-lines')) return null;
+  var collected = collectGLLines('bl-gl');
+  if(collected.error) return {ok:false, error:collected.error};
+  var lines = collected.lines;
+  if(lines.length===0) return {ok:false, error:'Select a GL account and amount.'};
+  var sum = Math.round(lines.reduce(function(s,l){ return s+l.amt; },0)*100)/100;
+  var diff = Math.round((sum-rowTotal)*100)/100;
+  if(Math.abs(diff) > 0.005){
+    return {ok:false, error:'Lines total '+fmt(sum)+', which is off by '+fmt(Math.abs(diff))+' from the row total '+fmt(rowTotal)+'. Fix the amounts before saving.'};
+  }
+  return {ok:true, lines:lines};
+}
+
 // Shared by the plain Save path and the Save & Post to GL path: reads the
 // Split panel's inputs (when present in the DOM) and validates the parts
 // sum to the row total. Returns null when the Split panel isn't present
 // (new rows, or era !== 'split') -- caller should skip split handling
-// entirely in that case. Otherwise returns {ok:true, troyAmt, dcAmt,
-// dcAcct, basis, memoInput} or {ok:false, error}.
+// entirely in that case. Otherwise returns {ok:true, troyAmt, dcLines,
+// dcAmt, basis, memoInput} or {ok:false, error}. dcLines is an array of
+// {acct, amt} -- the DC part can itself be divided across GL accounts.
 function readSplitPartsFromForm(rowTotal){
   var troyEl = $('bl-split-troy');
   if(!troyEl) return null;
   var troyAmt = Math.abs(parseFloat(troyEl.value)||0);
-  var dcAmt = Math.abs(parseFloat(($('bl-split-dc')||{}).value)||0);
-  var dcAcct = ($('bl-split-dc-acct')||{}).value || '';
+  var collected = collectGLLines('bl-split-dc');
+  if(collected.error) return {ok:false, error:collected.error};
+  var dcLines = collected.lines;
+  var dcAmt = Math.round(dcLines.reduce(function(s,l){ return s+l.amt; },0)*100)/100;
   var basis = (($('bl-split-basis')||{}).value||'').trim();
   var memoInput = (($('bl-split-memo')||{}).value||'').trim();
 
-  if(troyAmt <= 0 && dcAmt <= 0) return {ok:false, error:'Enter the Troy and/or DC part amounts.'};
-  if(dcAmt > 0 && !dcAcct) return {ok:false, error:'Select a GL account for the DC part.'};
+  if(troyAmt <= 0 && dcLines.length === 0) return {ok:false, error:'Enter the Troy part and/or at least one DC account line.'};
   var sum = Math.round((troyAmt+dcAmt)*100)/100;
   var diff = Math.round((sum-rowTotal)*100)/100;
   if(Math.abs(diff) > 0.005){
     return {ok:false, error:'Troy ('+fmt(troyAmt)+') + DC ('+fmt(dcAmt)+') = '+fmt(sum)+', which is off by '+fmt(Math.abs(diff))+' from the row total '+fmt(rowTotal)+'. Fix the parts before saving.'};
   }
-  return {ok:true, troyAmt:troyAmt, dcAmt:dcAmt, dcAcct:dcAcct, basis:basis, memoInput:memoInput};
+  return {ok:true, troyAmt:troyAmt, dcLines:dcLines, dcAmt:dcAmt, basis:basis, memoInput:memoInput};
 }
 
-// Upserts the Troy/DC bank_ledger_split rows for a bank_ledger row, reusing
-// existing part ids (edit in place) or allocating new ones via
-// nextBankSplitIds. Updates REV.bankSplits on success.
+// Upserts the Troy/DC bank_ledger_split rows for a bank_ledger row. The
+// Troy part is always exactly one row; DC part rows are reconciled by
+// position against whatever DC rows already exist -- reused ids are edited
+// in place, extra new lines get newly allocated ids, and any existing DC
+// rows beyond the new line count are deleted. Updates REV.bankSplits.
 async function persistSplitParts(rowId, parts){
   var existingParts = blRowSplits(rowId);
   var troyPartRow = existingParts.find(function(s){ return s.era === 'troy'; });
-  var dcPartRow = existingParts.find(function(s){ return s.era === 'dc'; });
-  var needed = (troyPartRow?0:1) + (dcPartRow?0:1);
+  var existingDcRows = existingParts.filter(function(s){ return s.era === 'dc'; });
+  var nowIso = new Date().toISOString();
+
+  var needed = (troyPartRow?0:1) + Math.max(0, parts.dcLines.length - existingDcRows.length);
   var newIds = needed>0 ? await nextBankSplitIds(needed) : [];
   var ni = 0;
-  var nowIso = new Date().toISOString();
+
   var troyRec = {
     id: troyPartRow ? troyPartRow.id : newIds[ni++],
     bank_ledger_id: rowId, era: 'troy', amount: parts.troyAmt, gl_account: '1300',
     basis: parts.basis, memo: parts.memoInput, created_at: troyPartRow ? troyPartRow.created_at : nowIso
   };
-  var dcRec = {
-    id: dcPartRow ? dcPartRow.id : newIds[ni++],
-    bank_ledger_id: rowId, era: 'dc', amount: parts.dcAmt, gl_account: parts.dcAcct,
-    basis: parts.basis, memo: parts.memoInput, created_at: dcPartRow ? dcPartRow.created_at : nowIso
-  };
-  var ok = await saveBankSplitParts([troyRec, dcRec]);
+  var dcRecs = parts.dcLines.map(function(l, i){
+    var existing = existingDcRows[i];
+    return {
+      id: existing ? existing.id : newIds[ni++],
+      bank_ledger_id: rowId, era: 'dc', amount: l.amt, gl_account: l.acct,
+      basis: parts.basis, memo: parts.memoInput, created_at: existing ? existing.created_at : nowIso
+    };
+  });
+  var toDelete = existingDcRows.slice(parts.dcLines.length).map(function(r){ return r.id; });
+
+  var ok = await saveBankSplitParts([troyRec].concat(dcRecs));
   if(!ok) return false;
+  if(toDelete.length){
+    var delOk = await deleteBankSplitPartsByIds(toDelete);
+    if(!delOk) return false;
+  }
   REV.bankSplits = REV.bankSplits.filter(function(s){ return s.bank_ledger_id !== rowId; });
-  REV.bankSplits.push(troyRec, dcRec);
+  REV.bankSplits.push(troyRec);
+  dcRecs.forEach(function(r){ REV.bankSplits.push(r); });
   return true;
 }
 
@@ -8250,21 +8404,25 @@ function openDirectPostModal(rowId){
 // and records a 'direct' bank_ledger_match. Used by both the standalone
 // "Code to GL" button/modal and the inline GL section in the edit modal,
 // so the two paths can never drift apart.
-async function postBankRowToGL(row, acct, memoInput){
-  var glAcctName = acctName(acct) || acct;
+// lines: array of {acct, amt} -- the posting may be divided across more
+// than one GL account; each becomes its own DR/CR line against one shared
+// cash line for the row's full amount.
+async function postBankRowToGL(row, lines, memoInput){
   var amtAbs = Math.abs(parseFloat(row.gross_amount)||0);
   var cashAcct = row.bank === 'Glacier Bank' ? '1010' : '1011';
   var cashName = row.bank === 'Glacier Bank' ? 'Glacier Bank' : 'SouthState Bank';
   var isCredit = row.trans_type === 'Credit';
+  var parts = lines.map(function(l){ return {acct:l.acct, name:acctName(l.acct)||l.acct, amt:l.amt}; });
 
-  // Credit (money in, e.g. a loan draw or non-Clover revenue): Dr bank / Cr account.
-  // Debit (money out, e.g. rent, utilities, payroll, a fee, a tax remittance): Dr account / Cr bank.
+  // Credit (money in, e.g. a loan draw or non-Clover revenue): Dr bank / Cr account(s).
+  // Debit (money out, e.g. rent, utilities, payroll, a fee, a tax remittance): Dr account(s) / Cr bank.
   var entries = isCredit
-    ? [{acct:cashAcct,name:cashName,dr:amtAbs,cr:0},{acct:acct,name:glAcctName,dr:0,cr:amtAbs}]
-    : [{acct:acct,name:glAcctName,dr:amtAbs,cr:0},{acct:cashAcct,name:cashName,dr:0,cr:amtAbs}];
+    ? [{acct:cashAcct,name:cashName,dr:amtAbs,cr:0}].concat(parts.map(function(p){ return {acct:p.acct,name:p.name,dr:0,cr:p.amt}; }))
+    : parts.map(function(p){ return {acct:p.acct,name:p.name,dr:p.amt,cr:0}; }).concat([{acct:cashAcct,name:cashName,dr:0,cr:amtAbs}]);
 
+  var memoAcctLabel = parts.length === 1 ? parts[0].name : (parts.length + ' accounts');
   var je = {id:await nextGLId(), date:row.pmnt_date, ref:'DIRECT-'+row.id, era:ERA.DC,
-    memo:memoInput||((row.customer_vendor||'(no vendor)')+' - '+glAcctName),
+    memo:memoInput||((row.customer_vendor||'(no vendor)')+' - '+memoAcctLabel),
     entries:entries};
   var glOk = await saveGLToSB(je);
   if(!glOk) return false;
@@ -8304,11 +8462,16 @@ async function saveBankSplitParts(rows){
   return true;
 }
 
-// Split GL posting: DR 1300 for the Troy part, DR <dcAcct> for the DC part,
-// CR cash for the sum -- one balanced entry per row (or the credit-side
-// mirror for an inflow). A zero part is simply omitted from the entry.
-async function postSplitRowToGL(row, troyAmt, dcAmt, dcAcct, memoInput){
-  var dcAcctName = acctName(dcAcct) || dcAcct;
+async function deleteBankSplitPartsByIds(ids){
+  var res = await _sb.from('bank_ledger_split').delete().in('id', ids);
+  if(res.error){ console.error('deleteBankSplitPartsByIds', res.error); return false; }
+  return true;
+}
+
+// Split GL posting: DR 1300 for the Troy part, DR <each dcLines[i].acct> for
+// its amount, CR cash for the sum -- one balanced entry per row (or the
+// credit-side mirror for an inflow). A zero/empty part is simply omitted.
+async function postSplitRowToGL(row, troyAmt, dcLines, memoInput){
   var amtAbs = Math.abs(parseFloat(row.gross_amount)||0);
   var cashAcct = row.bank === 'Glacier Bank' ? '1010' : '1011';
   var cashName = row.bank === 'Glacier Bank' ? 'Glacier Bank' : 'SouthState Bank';
@@ -8316,14 +8479,17 @@ async function postSplitRowToGL(row, troyAmt, dcAmt, dcAcct, memoInput){
 
   var parts = [];
   if(troyAmt > 0) parts.push({acct:'1300', name:acctName('1300')||'1300', amt:troyAmt});
-  if(dcAmt > 0) parts.push({acct:dcAcct, name:dcAcctName, amt:dcAmt});
+  dcLines.forEach(function(l){
+    if(l.amt > 0) parts.push({acct:l.acct, name:acctName(l.acct)||l.acct, amt:l.amt});
+  });
 
   var entries = isCredit
     ? [{acct:cashAcct,name:cashName,dr:amtAbs,cr:0}].concat(parts.map(function(p){ return {acct:p.acct,name:p.name,dr:0,cr:p.amt}; }))
     : parts.map(function(p){ return {acct:p.acct,name:p.name,dr:p.amt,cr:0}; }).concat([{acct:cashAcct,name:cashName,dr:0,cr:amtAbs}]);
 
+  var dcSum = dcLines.reduce(function(s,l){ return s+l.amt; }, 0);
   var je = {id:await nextGLId(), date:row.pmnt_date, ref:'DIRECT-'+row.id, era:ERA.SPLIT,
-    memo:memoInput||((row.customer_vendor||'(no vendor)')+' - Split (Troy '+fmt(troyAmt)+' / DC '+fmt(dcAmt)+')'),
+    memo:memoInput||((row.customer_vendor||'(no vendor)')+' - Split (Troy '+fmt(troyAmt)+' / DC '+fmt(dcSum)+')'),
     entries:entries};
   var glOk = await saveGLToSB(je);
   if(!glOk) return false;
@@ -8360,7 +8526,7 @@ async function saveAndPostSplitToGL(editId){
     splitErr.textContent = splitParts ? splitParts.error : 'Split panel not found.';
     return;
   }
-  var troyAmt = splitParts.troyAmt, dcAmt = splitParts.dcAmt, dcAcct = splitParts.dcAcct,
+  var troyAmt = splitParts.troyAmt, dcLines = splitParts.dcLines,
       basis = splitParts.basis, memoInput = splitParts.memoInput;
 
   var grossAmt = transType === 'Debit' ? -Math.abs(amtRaw) : Math.abs(amtRaw);
@@ -8392,7 +8558,7 @@ async function saveAndPostSplitToGL(editId){
   var partsOk = await persistSplitParts(editId, splitParts);
   if(!partsOk){ hideLoadingOverlay(); splitErr.textContent='Row saved, but split parts failed to save. Check console and try again.'; return; }
 
-  var postOk = await postSplitRowToGL(row, troyAmt, dcAmt, dcAcct, memoInput);
+  var postOk = await postSplitRowToGL(row, troyAmt, dcLines, memoInput);
   hideLoadingOverlay();
   if(!postOk){ splitErr.textContent='Row and split parts saved, but GL posting failed. Check console and try posting again.'; return; }
 
@@ -8410,7 +8576,7 @@ async function confirmDirectPost(rowId){
   if(!acct){ errEl.textContent='Select a GL account.'; return; }
 
   showLoadingOverlay('Recording...');
-  var ok = await postBankRowToGL(row, acct, memoInput);
+  var ok = await postBankRowToGL(row, [{acct:acct, amt:Math.abs(parseFloat(row.gross_amount)||0)}], memoInput);
   hideLoadingOverlay();
   if(!ok){
     errEl.textContent='Save failed — the entry was not posted. Check your connection and try again.';
@@ -8432,8 +8598,6 @@ async function saveAndPostToGL(editId){
   if(newEraCheck === 'split') return saveAndPostSplitToGL(editId);
   var mainErr = $('bl-err');
   var glErr = $('bl-gl-err');
-  var acct = $('bl-gl-acct') ? $('bl-gl-acct').value : '';
-  if(!acct){ if(glErr) glErr.textContent='Select a GL account.'; return; }
 
   var pmntDate = $('bl-pmnt-date').value;
   var bank     = $('bl-bank').value;
@@ -8444,6 +8608,12 @@ async function saveAndPostToGL(editId){
   if(!pmntDate){ mainErr.textContent='Payment date required.'; return; }
   if(!vendor)  { mainErr.textContent='Customer/Vendor required.'; return; }
   if(!amtRaw)  { mainErr.textContent='Amount required.'; return; }
+
+  var glLines = readSingleGLLinesFromForm(Math.abs(amtRaw));
+  if(!glLines || !glLines.ok){
+    if(glErr) glErr.textContent = glLines ? glLines.error : 'GL lines not found.';
+    return;
+  }
 
   var newEra = $('era-val-bl').value || 'dc';
   var existingMatches = blRowMatches(editId);
@@ -8483,7 +8653,7 @@ async function saveAndPostToGL(editId){
   if(idx >= 0) REV.bankLedger[idx] = row; else REV.bankLedger.push(row);
 
   var memoInput = $('bl-gl-memo').value.trim();
-  var postOk = await postBankRowToGL(row, acct, memoInput);
+  var postOk = await postBankRowToGL(row, glLines.lines, memoInput);
   hideLoadingOverlay();
   if(!postOk){ glErr.textContent='Transaction saved, but GL posting failed. Check console and try posting again.'; return; }
 
