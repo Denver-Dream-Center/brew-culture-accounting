@@ -637,18 +637,63 @@ let DB = {
   payrollRuns: [],
   payrollRunEmployees: [],
   payrollRunLineItems: [],
-  purchaseOrders: []
+  purchaseOrders: [],
+  // Set per-table (e.g. DB._partial.gl_entries = true) when sbGet/the
+  // load-time row-count check couldn't confirm every row made it into
+  // memory -- see sbGet() and verifyLoadedRowCounts() below. Views that
+  // read a partial table should show a warning rather than a silently
+  // wrong total.
+  _partial: {}
 };
 
 // Supabase helpers
+// sbGet pages through every row instead of trusting one response has
+// everything. PostgREST caps a single select() at 1,000 rows with no
+// error -- with gl_entries at 1,210 rows ordered newest-first, that
+// silently dropped the oldest 210 (everything before ~2026-01-21),
+// wrecking the Trial Balance, the Troy receivable, and every other report
+// built from DB.gl (2026-11-07 incident). Paging needs a stable sort:
+// ordering by a non-unique column alone (entry_date, delivery_date, ...)
+// can skip or duplicate rows at a page boundary when several rows share a
+// value, so every page also orders by the table's primary key (opts.pk,
+// default 'id' -- pass the real one for a table that uses something else,
+// e.g. accounts' pk is 'acct'). If a page errors, the rows read so far are
+// kept, the table is flagged DB._partial[table] = true, and a toast warns
+// that figures may be incomplete -- never a silent partial list.
 async function sbGet(table, opts) {
   opts = opts || {};
-  let q = _sb.from(table).select(opts.select || '*');
-  if(opts.order) q = q.order(opts.order, {ascending: opts.asc !== false});
-  if(opts.limit) q = q.limit(opts.limit);
-  const {data, error} = await q;
-  if(error) { console.error('sbGet error', table, error); return []; }
-  return data || [];
+  const pk = opts.pk || 'id';
+  const orderCol = opts.order || pk;
+  const ascending = opts.asc !== false;
+
+  if(opts.limit){
+    let q = _sb.from(table).select(opts.select || '*').order(orderCol, {ascending}).limit(opts.limit);
+    const {data, error} = await q;
+    if(error) { console.error('sbGet error', table, error); return []; }
+    return data || [];
+  }
+
+  const PAGE_SIZE = 1000;
+  let allRows = [];
+  let page = 0;
+  while(true){
+    const offset = page * PAGE_SIZE;
+    let q = _sb.from(table).select(opts.select || '*').order(orderCol, {ascending});
+    if(orderCol !== pk) q = q.order(pk, {ascending:true});
+    q = q.range(offset, offset + PAGE_SIZE - 1);
+    const {data, error} = await q;
+    if(error){
+      console.error('sbGet error', table, error);
+      DB._partial[table] = true;
+      showToast('Could not load '+table+' - figures may be incomplete', 'warn');
+      return allRows;
+    }
+    const rows = data || [];
+    allRows = allRows.concat(rows);
+    if(rows.length < PAGE_SIZE) break; // last page
+    page++;
+  }
+  return allRows;
 }
 
 async function sbUpsert(table, records, opts) {
@@ -687,7 +732,7 @@ async function loadAllData() {
       sbGet('gl_entries', {order:'entry_date', asc:false}),
       sbGet('fifo_deliveries', {order:'delivery_date', asc:false}),
       sbGet('fifo_rules'),
-      sbGet('accounts', {order:'acct'}),
+      sbGet('accounts', {order:'acct', pk:'acct'}),
       sbGet('ingredients', {order:'name'}),
       sbGet('recipes', {order:'menu_item'}),
       sbGet('pastry_log', {order:'log_date', asc:false}),
@@ -731,11 +776,43 @@ async function loadAllData() {
     // Load revenue data
     await loadRevData();
 
+    await verifyLoadedRowCounts();
+
     hideLoadingOverlay();
   } catch(e) {
     hideLoadingOverlay();
     console.error('loadAllData error:', e);
     alert('Error loading data: ' + e.message);
+  }
+}
+
+// Independent backstop for the 2026-11-07 silent-truncation incident: a
+// head request's exact count is compared against what actually landed in
+// memory for the tables most likely to grow past the PostgREST 1,000-row
+// cap. Catches the problem again even if some future load path bypasses
+// sbGet/fetchAllRows' own paging.
+async function verifyLoadedRowCounts(){
+  var checks = [
+    {table:'gl_entries', loaded: DB.gl.length},
+    {table:'fifo_deliveries', loaded: DB.fifo.length},
+    {table:'invoices', loaded: DB.invoices.length},
+    {table:'payments', loaded: DB.payments.length},
+    {table:'bank_ledger', loaded: REV.bankLedger.length}
+  ];
+  var problems = [];
+  for(var i=0;i<checks.length;i++){
+    var c = checks[i];
+    try{
+      var res = await _sb.from(c.table).select('*', {count:'exact', head:true});
+      if(res.error || typeof res.count !== 'number') continue;
+      if(res.count !== c.loaded){
+        DB._partial[c.table] = true;
+        problems.push(c.table+': loaded '+c.loaded+' of '+res.count);
+      }
+    }catch(e){ console.error('verifyLoadedRowCounts', c.table, e); }
+  }
+  if(problems.length){
+    showToast('Loaded data is incomplete — '+problems.join('; '), 'warn');
   }
 }
 
@@ -1196,6 +1273,17 @@ function warnOnMissingAccounts(){
 function inferStatus(inv){if(inv.status==='void')return'void';if(inv.amountPaid<=0)return isOverdue(inv)?'overdue':'open';if(inv.amountPaid>=inv.total)return'paid';return'partial'}
 function badgeHtml(s){const c={open:'badge-open',partial:'badge-partial',paid:'badge-paid',void:'badge-void',overdue:'badge-overdue'};return`<span class="badge ${c[s]||'badge-open'}">${s.charAt(0).toUpperCase()+s.slice(1)}</span>`}
 function eraPill(e){const cfg={dc:['era-dc','● DC'],troy:['era-troy','◇ Troy'],split:['era-split','⟷ Split'],mixed:['era-mixed','◐ Mixed']};const[cls,lbl]=cfg[e]||['era-dc','DC'];return`<span class="era-pill ${cls}">${lbl}</span>`}
+
+// Red warning banner for a view that reads a table sbGet/fetchAllRows
+// flagged as partially loaded (DB._partial[table] = true) -- shown instead
+// of presenting a total that may be silently missing rows.
+function partialDataBanner(tables){
+  var bad = (tables||[]).filter(function(t){ return DB._partial && DB._partial[t]; });
+  if(!bad.length) return '';
+  return '<div class="alert" style="background:var(--red-lo);border:1px solid var(--red);color:var(--red);font-weight:600;margin-bottom:16px">' +
+    '⚠ Not all rows loaded for: ' + bad.join(', ') + ' — the totals below may be incomplete. Reload the page and try again.' +
+  '</div>';
+}
 
 function troyReceivable(){
   let balance=0;const lines=[];
@@ -2015,8 +2103,18 @@ async function fetchAllRows(table, selectCols, orderCol, ascending){
   var page = 0;
   while(true){
     var offset = page * PAGE_SIZE;
-    var res = await _sb.from(table).select(selectCols).order(orderCol, {ascending: ascending !== false}).range(offset, offset + PAGE_SIZE - 1);
-    if(res.error) return {error: res.error, data: allRows};
+    var q = _sb.from(table).select(selectCols).order(orderCol, {ascending: ascending !== false});
+    // orderCol alone isn't unique (dates repeat), so without a tiebreaker
+    // the server's row order across pages isn't guaranteed stable -- add
+    // the primary key as a second sort unless it's already the sort key.
+    if(orderCol !== 'id') q = q.order('id', {ascending:true});
+    q = q.range(offset, offset + PAGE_SIZE - 1);
+    var res = await q;
+    if(res.error){
+      DB._partial[table] = true;
+      showToast('Could not load '+table+' - figures may be incomplete', 'warn');
+      return {error: res.error, data: allRows};
+    }
     var rows = res.data || [];
     allRows = allRows.concat(rows);
     if(rows.length < PAGE_SIZE) break; // last page
@@ -3906,6 +4004,7 @@ function renderTrialBalance(){
   const balanced=Math.abs(diff)<0.005;
 
   $('content').innerHTML=
+    partialDataBanner(['gl_entries'])+
     `<div class="alert alert-info" style="margin-bottom:16px">Sums every posted GL entry (invoice accruals, payments, manual journal entries, bank matches, and daily settlements)${tbFilter.asOf?' through '+fmtDate(tbFilter.asOf):' as of today'}. Debit and credit totals shown raw per account - check the Net column for anything with an unexpected sign.</div>`+
     (sections||'<div class="empty-state"><div class="empty-icon">⊞</div><div>No GL entries yet</div></div>')+
     `<div class="card"><div class="card-body" style="display:flex;justify-content:space-between;align-items:center">
@@ -4146,6 +4245,7 @@ function renderTroy(){
     <span class="recv-running" style="text-align:right;color:${l.running>0?'var(--troy)':'var(--green)'}">${fmt(l.running)}</span>
   </div>`).join('');
   $('content').innerHTML=`
+    ${partialDataBanner(['gl_entries'])}
     <div class="alert alert-troy" style="margin-bottom:20px"><strong>1300 · Receivable — Prior Owner (Troy Reynolds)</strong><br>Read-only — calculated from GL. Adjust via era flags or Journal Entries. Will be settled through payroll deductions.</div>
     <div class="tiles" style="grid-template-columns:repeat(3,1fr)">
       <div class="tile troy"><div class="tile-label">Current Balance</div><div class="tile-val">${fmt(balance)}</div><div class="tile-sub">Troy owes Dream Center</div></div>
@@ -8441,7 +8541,7 @@ async function markAsDirectExpense(rowId){
   var expAcctMap = {'Coffee Exp':'5010','Food Exp':'5020','Chai Exp':'5040','Milk Exp':'5040','Kombucha Exp':'5040','Supply Exp':'5040','Syrup Exp':'5040','Matcha Exp':'5040','Tea Exp':'5040'};
   var expAcct = expAcctMap[row.account] || '5040';
 
-  var je = {id:await nextGLId(), date:row.pmnt_date, ref:'DIRECT-'+row.id, era:ERA.DC,
+  var je = {id:await nextGLId(), date:row.pmnt_date, ref:'DIRECT-'+row.id, era:row.era||ERA.DC,
     memo:'Direct expense (no invoice) \u2014 ' + (row.customer_vendor||'') + ' \u2014 ' + row.account,
     entries:[{acct:expAcct,name:row.account,dr:amtAbs,cr:0},{acct:cashAcct,name:cashName,dr:0,cr:amtAbs}]};
   var glOk = await saveGLToSB(je);
@@ -8533,7 +8633,10 @@ async function postBankRowToGL(row, lines, memoInput){
     : parts.map(function(p){ return {acct:p.acct,name:p.name,dr:p.amt,cr:0}; }).concat([{acct:cashAcct,name:cashName,dr:0,cr:amtAbs}]);
 
   var memoAcctLabel = parts.length === 1 ? parts[0].name : (parts.length + ' accounts');
-  var je = {id:await nextGLId(), date:row.pmnt_date, ref:'DIRECT-'+row.id, era:ERA.DC,
+  // era follows the bank row being coded, not a hardcoded 'dc' -- a Troy-era
+  // row coded straight to GL must carry era:'troy' too, or era-filtered
+  // reports (Trial Balance, Troy views) silently miss it.
+  var je = {id:await nextGLId(), date:row.pmnt_date, ref:'DIRECT-'+row.id, era:row.era||ERA.DC,
     memo:memoInput||((row.customer_vendor||'(no vendor)')+' - '+memoAcctLabel),
     entries:entries};
   var glOk = await saveGLToSB(je);
