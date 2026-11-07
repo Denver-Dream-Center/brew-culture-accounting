@@ -83,7 +83,7 @@
   .era-pill{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:600}
   .era-dc{background:var(--green-lo);color:var(--green)}
   .era-troy{background:var(--troy-lo);color:var(--troy)}
-  .era-dc-paid{background:#FFE8CC;color:#8B4500}
+  .era-split{background:#FFE8CC;color:#8B4500}
   .era-mixed{background:#EAE3F4;color:#6B4FA0}
   .inv-pill{display:inline-flex;align-items:center;gap:3px;padding:2px 6px;border-radius:20px;font-size:10px;font-weight:600;background:var(--inv-lo);color:var(--inv)}
   .form-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
@@ -100,7 +100,7 @@
   .era-opt:hover{border-color:var(--amber)}
   .era-opt.sel-dc{border-color:var(--green);background:var(--green-lo);color:var(--green)}
   .era-opt.sel-troy{border-color:var(--troy);background:var(--troy-lo);color:var(--troy)}
-  .era-opt.sel-dc-paid{border-color:#D4791A;background:#FFE8CC;color:#8B4500}
+  .era-opt.sel-split{border-color:#D4791A;background:#FFE8CC;color:#8B4500}
   /* Line items - wider grid to accommodate ingredient column */
   .line-items-hd{display:grid;grid-template-columns:1.8fr 1.2fr 1.4fr .65fr .75fr .75fr .75fr 36px;gap:6px;padding:0 0 6px;font-size:11px;font-weight:600;color:var(--ink-lo);letter-spacing:.06em;text-transform:uppercase}
   .line-item-row{display:grid;grid-template-columns:1.8fr 1.2fr 1.4fr .65fr .75fr .75fr .75fr 36px;gap:6px;margin-bottom:8px;align-items:start}
@@ -477,8 +477,14 @@ function loadIngredients(){
 // CONSTANTS
 // ═══════════════════════════════════════════════
 const ACQUISITION_DATE='2025-11-01';
-const ERA={DC:'dc',TROY:'troy',DC_PAID:'dc-paid'};
-const ERA_LABELS={dc:'Dream Center',troy:'Troy (Pre-Acq.)','dc-paid':'DC Paid for Troy'};
+// Three eras only (owner decision 11/6/26): dc, troy, split. "split" replaces
+// the old "dc-paid" placeholder -- a bank row straddling the 11/3/25 transfer
+// is now divided into a real Troy part and DC part (bank_ledger_split),
+// instead of booking the whole row to 1300. Invoices/payments never use
+// split -- a bill that straddles the transfer is entered as two invoices,
+// one per era.
+const ERA={DC:'dc',TROY:'troy',SPLIT:'split'};
+const ERA_LABELS={dc:'Dream Center',troy:'Troy (Pre-Acq.)',split:'Split (Troy / DC)'};
 
 const COA=[
   {acct:'1010',name:'Operating Checking',type:'Asset'},
@@ -1189,7 +1195,7 @@ function warnOnMissingAccounts(){
 }
 function inferStatus(inv){if(inv.status==='void')return'void';if(inv.amountPaid<=0)return isOverdue(inv)?'overdue':'open';if(inv.amountPaid>=inv.total)return'paid';return'partial'}
 function badgeHtml(s){const c={open:'badge-open',partial:'badge-partial',paid:'badge-paid',void:'badge-void',overdue:'badge-overdue'};return`<span class="badge ${c[s]||'badge-open'}">${s.charAt(0).toUpperCase()+s.slice(1)}</span>`}
-function eraPill(e){const cfg={dc:['era-dc','● DC'],troy:['era-troy','◇ Troy'],'dc-paid':['era-dc-paid','↑ DC→Troy'],mixed:['era-mixed','◐ Mixed']};const[cls,lbl]=cfg[e]||['era-dc','DC'];return`<span class="era-pill ${cls}">${lbl}</span>`}
+function eraPill(e){const cfg={dc:['era-dc','● DC'],troy:['era-troy','◇ Troy'],split:['era-split','⟷ Split'],mixed:['era-mixed','◐ Mixed']};const[cls,lbl]=cfg[e]||['era-dc','DC'];return`<span class="era-pill ${cls}">${lbl}</span>`}
 
 function troyReceivable(){
   let balance=0;const lines=[];
@@ -1386,7 +1392,8 @@ var REV = {
   settlements: [],
   cashLog: [],
   bankLedger: [],
-  bankMatches: []   // bank_ledger_match rows: links bank_ledger.id -> payment.id OR settlement.id
+  bankMatches: [],  // bank_ledger_match rows: links bank_ledger.id -> payment.id OR settlement.id
+  bankSplits: []    // bank_ledger_split rows: Troy part + DC part for an era='split' bank_ledger row
 };
 
 // Modifier token -> ingredient mapping for COGS (costing only, not inventory deduction yet)
@@ -2051,6 +2058,13 @@ async function loadRevData(){
   if(!bm.error && bm.data){
     REV.bankMatches = bm.data;
   }
+  var bs = await fetchAllRows('bank_ledger_split', '*', 'id', true);
+  if(!bs.error && bs.data){
+    REV.bankSplits = bs.data;
+  }
+}
+function blRowSplits(rowId){
+  return REV.bankSplits.filter(function(s){ return s.bank_ledger_id === rowId; });
 }
 
 // Revenue sidebar stats helper
@@ -3638,19 +3652,19 @@ function renderDashboard(){
   $('topbar-actions').innerHTML=`<button class="btn btn-primary" onclick="openInvoiceModal()">＋ New Invoice</button>`;
   const s=apSummary();const troy=troyReceivable();
   const aging={current:0,d1_30:0,d31_60:0,d61_90:0,over90:0};
-  DB.invoices.filter(i=>i.era===ERA.DC||i.era==='dc-paid').forEach(inv=>{
+  DB.invoices.filter(i=>i.era===ERA.DC).forEach(inv=>{
     if(inv.status==='void'||inv.balance<=0)return;
     const age=-(daysUntilDue(inv)||0);
     if(age<=0)aging.current+=inv.balance;else if(age<=30)aging.d1_30+=inv.balance;else if(age<=60)aging.d31_60+=inv.balance;else if(age<=90)aging.d61_90+=inv.balance;else aging.over90+=inv.balance;
   });
   const troyTotal=DB.invoices.filter(i=>i.era===ERA.TROY).reduce((s,i)=>s+i.total,0);
-  const dcPaidTotal=DB.invoices.filter(i=>i.era==='dc-paid').reduce((s,i)=>s+i.total,0);
+  const splitTroyTotal=troy.lines.filter(l=>l.era==='split').reduce((s,l)=>s+l.net,0);
   const troyCr=troy.lines.filter(l=>l.cr>0).reduce((s,l)=>s+l.cr,0);
   const recent=[...DB.invoices].sort((a,b)=>b.date.localeCompare(a.date)).slice(0,7);
   const recentRows=recent.map(inv=>{
     const st=inferStatus(inv);
     const invLines=inv.lines?inv.lines.filter(l=>l.ingredient).length:0;
-    return`<tr class="${inv.era==='troy'||inv.era==='dc-paid'?'tr-troy':isOverdue(inv)?'tr-overdue':''}">
+    return`<tr class="${inv.era==='troy'?'tr-troy':isOverdue(inv)?'tr-overdue':''}">
       <td class="mono">${inv.id}</td><td>${eraPill(inv.era||ERA.DC)}</td><td>${vendorName(inv.vendorId)}</td>
       <td class="mono" style="color:var(--ink-mid)">${inv.invoiceNum||'—'}</td><td>${fmtDate(inv.date)}</td>
       <td class="text-right mono">${fmt(inv.total)}</td>
@@ -3682,7 +3696,7 @@ function renderDashboard(){
       <div class="card">
         <div class="card-header"><span class="card-title">Troy Receivable</span><button class="btn btn-troy btn-sm" onclick="launchModule('accounting').then(()=>showView('troy'))">Ledger →</button></div>
         <div class="card-body">
-          ${[['Pre-acq. AP at 10/31/25',troyTotal,'var(--troy)'],['DC paid on Troy\'s behalf',dcPaidTotal,'#8B4500'],['Troy payments received',troyCr,'var(--green)']].map(([l,v,c])=>`
+          ${[['Pre-acq. AP at 10/31/25',troyTotal,'var(--troy)'],['Troy share of split bank rows',splitTroyTotal,'#8B4500'],['Troy payments received',troyCr,'var(--green)']].map(([l,v,c])=>`
             <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border-lo)">
               <span style="font-size:13px">${l}</span><span class="mono fw600" style="color:${c}">${fmt(v)}</span>
             </div>`).join('')}
@@ -3716,7 +3730,7 @@ function renderInvoices(){
     const d=daysUntilDue(inv);
     const dueLabel=d===null?'—':d<0?`<span style="color:var(--red)">Due ${Math.abs(d)}d ago</span>`:d===0?`<span style="color:var(--amber)">Due today</span>`:fmtDate(inv.dueDate);
     const invLines=inv.lines?inv.lines.filter(l=>l.ingredient).length:0;
-    return`<tr class="${era==='troy'||era==='dc-paid'?'tr-troy':isOverdue(inv)?'tr-overdue':''}">
+    return`<tr class="${era==='troy'?'tr-troy':isOverdue(inv)?'tr-overdue':''}">
       <td class="mono">${inv.id}</td><td>${eraPill(era)}</td><td>${vendorName(inv.vendorId)}</td>
       <td class="mono" style="color:var(--ink-mid)">${inv.invoiceNum||'—'}</td><td>${fmtDate(inv.date)}</td><td>${dueLabel}</td>
       <td class="text-right mono">${fmt(inv.total)}</td>
@@ -3737,7 +3751,6 @@ function renderInvoices(){
         <option value="all">All eras</option>
         <option value="dc" ${invFilter.era==='dc'?'selected':''}>Dream Center</option>
         <option value="troy" ${invFilter.era==='troy'?'selected':''}>Troy (Pre-Acq.)</option>
-        <option value="dc-paid" ${invFilter.era==='dc-paid'?'selected':''}>DC Paid for Troy</option>
       </select>
       <select onchange="invFilter.status=this.value;renderInvoices()">
         <option value="all">All statuses</option>
@@ -3785,7 +3798,7 @@ function renderPayments(){
   $('topbar-actions').innerHTML=`<button class="btn btn-primary" onclick="openPaymentModal()">＋ Record Payment</button>`;
   const pmts=[...DB.payments].sort((a,b)=>b.date.localeCompare(a.date));
   const total=pmts.reduce((s,p)=>s+p.amount,0);
-  const rows=pmts.map(p=>`<tr class="${p.era==='troy'||p.era==='dc-paid'?'tr-troy':''}">
+  const rows=pmts.map(p=>`<tr class="${p.era==='troy'?'tr-troy':''}">
     <td class="mono">${p.id}</td><td>${eraPill(p.era||ERA.DC)}</td><td>${fmtDate(p.date)}</td>
     <td>${vendorName(p.vendorId)}</td><td class="mono" style="color:var(--ink-mid)">${p.invoiceId}</td>
     <td>${p.method}</td><td class="mono" style="color:var(--ink-mid)">${p.ref||'—'}</td>
@@ -3847,7 +3860,7 @@ function renderTrialBalance(){
       `<option value="all" ${tbFilter.era==='all'?'selected':''}>All eras</option>`+
       `<option value="dc" ${tbFilter.era==='dc'?'selected':''}>Dream Center</option>`+
       `<option value="troy" ${tbFilter.era==='troy'?'selected':''}>Troy (Pre-Acq.)</option>`+
-      `<option value="dc-paid" ${tbFilter.era==='dc-paid'?'selected':''}>DC Paid for Troy</option>`+
+      `<option value="split" ${tbFilter.era==='split'?'selected':''}>Split (Troy / DC)</option>`+
     `</select>`;
 
   const entries=DB.gl.filter(je=>
@@ -4124,7 +4137,7 @@ function renderTroy(){
   $('topbar-actions').innerHTML=`<button class="btn btn-troy" onclick="openJEModal('1300')">＋ Post Adjustment</button>`;
   const{balance,lines}=troyReceivable();
   const troyInvs=DB.invoices.filter(i=>i.era===ERA.TROY);
-  const dcPaidInvs=DB.invoices.filter(i=>i.era==='dc-paid');
+  const splitLines=lines.filter(l=>l.era==='split');
   const rows=lines.map(l=>`<div class="recv-row">
     <span style="font-size:12px;color:var(--ink-mid)">${fmtDate(l.date)}</span>
     <div><div style="font-size:13px">${l.memo}</div><div style="font-size:11px;color:var(--ink-lo)">${l.ref} · ${eraPill(l.era||ERA.TROY)}</div></div>
@@ -4137,7 +4150,7 @@ function renderTroy(){
     <div class="tiles" style="grid-template-columns:repeat(3,1fr)">
       <div class="tile troy"><div class="tile-label">Current Balance</div><div class="tile-val">${fmt(balance)}</div><div class="tile-sub">Troy owes Dream Center</div></div>
       <div class="tile"><div class="tile-label">Pre-Acq. AP (Troy)</div><div class="tile-val" style="color:var(--troy)">${fmt(troyInvs.reduce((s,i)=>s+i.total,0))}</div><div class="tile-sub">${troyInvs.length} invoices</div></div>
-      <div class="tile"><div class="tile-label">DC Paid for Troy</div><div class="tile-val" style="color:#8B4500">${fmt(dcPaidInvs.reduce((s,i)=>s+i.total,0))}</div><div class="tile-sub">${dcPaidInvs.length} transactions</div></div>
+      <div class="tile"><div class="tile-label">Troy Share of Split Bank Rows</div><div class="tile-val" style="color:#8B4500">${fmt(splitLines.reduce((s,l)=>s+l.net,0))}</div><div class="tile-sub">${splitLines.length} line(s)</div></div>
     </div>
     <div class="card">
       <div class="card-header"><span class="card-title">1300 Ledger</span><span style="font-size:12px;color:var(--ink-mid)">Debit = Troy owes more · Credit = balance reduced</span></div>
@@ -4583,14 +4596,58 @@ function printOrderWorksheet(orderId){
 const closeModal=()=>$('modal-root').innerHTML='';
 function openModal(html){$('modal-root').innerHTML=`<div class="overlay" onclick="if(event.target===this)closeModal()">${html}</div>`}
 
-function eraSelector(current,sfx,fn){
+// includeSplit defaults true (bank ledger, journal entries can be any of
+// the three eras). Invoices and payments never use Split -- a bill or
+// payment that straddles the transfer is always two invoices, one per
+// era -- so those callers pass includeSplit=false for a 2-option control.
+function eraSelector(current,sfx,fn,includeSplit){
   const f=fn||'selectEra';
-  const opts=[['dc','sel-dc','Dream Center','Normal DC'],['troy','sel-troy','Troy (Pre-Acq.)','Unpaid at 10/31/25'],['dc-paid','sel-dc-paid','DC Paid for Troy','DC cash paid Troy\'s bill']];
+  const opts=[['dc','sel-dc','Dream Center','Normal DC'],['troy','sel-troy','Troy (Pre-Acq.)','Unpaid at 10/31/25']];
+  if(includeSplit!==false) opts.push(['split','sel-split','Split','Straddles the 11/3/25 transfer -- booked as a Troy part + a DC part']);
   return`<div class="era-selector" id="era-sel${sfx||''}">${opts.map(([val,cls,lbl,hint])=>`<div class="era-opt ${current===val?cls:''}" data-era="${val}" data-cls="${cls}" onclick="${f}('${val}','${cls}',this,'${sfx||''}')" title="${hint}">${lbl}</div>`).join('')}</div>`;
 }
 function selectEra(val,cls,el,sfx){
   document.querySelectorAll(`#era-sel${sfx||''} .era-opt`).forEach(o=>o.className='era-opt');
   el.classList.add(cls);const h=$(`era-val${sfx||''}`);if(h)h.value=val;
+}
+// Bank-ledger era control: same as selectEra, plus toggles which GL section
+// (single-account vs. Troy/DC split) is visible in the edit modal.
+function selectEraBL(val,cls,el,sfx){
+  selectEra(val,cls,el,sfx);
+  var single=$('bl-gl-single-section'),split=$('bl-gl-split-section');
+  if(single&&split){
+    single.style.display=(val==='split')?'none':'block';
+    split.style.display=(val==='split')?'block':'none';
+    if(val==='split')updateSplitCheck();
+  }
+}
+// Typing one split-part amount fills the other as the remainder of the row
+// total, so the two normally stay in sync without the user doing the math.
+function onSplitAmountInput(which){
+  var totalEl=$('bl-amount'),troyEl=$('bl-split-troy'),dcEl=$('bl-split-dc');
+  if(!totalEl||!troyEl||!dcEl)return;
+  var total=Math.abs(parseFloat(totalEl.value)||0);
+  if(which==='troy'){
+    var t=Math.abs(parseFloat(troyEl.value)||0);
+    dcEl.value=Math.max(0,Math.round((total-t)*100)/100).toFixed(2);
+  } else {
+    var d=Math.abs(parseFloat(dcEl.value)||0);
+    troyEl.value=Math.max(0,Math.round((total-d)*100)/100).toFixed(2);
+  }
+  updateSplitCheck();
+}
+function updateSplitCheck(){
+  var el=$('bl-split-check');
+  if(!el)return;
+  var total=Math.abs(parseFloat(($('bl-amount')||{}).value)||0);
+  var t=Math.abs(parseFloat(($('bl-split-troy')||{}).value)||0);
+  var d=Math.abs(parseFloat(($('bl-split-dc')||{}).value)||0);
+  var sum=Math.round((t+d)*100)/100;
+  var diff=Math.round((sum-total)*100)/100;
+  if(t===0&&d===0){ el.innerHTML=''; return; }
+  el.innerHTML=(Math.abs(diff)<=0.005)
+    ?'<span style="color:var(--green)">Troy '+fmt(t)+' + DC '+fmt(d)+' = '+fmt(sum)+' ✓ matches row total '+fmt(total)+'</span>'
+    :'<span style="color:var(--red)">Troy '+fmt(t)+' + DC '+fmt(d)+' = '+fmt(sum)+' — off by '+fmt(Math.abs(diff))+' from row total '+fmt(total)+'</span>';
 }
 
 // ═══════════════════════════════════════════════
@@ -4602,9 +4659,7 @@ function viewInvoice(id){
   const st=inferStatus(inv);const era=inv.era||ERA.DC;
   const pmts=DB.payments.filter(p=>p.invoiceId===id);
   const eraNote=era==='troy'
-    ?`<div class="alert alert-troy" style="margin-bottom:14px">◇ <strong>Pre-acquisition</strong> — Troy's obligation at 10/31/25. Balance tracked in 1300 · Receivable.</div>`
-    :era==='dc-paid'
-    ?`<div class="alert" style="background:#FFE8CC;border:1px solid #D4791A;color:#8B4500;margin-bottom:14px">↑ <strong>DC paid on Troy's behalf</strong> — increases 1300 receivable.</div>`:'';
+    ?`<div class="alert alert-troy" style="margin-bottom:14px">◇ <strong>Pre-acquisition</strong> — Troy's obligation at 10/31/25. Balance tracked in 1300 · Receivable.</div>`:'';
   const lineRows=inv.lines.map(l=>{
     const hasIng=!!l.ingredient;
     const ing=hasIng?loadIngredients().find(i=>i.name===l.ingredient):null;
@@ -4832,9 +4887,9 @@ function openInvoiceModal(editId){
         <div class="form-group"><label>Due Date</label><input type="date" id="inv-due" value="${editing?.dueDate||''}"></div>
         <div class="form-group span-2">
           <label>Era — Who is responsible?</label>
-          ${eraSelector(era)}
+          ${eraSelector(era,'','selectEra',false)}
           <input type="hidden" id="era-val" value="${era}">
-          <span class="form-hint">Troy (Pre-Acq.) = unpaid at 10/31/25. DC Paid for Troy = DC cash paid Troy's bill. Both route to 1300 receivable.</span>
+          <span class="form-hint">Troy (Pre-Acq.) = unpaid at 10/31/25, routes to 1300 receivable. A bill that straddles the transfer is entered as two invoices, one per era.</span>
         </div>
         <div class="form-group span-2"><label>Memo</label><input id="inv-memo" placeholder="Brief description…" value="${editing?.memo||''}"></div>
       </div>
@@ -5294,7 +5349,7 @@ async function postInvoiceGL(inv){
   // prints on the invoice, so the asset and the liability land in the
   // same period. Falls back to the invoice date when no delivery date
   // was entered (e.g. non-coffee vendors).
-  const je={id:await nextGLId(),date:inv.deliveryDate||inv.date,ref:inv.id,era,memo:'A/P accrual'+(era==='troy'?' (Troy-era)':era==='dc-paid'?' (DC paid for Troy)':'')+' — '+vendorName(inv.vendorId)+' '+(inv.invoiceNum||inv.id),entries};
+  const je={id:await nextGLId(),date:inv.deliveryDate||inv.date,ref:inv.id,era,memo:'A/P accrual'+(era==='troy'?' (Troy-era)':'')+' — '+vendorName(inv.vendorId)+' '+(inv.invoiceNum||inv.id),entries};
   return await saveGLToSB(je);
 }
 
@@ -5318,7 +5373,7 @@ function openPaymentModal(invoiceId){
       </div>
       <div class="form-group span-2">
         <label>Era</label>
-        ${eraSelector(initEra,'-pmt','selectPmtEra')}
+        ${eraSelector(initEra,'-pmt','selectPmtEra',false)}
         <input type="hidden" id="era-val-pmt" value="${initEra}">
       </div>
       <div class="form-group"><label>Date *</label><input type="date" id="pmt-date" value="${todayStr()}"></div>
@@ -5348,7 +5403,7 @@ function onPmtInvChange(id){
   const amtEl=$('pmt-amount');if(amtEl&&!amtEl.value)amtEl.value=inv.balance.toFixed(2);
   const era=inv.era||ERA.DC;const h=$('era-val-pmt');if(h)h.value=era;
   document.querySelectorAll('#era-sel-pmt .era-opt').forEach(o=>{o.className='era-opt';if(o.dataset.era===era)o.classList.add(o.dataset.cls||'sel-dc')});
-  const clr=era==='troy'?'var(--troy)':era==='dc-paid'?'#8B4500':'var(--ink-mid)';
+  const clr=era==='troy'?'var(--troy)':'var(--ink-mid)';
   $('pmt-preview').innerHTML=`<div class="alert" style="background:var(--bg);border:1px solid var(--border);font-size:12px"><strong>${vendorName(inv.vendorId)}</strong> · ${inv.invoiceNum||inv.id} · ${eraPill(era)}<br>Total: <strong>${fmt(inv.total)}</strong> · Balance: <strong style="color:${clr}">${fmt(inv.balance)}</strong></div>`;
 }
 
@@ -5371,7 +5426,7 @@ async function savePayment(){
   if(inv.balance<0.005){inv.balance=0;inv.status='paid'}else inv.status='partial';
   const cashName=acctName(cashAcct)||cashAcct;
   const je={id:await nextGLId(),date,ref:pmtId,era,
-    memo:'Payment'+(era==='dc-paid'?' (DC→Troy)':era==='troy'?' (Troy-era)':'')+' — '+vendorName(inv.vendorId)+' '+(ref||pmtId),
+    memo:'Payment'+(era==='troy'?' (Troy-era)':'')+' — '+vendorName(inv.vendorId)+' '+(ref||pmtId),
     entries:[{acct:'2000',name:'Accounts Payable',dr:amount,cr:0},{acct:cashAcct,name:cashName,dr:0,cr:amount}]};
   const pmtOk=await insertPaymentToSB(pmt); // true insert -- payments have no edit path, every payment is brand new
   const invOk=await saveInvoiceToSB(inv);
@@ -7012,6 +7067,19 @@ function renderBankLedger(){
     var mType = blMatchType(r);
     var status = blRowStatus(r.id);
     var era = r.era || 'dc';
+    var splitBadge = '';
+    if(era === 'split'){
+      var splitParts = blRowSplits(r.id);
+      var troyPart = splitParts.find(function(s){ return s.era === 'troy'; });
+      var dcPart = splitParts.find(function(s){ return s.era === 'dc'; });
+      if(splitParts.length === 0){
+        splitBadge = '<div style="font-size:10px;color:var(--red);font-weight:600;margin-top:2px">Needs split amounts</div>';
+      } else {
+        var troyAmtDisp = troyPart ? Math.abs(parseFloat(troyPart.amount)||0) : 0;
+        var dcAmtDisp = dcPart ? Math.abs(parseFloat(dcPart.amount)||0) : 0;
+        splitBadge = '<div style="font-size:10px;color:var(--ink-lo);margin-top:2px" title="Troy ' + fmt(troyAmtDisp) + ' / DC ' + fmt(dcAmtDisp) + '">Troy ' + fmt(troyAmtDisp) + ' / DC ' + fmt(dcAmtDisp) + '</div>';
+      }
+    }
     var statusPill = status === 'matched'
       ? '<span class="match-pill match-pill-matched">Matched</span>'
       : status === 'direct'
@@ -7034,7 +7102,7 @@ function renderBankLedger(){
     return '<tr>' +
       '<td class="mono" style="color:var(--ink-lo);font-size:11px">' + (r.row_id||'') + '</td>' +
       '<td class="mono">' + fmtDate(r.pmnt_date) + '</td>' +
-      '<td>' + eraPill(era) + '</td>' +
+      '<td>' + eraPill(era) + splitBadge + '</td>' +
       '<td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (r.customer_vendor||'') + '</td>' +
       '<td style="max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink-mid);font-size:12px">' + (r.description||'') + '</td>' +
       '<td style="font-size:11px">' + (r.stmt_category||'') + '</td>' +
@@ -7074,7 +7142,7 @@ function renderBankLedger(){
             '<option value="">All Eras</option>' +
             '<option value="dc"' + (filterEra==='dc'?' selected':'') + '>Dream Center</option>' +
             '<option value="troy"' + (filterEra==='troy'?' selected':'') + '>Troy (Pre-Transfer)</option>' +
-            '<option value="dc-paid"' + (filterEra==='dc-paid'?' selected':'') + '>DC Paid for Troy</option>' +
+            '<option value="split"' + (filterEra==='split'?' selected':'') + '>Split (Troy / DC)</option>' +
           '</select>' +
           '<select style="font-size:12px;padding:4px 8px;border:1px solid var(--border);border-radius:var(--r)" onchange="window._blFilterBank=this.value;renderBankLedger()">' +
             '<option value="">All Banks</option>' +
@@ -7126,7 +7194,7 @@ function openBankLedgerModal(editId){
       '</div>' +
       '<input type="hidden" id="era-val-bl" value="' + derivedEra + '"></div>';
   } else {
-    eraField = '<div class="form-group"><label>Pre / Post Transfer *</label>' + eraSelector(v('era','dc'), '-bl') +
+    eraField = '<div class="form-group"><label>Pre / Post Transfer *</label>' + eraSelector(v('era','dc'), '-bl', 'selectEraBL') +
       '<input type="hidden" id="era-val-bl" value="' + v('era','dc') + '"></div>';
   }
 
@@ -7154,7 +7222,7 @@ function openBankLedgerModal(editId){
         '<button class="btn btn-ghost btn-sm" style="margin-left:4px" onclick="closeModal();openRevMatchModal(\'' + editId + '\')">Open Revenue Match instead</button>' +
       '</div>';
     }
-    glSection =
+    var singleGlSection =
       '<div style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">' +
         '<div style="font-weight:600;font-size:13px;margin-bottom:10px">Book to General Ledger</div>' +
         routeNote +
@@ -7167,6 +7235,49 @@ function openBankLedgerModal(editId){
         '</div>' +
         '<div id="bl-gl-err" style="color:var(--red);font-size:12px;margin-top:8px"></div>' +
       '</div>';
+
+    // Split panel: a row straddling the 11/3/25 transfer gets a Troy part
+    // (always -> 1300) and a DC part (any account). Both single- and
+    // split- sections are rendered together and toggled via display:none
+    // -- selectEraBL swaps which one is visible as the era control changes.
+    var rowTotal = Math.abs(parseFloat(row.gross_amount)||0);
+    var existingSplitParts = blRowSplits(editId);
+    var troyPartRow = existingSplitParts.find(function(s){ return s.era === 'troy'; });
+    var dcPartRow = existingSplitParts.find(function(s){ return s.era === 'dc'; });
+    var troyAmtInit = troyPartRow ? Math.abs(parseFloat(troyPartRow.amount)||0) : 0;
+    var dcAmtInit = dcPartRow ? Math.abs(parseFloat(dcPartRow.amount)||0) : 0;
+    var dcAcctOptions = acctOptionsHtml(dcPartRow ? dcPartRow.gl_account : '');
+    var needsSplitBadge = (v('era','dc') === 'split' && existingSplitParts.length === 0)
+      ? '<div class="alert" style="background:var(--red-lo);border:1px solid var(--red);font-size:12px;margin-bottom:10px;color:var(--red);font-weight:600">' +
+          'Needs split amounts \u2014 this row was migrated from the old "DC Paid for Troy" placeholder. ' +
+          'Enter the Troy and DC parts below before this can be coded to the GL.' +
+        '</div>'
+      : '';
+    var sumInit = Math.round((troyAmtInit+dcAmtInit)*100)/100;
+    var diffInit = Math.round((sumInit-rowTotal)*100)/100;
+    var splitCheckInit = (existingSplitParts.length === 0) ? '' :
+      (Math.abs(diffInit) <= 0.005
+        ? '<span style="color:var(--green)">Troy ' + fmt(troyAmtInit) + ' + DC ' + fmt(dcAmtInit) + ' = ' + fmt(sumInit) + ' \u2713 matches row total ' + fmt(rowTotal) + '</span>'
+        : '<span style="color:var(--red)">Troy ' + fmt(troyAmtInit) + ' + DC ' + fmt(dcAmtInit) + ' = ' + fmt(sumInit) + ' \u2014 off by ' + fmt(Math.abs(diffInit)) + ' from row total ' + fmt(rowTotal) + '</span>');
+    var splitGlSection =
+      '<div style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">' +
+        '<div style="font-weight:600;font-size:13px;margin-bottom:10px">Split: Troy Part / DC Part</div>' +
+        needsSplitBadge +
+        '<div class="form-grid">' +
+          '<div class="form-group"><label>Troy Part (\u2192 1300) *</label><input type="number" id="bl-split-troy" step="0.01" min="0" value="' + (troyAmtInit||'') + '" placeholder="0.00" oninput="onSplitAmountInput(\'troy\')"></div>' +
+          '<div class="form-group"><label>DC Part *</label><input type="number" id="bl-split-dc" step="0.01" min="0" value="' + (dcAmtInit||'') + '" placeholder="0.00" oninput="onSplitAmountInput(\'dc\')"></div>' +
+          '<div class="form-group span-2"><label>DC Part GL Account *</label><select id="bl-split-dc-acct"><option value="">-- Select account --</option>' + dcAcctOptions + '</select></div>' +
+          '<div class="form-group span-2"><label>Basis</label><input id="bl-split-basis" value="' + (troyPartRow ? (troyPartRow.basis||'') : '') + '" placeholder="e.g. how the Troy/DC amounts were computed"></div>' +
+          '<div class="form-group span-2"><label>GL Memo</label><input id="bl-split-memo" placeholder="Optional \u2014 defaults to vendor and accounts"></div>' +
+        '</div>' +
+        '<div id="bl-split-check" style="font-size:12px;margin-top:8px">' + splitCheckInit + '</div>' +
+        '<div id="bl-split-err" style="color:var(--red);font-size:12px;margin-top:8px"></div>' +
+      '</div>';
+
+    var showSplit = v('era','dc') === 'split';
+    glSection =
+      '<div id="bl-gl-single-section" style="display:' + (showSplit?'none':'block') + '">' + singleGlSection + '</div>' +
+      '<div id="bl-gl-split-section" style="display:' + (showSplit?'block':'none') + '">' + splitGlSection + '</div>';
   } else if(editId && blStatus !== 'open'){
     glSection = '<div style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border);font-size:12px;color:var(--ink-mid)">' +
       'This transaction is already ' + (blStatus==='matched'?'matched':'coded') + ' to the GL. ' +
@@ -7188,7 +7299,7 @@ function openBankLedgerModal(editId){
           '<div class="form-group span-2"><label>Customer / Vendor *</label><input id="bl-vendor" value="' + v('customer_vendor') + '" placeholder="e.g. Gold Seal Distributing"></div>' +
           '<div class="form-group span-2"><label>Description</label><input id="bl-desc" value="' + v('description') + '" placeholder="Bank transaction description or memo"></div>' +
           '<div class="form-group"><label>Trans Type *</label><select id="bl-trans-type">' + selOpts(BL_TRANS_TYPES, v('trans_type','Debit')) + '</select></div>' +
-          '<div class="form-group"><label>Gross Amount *</label><input type="number" id="bl-amount" step="0.01" min="0" value="' + (row ? Math.abs(parseFloat(row.gross_amount)||0) : '') + '" placeholder="0.00"></div>' +
+          '<div class="form-group"><label>Gross Amount *</label><input type="number" id="bl-amount" step="0.01" min="0" value="' + (row ? Math.abs(parseFloat(row.gross_amount)||0) : '') + '" placeholder="0.00" oninput="updateSplitCheck()"></div>' +
           eraField +
           '<div class="form-group"><label>Ck#</label><input id="bl-ck" value="' + v('ck_num') + '" placeholder="Check number"></div>' +
           '<div class="form-group"><label>Statement Type</label><select id="bl-stmt-type" onchange="syncBLStmtSec()">' + selOpts(BL_STMT_TYPES, v('stmt_type')) + '</select></div>' +
@@ -7366,7 +7477,7 @@ function blMatchType(row){
 }
 
 // Status for a bank ledger row: 'open' | 'matched' | 'direct' | 'partial'
-// Note: era (dc/troy/dc-paid/mixed) is shown as a separate column/pill and
+// Note: era (dc/troy/split/mixed) is shown as a separate column/pill and
 // no longer participates in match status — a row can be both Troy-era and Matched.
 //
 // 'partial' is a diagnostic-only state: the AP match modal requires the
@@ -7885,7 +7996,7 @@ async function confirmAPMatch(){
     }
     jeEntries.push({acct:cashAcct,name:cashName,dr:0,cr:payAmt});
     var je = {id:await nextGLId(), date:row.pmnt_date, ref:pmtId, era:invEra,
-      memo:'Bank-matched payment'+(invEra==='troy'?' (Troy-era)':invEra==='dc-paid'?' (DC paid for Troy)':'')+' \u2014 ' + vendorName(inv.vendorId) + ' ' + (row.ck_num||pmtId)+(Math.abs(feeVariance)>=0.005?' (incl. '+fmt(Math.abs(feeVariance))+' variance)':'')+(creditTotal>=0.005&&isLast?' (incl. '+fmt(creditTotal)+' credit applied from '+creditInvoices.map(function(c){return c.invoiceNum||c.id;}).join(', ')+')':''),
+      memo:'Bank-matched payment'+(invEra==='troy'?' (Troy-era)':'')+' \u2014 ' + vendorName(inv.vendorId) + ' ' + (row.ck_num||pmtId)+(Math.abs(feeVariance)>=0.005?' (incl. '+fmt(Math.abs(feeVariance))+' variance)':'')+(creditTotal>=0.005&&isLast?' (incl. '+fmt(creditTotal)+' credit applied from '+creditInvoices.map(function(c){return c.invoiceNum||c.id;}).join(', ')+')':''),
       entries:jeEntries};
     if(isLast){ lastPmtId = pmtId; }
 
@@ -8093,6 +8204,156 @@ async function postBankRowToGL(row, acct, memoInput){
   return true;
 }
 
+// Same id-collision fix as nextGLId: query the real max in the table
+// rather than trusting the local cache's length.
+async function nextBankSplitIds(n){
+  var maxNum=0;
+  try{
+    const {data,error}=await _sb.from('bank_ledger_split').select('id').order('id',{ascending:false}).limit(1);
+    if(!error&&data&&data.length){
+      const m=String(data[0].id).match(/^BLS-(\d+)/);
+      if(m)maxNum=parseInt(m[1],10);
+    }
+    if(error)maxNum=Math.max(maxNum,REV.bankSplits.length);
+  }catch(e){
+    console.error('nextBankSplitIds error',e);
+    maxNum=REV.bankSplits.length;
+  }
+  var ids=[];
+  for(var i=1;i<=n;i++)ids.push('BLS-'+String(maxNum+i).padStart(4,'0'));
+  return ids;
+}
+
+async function saveBankSplitParts(rows){
+  var res = await _sb.from('bank_ledger_split').upsert(rows, {onConflict:'id'});
+  if(res.error){ console.error('saveBankSplitParts', res.error); return false; }
+  return true;
+}
+
+// Split GL posting: DR 1300 for the Troy part, DR <dcAcct> for the DC part,
+// CR cash for the sum -- one balanced entry per row (or the credit-side
+// mirror for an inflow). A zero part is simply omitted from the entry.
+async function postSplitRowToGL(row, troyAmt, dcAmt, dcAcct, memoInput){
+  var dcAcctName = acctName(dcAcct) || dcAcct;
+  var amtAbs = Math.abs(parseFloat(row.gross_amount)||0);
+  var cashAcct = row.bank === 'Glacier Bank' ? '1010' : '1011';
+  var cashName = row.bank === 'Glacier Bank' ? 'Glacier Bank' : 'SouthState Bank';
+  var isCredit = row.trans_type === 'Credit';
+
+  var parts = [];
+  if(troyAmt > 0) parts.push({acct:'1300', name:acctName('1300')||'1300', amt:troyAmt});
+  if(dcAmt > 0) parts.push({acct:dcAcct, name:dcAcctName, amt:dcAmt});
+
+  var entries = isCredit
+    ? [{acct:cashAcct,name:cashName,dr:amtAbs,cr:0}].concat(parts.map(function(p){ return {acct:p.acct,name:p.name,dr:0,cr:p.amt}; }))
+    : parts.map(function(p){ return {acct:p.acct,name:p.name,dr:p.amt,cr:0}; }).concat([{acct:cashAcct,name:cashName,dr:0,cr:amtAbs}]);
+
+  var je = {id:await nextGLId(), date:row.pmnt_date, ref:'DIRECT-'+row.id, era:ERA.SPLIT,
+    memo:memoInput||((row.customer_vendor||'(no vendor)')+' - Split (Troy '+fmt(troyAmt)+' / DC '+fmt(dcAmt)+')'),
+    entries:entries};
+  var glOk = await saveGLToSB(je);
+  if(!glOk) return false;
+
+  var matchId = 'BLM-'+Date.now();
+  await saveBankMatch({
+    id:matchId, bank_ledger_id:row.id, match_kind:'direct',
+    payment_id:null, invoice_id:null, amount:amtAbs, created_at:new Date().toISOString()
+  });
+  REV.bankMatches.push({id:matchId, bank_ledger_id:row.id, match_kind:'direct', payment_id:null, invoice_id:null, amount:amtAbs});
+  return true;
+}
+
+// Called from the Split panel's "Save & Post to GL" path (saveAndPostToGL
+// delegates here when era === 'split'): validates the two parts sum to the
+// row total, upserts bank_ledger_split, then posts the two-line GL entry.
+async function saveAndPostSplitToGL(editId){
+  var mainErr = $('bl-err');
+  var splitErr = $('bl-split-err');
+  if(splitErr) splitErr.textContent = '';
+
+  var pmntDate = $('bl-pmnt-date').value;
+  var bank     = $('bl-bank').value;
+  var vendor   = $('bl-vendor').value.trim();
+  var transType= $('bl-trans-type').value;
+  var amtRaw   = parseFloat($('bl-amount').value) || 0;
+
+  if(!pmntDate){ mainErr.textContent='Payment date required.'; return; }
+  if(!vendor)  { mainErr.textContent='Customer/Vendor required.'; return; }
+  if(!amtRaw)  { mainErr.textContent='Amount required.'; return; }
+
+  var troyAmt = Math.abs(parseFloat($('bl-split-troy').value)||0);
+  var dcAmt = Math.abs(parseFloat($('bl-split-dc').value)||0);
+  var dcAcct = $('bl-split-dc-acct').value;
+  var basis = $('bl-split-basis').value.trim();
+  var memoInput = $('bl-split-memo').value.trim();
+
+  if(troyAmt <= 0 && dcAmt <= 0){ splitErr.textContent='Enter the Troy and/or DC part amounts.'; return; }
+  if(dcAmt > 0 && !dcAcct){ splitErr.textContent='Select a GL account for the DC part.'; return; }
+  var sum = Math.round((troyAmt+dcAmt)*100)/100;
+  var diff = Math.round((sum-amtRaw)*100)/100;
+  if(Math.abs(diff) > 0.005){
+    splitErr.textContent = 'Troy ('+fmt(troyAmt)+') + DC ('+fmt(dcAmt)+') = '+fmt(sum)+', which is off by '+fmt(Math.abs(diff))+' from the row total '+fmt(amtRaw)+'. Fix the parts before saving.';
+    return;
+  }
+
+  var grossAmt = transType === 'Debit' ? -Math.abs(amtRaw) : Math.abs(amtRaw);
+  var existingRow = REV.bankLedger.find(function(r){ return r.id === editId; });
+  var row = {
+    id: editId,
+    row_id: existingRow ? existingRow.row_id : (REV.bankLedger.length + 1),
+    pmnt_date: pmntDate,
+    bank: bank,
+    customer_vendor: vendor,
+    description: $('bl-desc').value.trim(),
+    era: 'split',
+    stmt_type: $('bl-stmt-type').value,
+    stmt_sec: $('bl-stmt-sec').value,
+    stmt_category: $('bl-stmt-cat').value,
+    account: $('bl-account').value,
+    note: $('bl-note').value.trim(),
+    ck_num: $('bl-ck').value.trim(),
+    trans_type: transType,
+    gross_amount: grossAmt
+  };
+
+  showLoadingOverlay('Saving & posting...');
+  var saveOk = await saveBankLedgerRow(row);
+  if(!saveOk){ hideLoadingOverlay(); mainErr.textContent='Save failed. Check console.'; return; }
+  var idx = REV.bankLedger.findIndex(function(r){ return r.id === editId; });
+  if(idx >= 0) REV.bankLedger[idx] = row; else REV.bankLedger.push(row);
+
+  var existingParts = blRowSplits(editId);
+  var troyPartRow = existingParts.find(function(s){ return s.era === 'troy'; });
+  var dcPartRow = existingParts.find(function(s){ return s.era === 'dc'; });
+  var needed = (troyPartRow?0:1) + (dcPartRow?0:1);
+  var newIds = needed>0 ? await nextBankSplitIds(needed) : [];
+  var ni = 0;
+  var nowIso = new Date().toISOString();
+  var troyRec = {
+    id: troyPartRow ? troyPartRow.id : newIds[ni++],
+    bank_ledger_id: editId, era: 'troy', amount: troyAmt, gl_account: '1300',
+    basis: basis, memo: memoInput, created_at: troyPartRow ? troyPartRow.created_at : nowIso
+  };
+  var dcRec = {
+    id: dcPartRow ? dcPartRow.id : newIds[ni++],
+    bank_ledger_id: editId, era: 'dc', amount: dcAmt, gl_account: dcAcct,
+    basis: basis, memo: memoInput, created_at: dcPartRow ? dcPartRow.created_at : nowIso
+  };
+
+  var partsOk = await saveBankSplitParts([troyRec, dcRec]);
+  if(!partsOk){ hideLoadingOverlay(); splitErr.textContent='Row saved, but split parts failed to save. Check console and try again.'; return; }
+  REV.bankSplits = REV.bankSplits.filter(function(s){ return s.bank_ledger_id !== editId; });
+  REV.bankSplits.push(troyRec, dcRec);
+
+  var postOk = await postSplitRowToGL(row, troyAmt, dcAmt, dcAcct, memoInput);
+  hideLoadingOverlay();
+  if(!postOk){ splitErr.textContent='Row and split parts saved, but GL posting failed. Check console and try posting again.'; return; }
+
+  closeModal();
+  showToast('Transaction split and posted to GL');
+  renderBankLedger();
+}
+
 async function confirmDirectPost(rowId){
   var row = REV.bankLedger.find(function(r){ return r.id === rowId; });
   if(!row) return;
@@ -8120,6 +8381,8 @@ async function confirmDirectPost(rowId){
 // one click instead of Save, close, find the row again, click Code to GL.
 async function saveAndPostToGL(editId){
   if(!editId) return;
+  var newEraCheck = $('era-val-bl') ? $('era-val-bl').value : 'dc';
+  if(newEraCheck === 'split') return saveAndPostSplitToGL(editId);
   var mainErr = $('bl-err');
   var glErr = $('bl-gl-err');
   var acct = $('bl-gl-acct') ? $('bl-gl-acct').value : '';
