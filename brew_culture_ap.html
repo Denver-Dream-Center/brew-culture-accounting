@@ -237,6 +237,14 @@
   .match-summary-bar{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;background:var(--bg);border-radius:var(--r);margin-top:12px;font-size:13px}
   .match-variance-ok{color:var(--green);font-weight:700}
   .match-variance-bad{color:var(--red);font-weight:700}
+  @media print{
+    .mod-bar,.sidebar,.topbar,.no-print{display:none!important}
+    .main,.content{overflow:visible!important}
+    .print-header{display:block!important;margin-bottom:16px}
+    .print-header h2{margin:0 0 4px}
+    body{background:#fff}
+    .card{box-shadow:none;border:1px solid #ccc}
+  }
 </style>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
@@ -853,14 +861,14 @@ function mapPaymentToDB(p) {
 
 function mapGLFromDB(r) {
   return {
-    id: r.id, date: r.entry_date, ref: r.ref, era: r.era,
+    id: r.id, date: r.entry_date, effectiveDate: r.effective_date || null, ref: r.ref, era: r.era,
     memo: r.memo, entries: r.entries || []
   };
 }
 
 function mapGLToDB(je) {
   return {
-    id: je.id, entry_date: je.date, ref: je.ref, era: je.era,
+    id: je.id, entry_date: je.date, effective_date: je.effectiveDate || null, ref: je.ref, era: je.era,
     memo: je.memo, entries: je.entries
   };
 }
@@ -1437,6 +1445,9 @@ function renderSidebar(){
       '<button class="nav-item" onclick="showView(\'bank-ledger\')" id="nav-bank-ledger"><span class="nav-icon">&#8942;</span> Bank Ledger</button>' +
       '<button class="nav-item" onclick="showView(\'card-ledger\')" id="nav-card-ledger"><span class="nav-icon">&#9641;</span> Divvy Credit Card</button>' +
       '<button class="nav-item" onclick="openJEModal()"><span class="nav-icon">&#10022;</span> Journal Entry</button>' +
+      '<div class="sidebar-section">Reports</div>' +
+      '<button class="nav-item" onclick="showView(\'report-pl\')" id="nav-report-pl"><span class="nav-icon">&#8597;</span> Profit &amp; Loss</button>' +
+      '<button class="nav-item" onclick="showView(\'report-bs\')" id="nav-report-bs"><span class="nav-icon">&#8864;</span> Balance Sheet</button>' +
       '<div class="sidebar-section">Jump To</div>' +
       (canAccessModule('ap')?'<button class="nav-item" onclick="launchModule(\'ap\')"><span class="nav-icon">&#9632;</span> AP Module</button>':'') +
       (canAccessModule('revenue')?'<button class="nav-item" onclick="launchModule(\'revenue\')"><span class="nav-icon">&#9650;</span> Revenue Module</button>':'') +
@@ -3720,6 +3731,8 @@ function showView(view){
     'rev-cash':['Cash Log','Daily cash revenue'],
     'bank-ledger':['Bank Ledger','Transaction register \xb7 Glacier \xb7 SouthState'],
     'card-ledger':['Divvy Credit Card','Card transaction register \xb7 code to GL \xb7 2110 Divvy Card Payable'],
+    'report-pl':['Profit & Loss','Revenue, COGS, operating expenses \xb7 by period'],
+    'report-bs':['Balance Sheet','Assets, liabilities, equity \xb7 as of a date'],
     'payroll-employees':['Employees','Employee profiles \xb7 pay rate history'],
     'payroll-shifts':['Shift Log','Daily clock-in / clock-out entries'],
     'payroll-timesheets':['Individual Timesheets','Pay period review by employee'],
@@ -3744,6 +3757,8 @@ function showView(view){
     'rev-settlement':renderRevSettlement,'rev-cash':renderRevCash,
     'bank-ledger':renderBankLedger,
     'card-ledger':renderCardLedger,
+    'report-pl':renderReportPL,
+    'report-bs':renderReportBS,
     'payroll-employees':renderPayrollEmployees,
     'payroll-shifts':renderPayrollShifts,
     'payroll-timesheets':renderPayrollTimesheets,
@@ -4131,6 +4146,664 @@ function renderTrialBalance(){
         <span style="font-size:13px;font-weight:700;color:${balanced?'var(--green)':'var(--red)'}">${balanced?'✓ Balanced':'Out of balance by '+fmt(Math.abs(diff))}</span>
       </div>
     </div></div>`;
+}
+
+// ═══════════════════════════════════════════════
+// REPORTING MODULE — Profit & Loss / Balance Sheet
+// The math lives in pure functions (computeStatements and friends) so it
+// can be reasoned about and tested independent of the DOM; the render
+// functions below are just HTML built from their output. No new data is
+// queried per account -- flattenGLLines/buildUncodedBankLines each build
+// their line list once per run from DB.gl / REV.bankLedger / REV.bankMatches,
+// already loaded in the app.
+// ═══════════════════════════════════════════════
+
+// January; change if Denver Dream Center reports on a different fiscal
+// year (see spec Open Decision #1) -- Quarters and "Year" both follow it.
+const FISCAL_YEAR_START_MONTH = 1;
+
+// Synthetic, display-only accounts for "Include uncoded bank rows" --
+// never written to the chart of accounts or the database. Real accounts
+// come from getCOA(); these two codes are special-cased wherever an
+// account code is resolved to a type/name/report-group.
+const UNC_EXP_ACCT = {acct:'UNC-EXP', name:'Other Uncoded Expenses', type:'Expense'};
+const UNC_REV_ACCT = {acct:'UNC-REV', name:'Other Uncoded Revenue', type:'Revenue'};
+
+// Account-number-range groupings for the P&L and Balance Sheet, kept in
+// one place so they're easy to edit as the chart of accounts grows. A
+// group's `ranges` is a list of [min,max] (inclusive) account-number
+// pairs; groups are checked in array order and the first match wins, so
+// a catch-all range (e.g. "Other Assets") must come after its more
+// specific siblings covering the same number span.
+const REPORT_GROUPS = {
+  pl: [
+    {key:'revenue', label:'Revenue', ranges:[[4000,4089]]},
+    {key:'cogs', label:'Cost of Goods Sold', ranges:[[5000,5999]]},
+    {key:'opex', label:'Operating Expenses', ranges:[[6000,6999]]},
+    {key:'other_income', label:'Other Income', ranges:[[4090,4999]]}
+  ],
+  bs: [
+    {key:'cash', label:'Cash and Bank', ranges:[[1010,1014],[1020,1020]]},
+    {key:'undeposited', label:'Undeposited Funds', ranges:[[1015,1019]]},
+    {key:'receivables', label:'Receivables', ranges:[[1300,1399]]},
+    {key:'inventory', label:'Inventory', ranges:[[1400,1499]]},
+    {key:'other_assets', label:'Other Assets', ranges:[[1000,1999]]},
+    {key:'ap', label:'Accounts Payable', ranges:[[2000,2039]]},
+    {key:'other_payable', label:'Gift Cards, Taxes, Tips Payable', ranges:[[2040,2099]]},
+    {key:'other_liab', label:'Loans and Other Liabilities', ranges:[[2100,2999]]},
+    {key:'equity', label:'Equity', ranges:[[3000,3999]]}
+  ]
+};
+
+function acctInRanges(acctNum, ranges){
+  for(var i=0;i<ranges.length;i++){ if(acctNum>=ranges[i][0] && acctNum<=ranges[i][1]) return true; }
+  return false;
+}
+function reportGroupFor(kind, acctCode){
+  if(kind==='pl' && acctCode==='UNC-REV') return REPORT_GROUPS.pl.find(function(g){return g.key==='revenue'});
+  if(kind==='pl' && acctCode==='UNC-EXP') return REPORT_GROUPS.pl.find(function(g){return g.key==='opex'});
+  var n = parseInt(acctCode,10);
+  if(isNaN(n)) return null;
+  var groups = REPORT_GROUPS[kind];
+  for(var i=0;i<groups.length;i++){ if(acctInRanges(n, groups[i].ranges)) return groups[i]; }
+  return null;
+}
+function accountTypeFor(acctCode){
+  if(acctCode==='UNC-EXP') return 'Expense';
+  if(acctCode==='UNC-REV') return 'Revenue';
+  var a = getCOA({includeInactive:true}).find(function(x){ return x.acct===acctCode; });
+  return a ? a.type : null;
+}
+function accountNameFor(acctCode, fallback){
+  if(acctCode==='UNC-EXP') return UNC_EXP_ACCT.name;
+  if(acctCode==='UNC-REV') return UNC_REV_ACCT.name;
+  return acctName(acctCode) || fallback || acctCode;
+}
+// Debit-normal (Asset/Expense) balance = dr-cr; credit-normal
+// (Liability/Equity/Revenue) balance = cr-dr, per spec sign rules.
+function normalizedBalance(type, dr, cr){
+  return (type==='Asset'||type==='Expense') ? round2(dr-cr) : round2(cr-dr);
+}
+
+// Flattens every DB.gl entry into one line per {acct,dr,cr}, using each
+// entry's effectiveDate (falling back to its posting date) for period
+// bucketing -- see the 2026-11-09 correcting-entries dating decision
+// (gl_entries.effective_date, set for GL-0172..0181/0193..0197 to
+// 2025-11-02 while entry_date stays 2026-07-03, their true posting date).
+// entryDate is kept on the line too so a report can tell the two apart
+// (the "correcting entry dated after the period" warning).
+function flattenGLLines(era){
+  var lines = [];
+  DB.gl.forEach(function(je){
+    if(era!=='all' && (je.era||'dc')!==era) return;
+    var d = je.effectiveDate || je.date;
+    (je.entries||[]).forEach(function(e){
+      lines.push({date:d, entryDate:je.date, acct:e.acct, name:e.name, dr:e.dr||0, cr:e.cr||0, era:je.era||'dc', ref:je.ref, glId:je.id, memo:je.memo, synthetic:false});
+    });
+  });
+  return lines;
+}
+
+// Synthetic lines for not-yet-coded bank_ledger rows (owner rule,
+// 2026-11-08): only era 'dc' rows become expense/revenue lines -- troy and
+// split rows belong in 1300, not the P&L, and are reported separately via
+// nonDcRows for a warning instead of being silently dropped. Generated
+// once up through `throughDate` (the report's period end / as-of date)
+// and reused for every sub-window the engine needs (the period itself,
+// prior-FY retained earnings, current-FY net income), per the "build the
+// line list once, don't re-query per account" implementation note.
+function buildUncodedBankLines(throughDate, includeUncoded){
+  var result = {lines:[], count:0, expenseTotal:0, revenueTotal:0, nonDcRows:[]};
+  if(!includeUncoded) return result;
+  REV.bankLedger.forEach(function(r){
+    if(!r.pmnt_date || r.pmnt_date > throughDate) return;
+    if(blRowStatus(r.id) !== 'open') return; // already coded/matched -- a real GL entry already exists
+    var amt = round2(parseFloat(r.gross_amount)||0);
+    if(amt === 0) return;
+    var era = r.era || 'dc';
+    if(era !== 'dc'){ result.nonDcRows.push(r); return; }
+    var cashAcct = r.bank === 'Glacier Bank' ? '1010' : '1011';
+    var cashName = acctName(cashAcct) || cashAcct;
+    result.count++;
+    if(amt < 0){
+      result.lines.push({date:r.pmnt_date, entryDate:r.pmnt_date, acct:'UNC-EXP', name:UNC_EXP_ACCT.name, dr:Math.abs(amt), cr:0, era:'dc', ref:'BL-'+r.id, synthetic:true});
+      result.lines.push({date:r.pmnt_date, entryDate:r.pmnt_date, acct:cashAcct, name:cashName, dr:0, cr:Math.abs(amt), era:'dc', ref:'BL-'+r.id, synthetic:true});
+      result.expenseTotal = round2(result.expenseTotal + Math.abs(amt));
+    } else {
+      result.lines.push({date:r.pmnt_date, entryDate:r.pmnt_date, acct:cashAcct, name:cashName, dr:amt, cr:0, era:'dc', ref:'BL-'+r.id, synthetic:true});
+      result.lines.push({date:r.pmnt_date, entryDate:r.pmnt_date, acct:'UNC-REV', name:UNC_REV_ACCT.name, dr:0, cr:amt, era:'dc', ref:'BL-'+r.id, synthetic:true});
+      result.revenueTotal = round2(result.revenueTotal + amt);
+    }
+  });
+  return result;
+}
+
+// Sums dr/cr per account for lines within [start,end] (end-only, i.e.
+// cumulative from the beginning of the books, when start is falsy -- the
+// Balance Sheet's own semantics).
+function sumLinesByAccount(lines, start, end){
+  var m = {};
+  lines.forEach(function(l){
+    if(start && l.date < start) return;
+    if(end && l.date > end) return;
+    if(!m[l.acct]) m[l.acct] = {dr:0, cr:0, name:l.name, lines:[]};
+    m[l.acct].dr = round2(m[l.acct].dr + (l.dr||0));
+    m[l.acct].cr = round2(m[l.acct].cr + (l.cr||0));
+    if(l.name) m[l.acct].name = l.name;
+    m[l.acct].lines.push(l);
+  });
+  return m;
+}
+
+// One P&L for [start,end] over an already era-filtered line list. Used
+// both for the user's requested P&L period and, internally, twice more
+// for the Balance Sheet's two computed equity lines (prior-FY cumulative,
+// current-FY-to-date).
+function computePLWindow(lines, start, end){
+  var byAcct = sumLinesByAccount(lines, start, end);
+  var sections = {revenue:[], cogs:[], opex:[], other_income:[]};
+  var unmapped = [];
+  Object.keys(byAcct).forEach(function(acctCode){
+    var b = byAcct[acctCode];
+    var type = accountTypeFor(acctCode);
+    if(type!=='Revenue' && type!=='Expense') return;
+    var bal = normalizedBalance(type, b.dr, b.cr);
+    if(Math.abs(bal) < 0.005) return; // zero-balance accounts hidden
+    var group = reportGroupFor('pl', acctCode);
+    var row = {acct:acctCode, name:accountNameFor(acctCode,b.name), amount:bal, lines:b.lines, unexpectedSign:bal<0};
+    if(!group){ unmapped.push(row); return; }
+    sections[group.key].push(row);
+  });
+  Object.keys(sections).forEach(function(k){ sections[k].sort(function(a,b){return a.acct.localeCompare(b.acct)}); });
+
+  var sum = function(rows){ return round2(rows.reduce(function(s,r){return s+r.amount},0)); };
+  var revenue = sum(sections.revenue);
+  var cogs = sum(sections.cogs);
+  var grossProfit = round2(revenue - cogs);
+  var opex = sum(sections.opex);
+  var operatingIncome = round2(grossProfit - opex);
+  var otherIncome = sum(sections.other_income);
+  var netIncome = round2(operatingIncome + otherIncome);
+
+  return {
+    sections: sections,
+    totals: {revenue:revenue, cogs:cogs, grossProfit:grossProfit, opex:opex, operatingIncome:operatingIncome, otherIncome:otherIncome, netIncome:netIncome},
+    unmapped: unmapped
+  };
+}
+
+function fiscalYearStartDate(dateStr, fyStartMonth){
+  var y=parseInt(dateStr.slice(0,4),10), m=parseInt(dateStr.slice(5,7),10);
+  var fy = (m>=fyStartMonth) ? y : y-1;
+  return fy+'-'+String(fyStartMonth).padStart(2,'0')+'-01';
+}
+function dayBeforeISO(dateStr){
+  var d = new Date(dateStr+'T12:00:00Z');
+  d.setUTCDate(d.getUTCDate()-1);
+  return d.toISOString().slice(0,10);
+}
+
+// Balance Sheet as of `asOf`: cumulative balances from the beginning of
+// the books, plus the two computed equity lines (no real retained-
+// earnings account exists in this GL -- see spec "Equity on the Balance
+// Sheet"). Assets must equal Liabilities + Equity; `totals.check` is that
+// difference and should be 0.00.
+function computeBSWindow(lines, asOf, fyStartMonth){
+  var byAcct = sumLinesByAccount(lines, null, asOf);
+  var sections = {cash:[], undeposited:[], receivables:[], inventory:[], other_assets:[], ap:[], other_payable:[], other_liab:[], equity:[]};
+  var unmapped = [];
+  Object.keys(byAcct).forEach(function(acctCode){
+    var b = byAcct[acctCode];
+    var type = accountTypeFor(acctCode);
+    if(type!=='Asset' && type!=='Liability' && type!=='Equity') return;
+    var bal = normalizedBalance(type, b.dr, b.cr);
+    if(Math.abs(bal) < 0.005) return;
+    var group = reportGroupFor('bs', acctCode);
+    var row = {acct:acctCode, name:accountNameFor(acctCode,b.name), amount:bal, lines:b.lines, unexpectedSign:bal<0};
+    if(!group){ unmapped.push(row); return; }
+    sections[group.key].push(row);
+  });
+  Object.keys(sections).forEach(function(k){ sections[k].sort(function(a,b){return a.acct.localeCompare(b.acct)}); });
+
+  var fyStart = fiscalYearStartDate(asOf, fyStartMonth);
+  var priorEnd = dayBeforeISO(fyStart);
+  var priorPL = computePLWindow(lines, null, priorEnd);
+  var currentPL = computePLWindow(lines, fyStart, asOf);
+  var retainedEarningsPrior = priorPL.totals.netIncome;
+  var netIncomeCurrentFY = currentPL.totals.netIncome;
+
+  var sum = function(rows){ return round2(rows.reduce(function(s,r){return s+r.amount},0)); };
+  var assetTotal = round2(sum(sections.cash)+sum(sections.undeposited)+sum(sections.receivables)+sum(sections.inventory)+sum(sections.other_assets));
+  var liabTotal = round2(sum(sections.ap)+sum(sections.other_payable)+sum(sections.other_liab));
+  var realEquityTotal = sum(sections.equity);
+  var equityTotal = round2(realEquityTotal + retainedEarningsPrior + netIncomeCurrentFY);
+  var liabAndEquity = round2(liabTotal + equityTotal);
+  var checkDiff = round2(assetTotal - liabAndEquity);
+
+  return {
+    sections: sections,
+    equity: {retainedEarningsPrior:retainedEarningsPrior, netIncomeCurrentFY:netIncomeCurrentFY, realEquityTotal:realEquityTotal, fyStart:fyStart},
+    totals: {assets:assetTotal, liabilities:liabTotal, equity:equityTotal, liabAndEquity:liabAndEquity, check:checkDiff},
+    unmapped: unmapped
+  };
+}
+
+// Flags GL lines whose memo starts "Correction:" and whose true posting
+// date (entryDate) falls after the report's own period/as-of end, but
+// which were pulled INTO this period via effectiveDate -- informational
+// only (the number is already right), just explains why a late-dated
+// entry shows up.
+function correctingEntriesAfterPeriod(lines, start, end){
+  var seen = {}, count = 0;
+  lines.forEach(function(l){
+    if(l.synthetic || !l.memo || l.memo.indexOf('Correction:') !== 0) return;
+    if(l.entryDate <= end) return;
+    if(l.date < (start||'0000-01-01') || l.date > end) return;
+    if(seen[l.glId]) return;
+    seen[l.glId] = true;
+    count++;
+  });
+  return {count:count};
+}
+
+// The one entry point: builds the flattened line list (GL + synthetic
+// uncoded-bank lines) once, then computes whichever statement was asked
+// for plus the shared warnings panel. Pure -- no DOM access -- so it can
+// be exercised without the UI.
+function computeStatements(params){
+  var fyStartMonth = params.fiscalYearStartMonth || FISCAL_YEAR_START_MONTH;
+  var era = params.era || 'all';
+  var glLines = flattenGLLines(era);
+  var uncoded = buildUncodedBankLines(params.endDate, params.includeUncoded);
+  // Synthetic uncoded-bank lines are always tagged era 'dc' (the owner
+  // rule only applies to dc rows) -- the era filter must still apply to
+  // them like any other line, or selecting "Troy" would leak unrelated DC
+  // bank activity into a Troy-only report and break the Assets=Liab+Equity
+  // identity for that filter.
+  var allLines = glLines.concat(uncoded.lines.filter(function(l){ return era==='all' || l.era===era; }));
+
+  var warnings = [];
+  var pl = null, bs = null;
+
+  if(params.reportType === 'pl'){
+    pl = computePLWindow(allLines, params.startDate, params.endDate);
+  } else {
+    bs = computeBSWindow(allLines, params.endDate, fyStartMonth);
+  }
+
+  // The uncoded-rows concept only pertains to DC-era cash/expense/revenue
+  // reconciliation -- skip both banners entirely for a Troy/Split-only view.
+  if(era==='all' || era==='dc'){
+    if(params.includeUncoded){
+      warnings.push({type:'uncoded', count:uncoded.count, expense:uncoded.expenseTotal, revenue:uncoded.revenueTotal});
+    } else {
+      warnings.push({type:'uncoded-off'});
+    }
+  }
+  if(uncoded.nonDcRows.length){
+    warnings.push({type:'uncoded-non-dc', count:uncoded.nonDcRows.length});
+  }
+  if(DB._partial && Object.keys(DB._partial).some(function(k){return DB._partial[k]})){
+    warnings.push({type:'partial', tables:Object.keys(DB._partial).filter(function(k){return DB._partial[k]})});
+  }
+  // The Balance Sheet is cumulative with no real start bound -- a
+  // correcting entry effective-dated well before the P&L-style startDate
+  // that happened to come along with a custom range is still "in" the BS,
+  // so check it against the BS's true window, not that incidental start.
+  var correctionStart = (params.reportType === 'bs') ? null : params.startDate;
+  var correctionWarn = correctingEntriesAfterPeriod(allLines, correctionStart, params.endDate);
+  if(correctionWarn.count) warnings.push({type:'corrections', count:correctionWarn.count});
+
+  if(pl){
+    if(pl.totals.revenue > 0 && pl.totals.cogs === 0) warnings.push({type:'no-cogs'});
+    var unexpectedPL = [].concat(pl.sections.revenue, pl.sections.cogs, pl.sections.opex, pl.sections.other_income).filter(function(r){return r.unexpectedSign});
+    if(unexpectedPL.length) warnings.push({type:'unexpected-sign', rows:unexpectedPL});
+    if(pl.unmapped.length) warnings.push({type:'unmapped', rows:pl.unmapped});
+  }
+  if(bs){
+    var unexpectedBS = [].concat(bs.sections.cash,bs.sections.undeposited,bs.sections.receivables,bs.sections.inventory,bs.sections.other_assets,bs.sections.ap,bs.sections.other_payable,bs.sections.other_liab,bs.sections.equity).filter(function(r){return r.unexpectedSign});
+    if(unexpectedBS.length) warnings.push({type:'unexpected-sign', rows:unexpectedBS});
+    if(bs.unmapped.length) warnings.push({type:'unmapped', rows:bs.unmapped});
+    if(Math.abs(bs.totals.check) >= 0.01) warnings.push({type:'out-of-balance', diff:bs.totals.check});
+  }
+
+  return {pl:pl, bs:bs, warnings:warnings, uncoded:uncoded};
+}
+
+// ── PERIOD HELPERS ──────────────────────────────────────────────────────
+const REPORT_MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+
+function monthBounds(year, month){
+  var start = year+'-'+String(month).padStart(2,'0')+'-01';
+  var end = new Date(Date.UTC(year, month, 0)).toISOString().slice(0,10); // day 0 of next month = last day of this one
+  return {start:start, end:end};
+}
+function quarterBounds(year, quarter, fyStartMonth){
+  var startMonth = fyStartMonth + (quarter-1)*3, startYear = year;
+  if(startMonth > 12){ startMonth -= 12; startYear += 1; }
+  var mb1 = monthBounds(startYear, startMonth);
+  var endMonth = startMonth+2, endYear = startYear;
+  if(endMonth > 12){ endMonth -= 12; endYear += 1; }
+  var mb2 = monthBounds(endYear, endMonth);
+  return {start:mb1.start, end:mb2.end};
+}
+function yearBounds(year, fyStartMonth){
+  var mb1 = monthBounds(year, fyStartMonth);
+  var endMonth = fyStartMonth-1, endYear = year+1;
+  if(endMonth < 1){ endMonth += 12; endYear -= 1; }
+  var mb2 = monthBounds(endYear, endMonth);
+  return {start:mb1.start, end:mb2.end};
+}
+function currentFiscalYear(dateStr, fyStartMonth){
+  var y=parseInt(dateStr.slice(0,4),10), m=parseInt(dateStr.slice(5,7),10);
+  return (m>=fyStartMonth) ? y : y-1;
+}
+function currentFiscalQuarter(dateStr, fyStartMonth){
+  var fy = currentFiscalYear(dateStr, fyStartMonth);
+  var m = parseInt(dateStr.slice(5,7),10);
+  var monthsSinceStart = (m - fyStartMonth + 12) % 12;
+  return {year:fy, quarter:Math.floor(monthsSinceStart/3)+1};
+}
+function reportDataDateRange(){
+  var dates = DB.gl.map(function(je){ return je.effectiveDate || je.date; }).filter(Boolean);
+  REV.bankLedger.forEach(function(r){ if(r.pmnt_date) dates.push(r.pmnt_date); });
+  if(!dates.length) return {min: todayStr(), max: todayStr()};
+  dates.sort();
+  return {min: dates[0], max: dates[dates.length-1]};
+}
+function lastCompleteMonth(){
+  var today = todayStr();
+  var y=parseInt(today.slice(0,4),10), m=parseInt(today.slice(5,7),10);
+  m--; if(m<1){ m=12; y--; }
+  return {year:y, month:m};
+}
+function eraLabelFor(era){
+  return {all:'all eras', dc:'Dream Center era', troy:'Troy (Pre-Acq.) era', split:'Split era'}[era] || era;
+}
+
+// Shared by both reports -- one period selection drives whichever report
+// is currently open.
+var _lcm = lastCompleteMonth();
+var reportFilter = {
+  periodType: 'month', month: _lcm.month, year: _lcm.year, quarter: 1,
+  customStart: '', customEnd: '',
+  era: 'all', includeUncoded: true
+};
+var _lastReportResult = null;
+
+function resolvePeriodBounds(reportKey){
+  var f = reportFilter;
+  if(f.periodType==='month'){ var mb=monthBounds(f.year,f.month); return {start:mb.start, end:mb.end, label:REPORT_MONTH_NAMES[f.month-1]+' '+f.year}; }
+  if(f.periodType==='quarter'){ var qb=quarterBounds(f.year,f.quarter,FISCAL_YEAR_START_MONTH); return {start:qb.start, end:qb.end, label:'Q'+f.quarter+' '+f.year}; }
+  if(f.periodType==='year'){ var yb=yearBounds(f.year,FISCAL_YEAR_START_MONTH); return {start:yb.start, end:yb.end, label:String(f.year)}; }
+  var end = f.customEnd || todayStr();
+  var start = f.customStart || end;
+  return {start:start, end:end, label: (reportKey==='bs') ? fmtDate(end) : (fmtDate(start)+' - '+fmtDate(end))};
+}
+
+function applyReportPreset(name){
+  var today = todayStr();
+  var y=parseInt(today.slice(0,4),10), m=parseInt(today.slice(5,7),10);
+  if(name==='this-month'){ reportFilter.periodType='month'; reportFilter.year=y; reportFilter.month=m; }
+  else if(name==='last-month'){ var lm=m-1,ly=y; if(lm<1){lm=12;ly--;} reportFilter.periodType='month'; reportFilter.year=ly; reportFilter.month=lm; }
+  else if(name==='this-quarter'){ var q=currentFiscalQuarter(today,FISCAL_YEAR_START_MONTH); reportFilter.periodType='quarter'; reportFilter.year=q.year; reportFilter.quarter=q.quarter; }
+  else if(name==='last-quarter'){ var q2=currentFiscalQuarter(today,FISCAL_YEAR_START_MONTH); var qq=q2.quarter-1, qy=q2.year; if(qq<1){qq=4;qy--;} reportFilter.periodType='quarter'; reportFilter.year=qy; reportFilter.quarter=qq; }
+  else if(name==='this-year'){ reportFilter.periodType='custom'; reportFilter.customStart=fiscalYearStartDate(today,FISCAL_YEAR_START_MONTH); reportFilter.customEnd=today; }
+  else if(name==='last-year'){ reportFilter.periodType='year'; reportFilter.year=currentFiscalYear(today,FISCAL_YEAR_START_MONTH)-1; }
+  else if(name==='since-acquisition'){ reportFilter.periodType='custom'; reportFilter.customStart=ACQUISITION_DATE; reportFilter.customEnd=today; }
+}
+
+function runReport(reportKey){ if(reportKey==='pl') renderReportPL(); else renderReportBS(); }
+
+function reportControlsHtml(reportKey){
+  var f = reportFilter;
+  var range = reportDataDateRange();
+  var minYear = parseInt(range.min.slice(0,4),10), maxYear = Math.max(parseInt(range.max.slice(0,4),10), parseInt(todayStr().slice(0,4),10));
+  var yearOpts = function(sel){ var o=''; for(var y=minYear;y<=maxYear;y++){ o+='<option value="'+y+'"'+(y===sel?' selected':'')+'>'+y+'</option>'; } return o; };
+  var monthOpts = function(sel){ return REPORT_MONTH_NAMES.map(function(name,i){ var mm=i+1; return '<option value="'+mm+'"'+(mm===sel?' selected':'')+'>'+name+'</option>'; }).join(''); };
+  var quarterOpts = function(sel){ return [1,2,3,4].map(function(q){ return '<option value="'+q+'"'+(q===sel?' selected':'')+'>Q'+q+'</option>'; }).join(''); };
+
+  var periodFields = '';
+  if(f.periodType==='month'){
+    periodFields = '<select onchange="reportFilter.month=+this.value;runReport(\''+reportKey+'\')">'+monthOpts(f.month)+'</select>'+
+      '<select onchange="reportFilter.year=+this.value;runReport(\''+reportKey+'\')">'+yearOpts(f.year)+'</select>';
+  } else if(f.periodType==='quarter'){
+    periodFields = '<select onchange="reportFilter.quarter=+this.value;runReport(\''+reportKey+'\')">'+quarterOpts(f.quarter)+'</select>'+
+      '<select onchange="reportFilter.year=+this.value;runReport(\''+reportKey+'\')">'+yearOpts(f.year)+'</select>';
+  } else if(f.periodType==='year'){
+    periodFields = '<select onchange="reportFilter.year=+this.value;runReport(\''+reportKey+'\')">'+yearOpts(f.year)+'</select>';
+  } else {
+    periodFields = (reportKey==='bs'
+      ? '<span style="font-size:11px;color:var(--ink-lo)">Start not used</span>'
+      : '<input type="date" value="'+f.customStart+'" onchange="reportFilter.customStart=this.value;runReport(\''+reportKey+'\')">')+
+      '<input type="date" value="'+f.customEnd+'" onchange="reportFilter.customEnd=this.value;runReport(\''+reportKey+'\')">';
+  }
+
+  var presets = [['this-month','This month'],['last-month','Last month'],['this-quarter','This quarter'],['last-quarter','Last quarter'],['this-year','This year (YTD)'],['last-year','Last year'],['since-acquisition','Since acquisition']];
+
+  return '<div class="card no-print" style="margin-bottom:16px">'+
+    '<div class="card-body" style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">'+
+      '<select onchange="reportFilter.periodType=this.value;runReport(\''+reportKey+'\')">'+
+        ['month','quarter','year','custom'].map(function(pt){ return '<option value="'+pt+'"'+(pt===f.periodType?' selected':'')+'>'+pt.charAt(0).toUpperCase()+pt.slice(1)+'</option>'; }).join('')+
+      '</select>'+
+      periodFields+
+      '<select onchange="reportFilter.era=this.value;runReport(\''+reportKey+'\')">'+
+        '<option value="all"'+(f.era==='all'?' selected':'')+'>All eras</option>'+
+        '<option value="dc"'+(f.era==='dc'?' selected':'')+'>Dream Center</option>'+
+        '<option value="troy"'+(f.era==='troy'?' selected':'')+'>Troy (Pre-Acq.)</option>'+
+        '<option value="split"'+(f.era==='split'?' selected':'')+'>Split</option>'+
+      '</select>'+
+      '<label style="font-size:12px;display:flex;align-items:center;gap:4px;white-space:nowrap"><input type="checkbox" '+(f.includeUncoded?'checked':'')+' onchange="reportFilter.includeUncoded=this.checked;runReport(\''+reportKey+'\')"> Include uncoded bank rows</label>'+
+      '<button class="btn btn-secondary btn-sm" onclick="runReport(\''+reportKey+'\')">Run</button>'+
+      '<button class="btn btn-ghost btn-sm" onclick="downloadReportCSV(\''+reportKey+'\')">&#11015; CSV</button>'+
+      '<button class="btn btn-ghost btn-sm" onclick="window.print()">&#9113; Print / PDF</button>'+
+    '</div>'+
+    '<div class="card-body" style="padding-top:0;display:flex;flex-wrap:wrap;gap:6px">'+
+      presets.map(function(p){ return '<button class="btn btn-ghost btn-sm" onclick="applyReportPreset(\''+p[0]+'\');runReport(\''+reportKey+'\')">'+p[1]+'</button>'; }).join('')+
+    '</div>'+
+  '</div>';
+}
+
+function reportWarningsHtml(warnings){
+  if(!warnings || !warnings.length) return '';
+  var items = warnings.map(function(w){
+    switch(w.type){
+      case 'no-cogs': return 'No cost of goods sold is posted for this period; gross profit and inventory are overstated.';
+      case 'uncoded': return 'Includes '+w.count+' uncoded bank row'+(w.count!==1?'s':'')+' (expense '+fmt(w.expense)+', revenue '+fmt(w.revenue)+'). <a href="#" onclick="showView(\'bank-ledger\');return false">Open Bank Ledger</a>';
+      case 'uncoded-off': return 'Uncoded bank rows are excluded — cash will not equal the bank ledger. <a href="#" onclick="showView(\'bank-ledger\');return false">Open Bank Ledger</a>';
+      case 'uncoded-non-dc': return w.count+' uncoded Troy/Split-era bank row(s) are not included as expense/revenue (they belong in 1300).';
+      case 'unexpected-sign': return w.rows.length+' account(s) show an unexpected-sign balance: '+w.rows.map(function(r){return r.acct+' '+r.name;}).join(', ')+'.';
+      case 'unmapped': return w.rows.length+' account(s) with activity are not in any report group: '+w.rows.map(function(r){return r.acct+' '+r.name;}).join(', ')+'.';
+      case 'partial': return 'Some data may not be fully loaded ('+w.tables.join(', ')+') — reload and try again before relying on these numbers.';
+      case 'out-of-balance': return 'Balance Sheet is out of balance by '+fmt(Math.abs(w.diff))+'.';
+      case 'corrections': return w.count+' correcting entr'+(w.count!==1?'ies':'y')+' dated after this period affect it (posted later, effective-dated into this period).';
+      default: return '';
+    }
+  }).filter(Boolean);
+  if(!items.length) return '';
+  var id = 'rpt-warn-'+Date.now();
+  return '<div class="card no-print" style="margin-bottom:16px;border-color:var(--amber)">'+
+    '<div class="card-header" style="cursor:pointer;background:var(--amber-lo)" onclick="var b=document.getElementById(\''+id+'\');b.style.display=(b.style.display===\'none\')?\'block\':\'none\'">'+
+      '<span class="card-title">&#9888; Warnings ('+items.length+')</span>'+
+    '</div>'+
+    '<div id="'+id+'" style="padding:10px 16px;font-size:12px"><ul style="margin:0;padding-left:18px">'+items.map(function(t){return '<li style="margin-bottom:4px">'+t+'</li>';}).join('')+'</ul></div>'+
+  '</div>';
+}
+
+function printHeaderHtml(title, periodLabel){
+  return '<div class="print-header" style="display:none"><h2>Brew Culture Coffee</h2><div>'+title+' — '+periodLabel+'</div><div style="font-size:11px;color:var(--ink-mid)">Generated '+new Date().toLocaleString()+'</div></div>';
+}
+
+function renderReportPL(){
+  $('topbar-actions').innerHTML = '';
+  var bounds = resolvePeriodBounds('pl');
+  var result = computeStatements({reportType:'pl', startDate:bounds.start, endDate:bounds.end, era:reportFilter.era, includeUncoded:reportFilter.includeUncoded});
+  _lastReportResult = {key:'pl', bounds:bounds, result:result};
+  var pl = result.pl;
+
+  function sectionRows(rows){
+    return rows.map(function(r){
+      var pct = pl.totals.revenue>0.004 ? (r.amount/pl.totals.revenue*100) : 0;
+      return '<tr>'+
+        '<td class="mono" data-acct="'+r.acct+'" data-from="'+bounds.start+'" data-to="'+bounds.end+'" data-era="'+reportFilter.era+'">'+r.acct+'</td>'+
+        '<td>'+r.name+(r.unexpectedSign?' <span style="color:var(--red);font-size:10px">(unexpected sign)</span>':'')+'</td>'+
+        '<td class="text-right mono" style="color:'+(r.amount<0?'var(--red)':'var(--ink)')+'">'+(r.amount<0?'('+fmt(Math.abs(r.amount))+')':fmt(r.amount))+'</td>'+
+        '<td class="text-right mono" style="color:var(--ink-mid)">'+pct.toFixed(1)+'%</td>'+
+      '</tr>';
+    }).join('');
+  }
+  function subtotalRow(label, amount, bold){
+    var pct = pl.totals.revenue>0.004 ? (amount/pl.totals.revenue*100) : 0;
+    return '<tr style="border-top:1px solid var(--border)'+(bold?';font-weight:700':'')+'">'+
+      '<td></td><td>'+label+'</td>'+
+      '<td class="text-right mono" style="color:'+(amount<0?'var(--red)':'var(--ink)')+'">'+(amount<0?'('+fmt(Math.abs(amount))+')':fmt(amount))+'</td>'+
+      '<td class="text-right mono">'+pct.toFixed(1)+'%</td>'+
+    '</tr>';
+  }
+
+  var html = '<div class="card"><div style="padding:4px 0"><table style="width:100%">'+
+    '<thead><tr><th style="padding:6px 12px;font-size:10px;color:var(--ink-lo);width:80px">Acct</th><th style="padding:6px 12px;font-size:10px;color:var(--ink-lo)">Account</th><th style="padding:6px 12px;font-size:10px;color:var(--ink-lo);text-align:right;width:110px">Amount</th><th style="padding:6px 12px;font-size:10px;color:var(--ink-lo);text-align:right;width:70px">% Rev</th></tr></thead>'+
+    '<tbody>'+
+      '<tr><td colspan="4" style="font-weight:700;padding:12px 12px 2px">Revenue</td></tr>'+sectionRows(pl.sections.revenue)+
+      subtotalRow('Total Revenue', pl.totals.revenue, true)+
+      '<tr><td colspan="4" style="font-weight:700;padding:12px 12px 2px">Cost of Goods Sold</td></tr>'+sectionRows(pl.sections.cogs)+
+      subtotalRow('Total COGS', pl.totals.cogs, true)+
+      subtotalRow('Gross Profit', pl.totals.grossProfit, true)+
+      '<tr><td colspan="4" style="font-weight:700;padding:12px 12px 2px">Operating Expenses</td></tr>'+sectionRows(pl.sections.opex)+
+      subtotalRow('Total Operating Expenses', pl.totals.opex, true)+
+      subtotalRow('Operating Income', pl.totals.operatingIncome, true)+
+      (pl.sections.other_income.length ? '<tr><td colspan="4" style="font-weight:700;padding:12px 12px 2px">Other Income</td></tr>'+sectionRows(pl.sections.other_income)+subtotalRow('Total Other Income', pl.totals.otherIncome, true) : '')+
+      '<tr style="border-top:2px solid var(--border)"><td></td><td style="font-weight:700;font-size:14px;padding:8px 12px">Net Income</td><td class="text-right mono fw600" style="font-size:14px;padding:8px 12px">'+fmt(pl.totals.netIncome)+'</td><td></td></tr>'+
+      (pl.unmapped.length ? '<tr><td colspan="4" style="font-weight:700;padding:12px 12px 2px;color:var(--amber)">Other / Unmapped</td></tr>'+sectionRows(pl.unmapped) : '')+
+    '</tbody>'+
+  '</table></div></div>';
+
+  $('content').innerHTML =
+    printHeaderHtml('Profit &amp; Loss', bounds.label)+
+    reportControlsHtml('pl')+
+    reportWarningsHtml(result.warnings)+
+    '<div class="alert alert-info no-print" style="margin-bottom:16px">Profit &amp; Loss for <strong>'+bounds.label+'</strong>, '+eraLabelFor(reportFilter.era)+(reportFilter.includeUncoded?', including uncoded bank rows':'')+'.</div>'+
+    html;
+}
+
+function renderReportBS(){
+  $('topbar-actions').innerHTML = '';
+  var bounds = resolvePeriodBounds('bs');
+  var result = computeStatements({reportType:'bs', startDate:bounds.start, endDate:bounds.end, era:reportFilter.era, includeUncoded:reportFilter.includeUncoded});
+  _lastReportResult = {key:'bs', bounds:bounds, result:result};
+  var bs = result.bs;
+
+  function sectionRows(rows){
+    return rows.map(function(r){
+      return '<tr>'+
+        '<td class="mono" data-acct="'+r.acct+'" data-from="" data-to="'+bounds.end+'" data-era="'+reportFilter.era+'">'+r.acct+'</td>'+
+        '<td>'+r.name+(r.unexpectedSign?' <span style="color:var(--red);font-size:10px">(unexpected sign)</span>':'')+'</td>'+
+        '<td class="text-right mono" style="color:'+(r.amount<0?'var(--red)':'var(--ink)')+'">'+(r.amount<0?'('+fmt(Math.abs(r.amount))+')':fmt(r.amount))+'</td>'+
+      '</tr>';
+    }).join('');
+  }
+  function subtotalRow(label, amount, bold){
+    return '<tr style="border-top:1px solid var(--border)'+(bold?';font-weight:700':'')+'"><td></td><td>'+label+'</td>'+
+      '<td class="text-right mono" style="color:'+(amount<0?'var(--red)':'var(--ink)')+'">'+(amount<0?'('+fmt(Math.abs(amount))+')':fmt(amount))+'</td></tr>';
+  }
+  function sectionBlock(label, rows){
+    return rows.length ? ('<tr><td colspan="3" style="font-weight:700;padding:10px 12px 2px">'+label+'</td></tr>'+sectionRows(rows)) : '';
+  }
+
+  var assetHtml = sectionBlock('Cash and Bank', bs.sections.cash)+sectionBlock('Undeposited Funds', bs.sections.undeposited)+
+    sectionBlock('Receivables', bs.sections.receivables)+sectionBlock('Inventory', bs.sections.inventory)+
+    sectionBlock('Other Assets', bs.sections.other_assets)+subtotalRow('Total Assets', bs.totals.assets, true);
+
+  var liabHtml = sectionBlock('Accounts Payable', bs.sections.ap)+sectionBlock('Gift Cards, Taxes, Tips Payable', bs.sections.other_payable)+
+    sectionBlock('Loans and Other Liabilities', bs.sections.other_liab)+subtotalRow('Total Liabilities', bs.totals.liabilities, true);
+
+  var equityHtml = sectionBlock('Equity', bs.sections.equity)+
+    '<tr><td></td><td>Retained Earnings — Prior Fiscal Years</td><td class="text-right mono">'+fmt(bs.equity.retainedEarningsPrior)+'</td></tr>'+
+    '<tr><td></td><td>Net Income — Current Fiscal Year to Date</td><td class="text-right mono">'+fmt(bs.equity.netIncomeCurrentFY)+'</td></tr>'+
+    subtotalRow('Total Equity', bs.totals.equity, true);
+
+  var checkColor = Math.abs(bs.totals.check)<0.01 ? 'var(--green)' : 'var(--red)';
+  var checkBanner = Math.abs(bs.totals.check)>=0.01
+    ? '<div class="alert" style="background:var(--red-lo);border:1px solid var(--red);color:var(--red);font-weight:600;margin-bottom:16px">&#9888; Balance Sheet is out of balance by '+fmt(Math.abs(bs.totals.check))+' — Assets do not equal Liabilities + Equity.</div>'
+    : '';
+
+  var html = '<div class="card"><div style="padding:4px 0"><table style="width:100%">'+
+    '<thead><tr><th style="padding:6px 12px;font-size:10px;color:var(--ink-lo);width:80px">Acct</th><th style="padding:6px 12px;font-size:10px;color:var(--ink-lo)">Account</th><th style="padding:6px 12px;font-size:10px;color:var(--ink-lo);text-align:right;width:120px">Amount</th></tr></thead>'+
+    '<tbody>'+
+      '<tr><td colspan="3" style="font-weight:800;padding:4px 12px;font-size:13px">ASSETS</td></tr>'+assetHtml+
+      '<tr><td colspan="3" style="font-weight:800;padding:16px 12px 4px;font-size:13px">LIABILITIES</td></tr>'+liabHtml+
+      '<tr><td colspan="3" style="font-weight:800;padding:16px 12px 4px;font-size:13px">EQUITY</td></tr>'+equityHtml+
+      '<tr style="border-top:1px solid var(--border)"><td></td><td style="font-weight:700;padding:6px 12px">Total Liabilities and Equity</td><td class="text-right mono fw600" style="padding:6px 12px">'+fmt(bs.totals.liabAndEquity)+'</td></tr>'+
+      '<tr style="border-top:2px solid var(--border)"><td></td><td style="font-weight:700;padding:8px 12px">Check (Assets − Liabilities and Equity)</td><td class="text-right mono fw600" style="padding:8px 12px;color:'+checkColor+'">'+fmt(bs.totals.check)+'</td></tr>'+
+    '</tbody>'+
+  '</table></div></div>';
+
+  $('content').innerHTML =
+    printHeaderHtml('Balance Sheet', 'as of '+bounds.label)+
+    reportControlsHtml('bs')+
+    checkBanner+
+    reportWarningsHtml(result.warnings)+
+    '<div class="alert alert-info no-print" style="margin-bottom:16px">Balance Sheet as of <strong>'+bounds.label+'</strong>, '+eraLabelFor(reportFilter.era)+(reportFilter.includeUncoded?', including uncoded bank rows':'')+'.</div>'+
+    html;
+}
+
+function downloadReportCSV(reportKey){
+  if(!_lastReportResult || _lastReportResult.key!==reportKey){ showToast('Run the report first.','warn'); return; }
+  var bounds = _lastReportResult.bounds;
+  var result = _lastReportResult.result;
+  var lines = [];
+  function csvField(v){ var s=String(v==null?'':v); return /[",\n]/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s; }
+  function row(section, acct, name, amount, pct){ lines.push([csvField(section),csvField(acct),csvField(name),(amount==null?'':amount.toFixed(2)),(pct==null?'':pct)].join(',')); }
+
+  lines.push('Report,'+(reportKey==='pl'?'Profit & Loss':'Balance Sheet'));
+  lines.push('Period,'+csvField(bounds.label));
+  lines.push('Era,'+csvField(eraLabelFor(reportFilter.era)));
+  lines.push('Include Uncoded,'+(reportFilter.includeUncoded?'Yes':'No'));
+  lines.push('Generated,'+csvField(new Date().toLocaleString()));
+  lines.push('');
+  lines.push('section,acct,name,amount,pct_of_revenue');
+
+  function addRows(section, rows, revBase){
+    rows.forEach(function(r){
+      var pct = (revBase && revBase>0.004) ? (r.amount/revBase*100).toFixed(1) : '';
+      row(section, r.acct, r.name, r.amount, pct);
+    });
+  }
+
+  if(reportKey==='pl'){
+    var pl = result.pl, rev = pl.totals.revenue;
+    addRows('Revenue', pl.sections.revenue, rev); row('Revenue','','Total Revenue',pl.totals.revenue,'');
+    addRows('Cost of Goods Sold', pl.sections.cogs, rev); row('Cost of Goods Sold','','Total COGS',pl.totals.cogs,'');
+    row('','','Gross Profit',pl.totals.grossProfit,'');
+    addRows('Operating Expenses', pl.sections.opex, rev); row('Operating Expenses','','Total Operating Expenses',pl.totals.opex,'');
+    row('','','Operating Income',pl.totals.operatingIncome,'');
+    addRows('Other Income', pl.sections.other_income, rev);
+    if(pl.sections.other_income.length) row('Other Income','','Total Other Income',pl.totals.otherIncome,'');
+    row('','','Net Income',pl.totals.netIncome,'');
+    if(pl.unmapped.length) addRows('Other / Unmapped', pl.unmapped, rev);
+  } else {
+    var bs = result.bs;
+    addRows('Cash and Bank', bs.sections.cash); addRows('Undeposited Funds', bs.sections.undeposited);
+    addRows('Receivables', bs.sections.receivables); addRows('Inventory', bs.sections.inventory);
+    addRows('Other Assets', bs.sections.other_assets);
+    row('','','Total Assets',bs.totals.assets,'');
+    addRows('Accounts Payable', bs.sections.ap); addRows('Gift Cards, Taxes, Tips Payable', bs.sections.other_payable);
+    addRows('Loans and Other Liabilities', bs.sections.other_liab);
+    row('','','Total Liabilities',bs.totals.liabilities,'');
+    addRows('Equity', bs.sections.equity);
+    row('Equity','','Retained Earnings - Prior Fiscal Years',bs.equity.retainedEarningsPrior,'');
+    row('Equity','','Net Income - Current Fiscal Year to Date',bs.equity.netIncomeCurrentFY,'');
+    row('','','Total Equity',bs.totals.equity,'');
+    row('','','Total Liabilities and Equity',bs.totals.liabAndEquity,'');
+    row('','','Check (Assets - Liabilities and Equity)',bs.totals.check,'');
+    if(bs.unmapped.length) addRows('Other / Unmapped', bs.unmapped);
+  }
+
+  var blob = new Blob([lines.join('\n')], {type:'text/csv'});
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url; a.download = (reportKey==='pl'?'profit-loss-':'balance-sheet-')+bounds.end+'.csv'; a.click();
+  URL.revokeObjectURL(url);
 }
 
 // ═══════════════════════════════════════════════
