@@ -10029,6 +10029,55 @@ var _clRawRows = [];
 var _clRawHeaders = [];
 var _clParsed = [];
 
+// Confirmed against a real Divvy / BILL Spend & Expense export
+// (3/21/26-4/30/26 sample): these columns are always present, with
+// "Cleared Time in Statement (MT)" already in local time (correctly
+// rolls a late-night transaction back to the prior local calendar day
+// vs. "Date (UTC)") and Amount negative for a charge, positive for a
+// credit/refund -- the opposite of this importer's original generic-path
+// guess, which is now fixed too (see confirmCardLedgerMap).
+var DIVVY_REQUIRED_HEADERS = ['Transaction ID','Cleared Time in Statement (MT)','Clean Merchant Name','Amount','First Name','Last Name'];
+
+function looksLikeDivvyExport(headers){
+  return DIVVY_REQUIRED_HEADERS.every(function(h){ return headers.indexOf(h) !== -1; });
+}
+
+function parseDivvyRows(rawRows){
+  var nextRowId = REV.cardLedger.reduce(function(m,r){ return Math.max(m, r.row_id||0); }, 0) + 1;
+  return rawRows.map(function(r){
+    var dateISO = ledgerDateToISO(r['Cleared Time in Statement (MT)'] || r['Date (UTC)']);
+    if(!dateISO) return null;
+    var amtRaw = parseFloat(r['Amount']);
+    if(isNaN(amtRaw) || amtRaw === 0) return null;
+    var holder = [r['First Name'],r['Last Name']].filter(Boolean).join(' ').trim();
+    var merchant = String(r['Clean Merchant Name']||r['Merchant']||'').trim();
+    var last4 = String(r['Card Last 4']||'').replace(/^'/,'').trim();
+    var mcc = String(r['MCC']||'').trim();
+    var descParts = [];
+    if(r['Merchant'] && String(r['Merchant']).trim()!==merchant) descParts.push(String(r['Merchant']).trim());
+    if(last4) descParts.push('Card ••••'+last4);
+    if(mcc) descParts.push('MCC '+mcc);
+    var rowId = nextRowId++;
+    return {
+      id: 'CL-IMPORT-' + rowId,
+      row_id: rowId,
+      external_id: r['Transaction ID'] ? String(r['Transaction ID']) : null,
+      trans_date: dateISO,
+      card_holder: holder,
+      merchant: merchant,
+      description: descParts.join(' \xb7 '),
+      category: String(r['Category']||'').trim(),
+      // Divvy: negative Amount = money spent (a Charge); positive = a
+      // credit/refund. Our own storage convention is the mirror of that
+      // (Charge stored positive, Credit stored negative, see
+      // cardLedgerRowFromForm) -- so the stored amount is simply -amtRaw.
+      trans_type: amtRaw < 0 ? 'Charge' : 'Credit',
+      gross_amount: Math.round(-amtRaw*100)/100,
+      note: ''
+    };
+  }).filter(Boolean);
+}
+
 function handleCardLedgerFile(file){
   if(!file) return;
   showLoadingOverlay('Reading file...');
@@ -10040,8 +10089,15 @@ function handleCardLedgerFile(file){
       var rows = XLSX.utils.sheet_to_json(ws, {raw:true, defval:''});
       hideLoadingOverlay();
       if(!rows.length){ showToast('No rows found in file','warn'); return; }
+      var headers = Object.keys(rows[0]);
+      if(looksLikeDivvyExport(headers)){
+        var parsed = parseDivvyRows(rows);
+        if(parsed.length === 0){ showToast('No valid transaction rows found in Divvy file','warn'); return; }
+        renderCardLedgerUploadPreview(parsed);
+        return;
+      }
       _clRawRows = rows;
-      _clRawHeaders = Object.keys(rows[0]);
+      _clRawHeaders = headers;
       openCardLedgerMapModal();
     }catch(err){
       hideLoadingOverlay();
@@ -10087,11 +10143,14 @@ function openCardLedgerMapModal(){
         '<div class="form-grid">' +
           '<div class="form-group"><label>Date Column *</label><select id="cl-map-date">' + colOpts(guessDate) + '</select></div>' +
           '<div class="form-group"><label>Merchant Column *</label><select id="cl-map-merchant">' + colOpts(guessMerchant) + '</select></div>' +
-          '<div class="form-group"><label>Amount Column *</label><select id="cl-map-amount">' + colOpts(guessAmount) + '</select>' +
-            '<span class="form-hint">A negative amount is imported as a Credit/refund; positive as a Charge.</span></div>' +
+          '<div class="form-group"><label>Amount Column *</label><select id="cl-map-amount">' + colOpts(guessAmount) + '</select></div>' +
+          '<div class="form-group"><label>Amount Sign Convention</label><select id="cl-map-sign">' +
+            '<option value="neg-charge">Negative = Charge, Positive = Credit/refund (most common)</option>' +
+            '<option value="neg-credit">Negative = Credit/refund, Positive = Charge</option>' +
+          '</select></div>' +
           '<div class="form-group"><label>Card Holder Column</label><select id="cl-map-holder">' + colOpts(guessHolder) + '</select></div>' +
           '<div class="form-group"><label>Category Column</label><select id="cl-map-category">' + colOpts(guessCategory) + '</select></div>' +
-          '<div class="form-group"><label>Memo / Description Column</label><select id="cl-map-memo">' + colOpts(guessMemo) + '</select></div>' +
+          '<div class="form-group span-2"><label>Memo / Description Column</label><select id="cl-map-memo">' + colOpts(guessMemo) + '</select></div>' +
         '</div>' +
         '<div id="cl-map-err" style="color:var(--red);font-size:12px;margin-top:8px"></div>' +
       '</div>' +
@@ -10106,6 +10165,7 @@ function openCardLedgerMapModal(){
 function confirmCardLedgerMap(){
   var dateCol = $('cl-map-date').value, merchantCol = $('cl-map-merchant').value, amtCol = $('cl-map-amount').value;
   var holderCol = $('cl-map-holder').value, catCol = $('cl-map-category').value, memoCol = $('cl-map-memo').value;
+  var negIsCharge = $('cl-map-sign').value !== 'neg-credit';
   var errEl = $('cl-map-err');
   if(!dateCol || !merchantCol || !amtCol){ errEl.textContent='Date, Merchant, and Amount columns are required.'; return; }
 
@@ -10115,17 +10175,22 @@ function confirmCardLedgerMap(){
     if(!dateISO) return null;
     var amtRaw = parseFloat(r[amtCol]);
     if(isNaN(amtRaw) || amtRaw === 0) return null;
+    // Normalize to our own storage convention (Charge stored positive,
+    // Credit stored negative, see cardLedgerRowFromForm) regardless of
+    // which sign the source file uses for a charge.
+    var effectiveAmt = negIsCharge ? -amtRaw : amtRaw;
     var rowId = nextRowId++;
     return {
       id: 'CL-IMPORT-' + rowId,
       row_id: rowId,
+      external_id: null,
       trans_date: dateISO,
       card_holder: holderCol ? String(r[holderCol]||'').trim() : '',
       merchant: String(r[merchantCol]||'').trim(),
       description: memoCol ? String(r[memoCol]||'').trim() : '',
       category: catCol ? String(r[catCol]||'').trim() : '',
-      trans_type: amtRaw < 0 ? 'Credit' : 'Charge',
-      gross_amount: Math.round(amtRaw*100)/100,
+      trans_type: effectiveAmt >= 0 ? 'Charge' : 'Credit',
+      gross_amount: Math.round(effectiveAmt*100)/100,
       note: ''
     };
   }).filter(Boolean);
@@ -10135,7 +10200,12 @@ function confirmCardLedgerMap(){
   renderCardLedgerUploadPreview(parsed);
 }
 
+// Prefers the source file's own stable transaction id (Divvy's "Transaction
+// ID") when present -- far more reliable for catching a re-uploaded/
+// overlapping export than guessing from date+merchant+amount, which can
+// collide for two genuinely different same-day same-merchant charges.
 function cardLedgerDedupeKey(r){
+  if(r.external_id) return 'ext:'+r.external_id;
   return r.trans_date + '|' + (r.merchant||'').toLowerCase().trim() + '|' + r.gross_amount.toFixed(2);
 }
 
