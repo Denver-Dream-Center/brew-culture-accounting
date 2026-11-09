@@ -1435,6 +1435,7 @@ function renderSidebar(){
       '<button class="nav-item" onclick="showView(\'chart-of-accounts\')" id="nav-chart-of-accounts"><span class="nav-icon">&#9776;</span> Chart of Accounts</button>' +
       '<button class="nav-item" onclick="showView(\'troy\')" id="nav-troy"><span class="nav-icon">&#9671;</span> 1300 \xb7 Troy Recv.</button>' +
       '<button class="nav-item" onclick="showView(\'bank-ledger\')" id="nav-bank-ledger"><span class="nav-icon">&#8942;</span> Bank Ledger</button>' +
+      '<button class="nav-item" onclick="showView(\'card-ledger\')" id="nav-card-ledger"><span class="nav-icon">&#9641;</span> Divvy Credit Card</button>' +
       '<button class="nav-item" onclick="openJEModal()"><span class="nav-icon">&#10022;</span> Journal Entry</button>' +
       '<div class="sidebar-section">Jump To</div>' +
       (canAccessModule('ap')?'<button class="nav-item" onclick="launchModule(\'ap\')"><span class="nav-icon">&#9632;</span> AP Module</button>':'') +
@@ -1519,7 +1520,8 @@ var REV = {
   cashLog: [],
   bankLedger: [],
   bankMatches: [],  // bank_ledger_match rows: links bank_ledger.id -> payment.id OR settlement.id
-  bankSplits: []    // bank_ledger_split rows: Troy part + DC part for an era='split' bank_ledger row
+  bankSplits: [],   // bank_ledger_split rows: Troy part + DC part for an era='split' bank_ledger row
+  cardLedger: []    // card_ledger rows: individual Divvy card transactions, coded directly to GL (DR expense / CR 2110 for a Charge)
 };
 
 // Modifier token -> ingredient mapping for COGS (costing only, not inventory deduction yet)
@@ -2197,6 +2199,10 @@ async function loadRevData(){
   var bs = await fetchAllRows('bank_ledger_split', '*', 'id', true);
   if(!bs.error && bs.data){
     REV.bankSplits = bs.data;
+  }
+  var cl = await fetchAllRows('card_ledger', '*', 'trans_date', true);
+  if(!cl.error && cl.data){
+    REV.cardLedger = cl.data;
   }
 }
 function blRowSplits(rowId){
@@ -3713,6 +3719,7 @@ function showView(view){
     'rev-settlement':['Settlement Log','All daily settlements'],
     'rev-cash':['Cash Log','Daily cash revenue'],
     'bank-ledger':['Bank Ledger','Transaction register \xb7 Glacier \xb7 SouthState'],
+    'card-ledger':['Divvy Credit Card','Card transaction register \xb7 code to GL \xb7 2110 Divvy Card Payable'],
     'payroll-employees':['Employees','Employee profiles \xb7 pay rate history'],
     'payroll-shifts':['Shift Log','Daily clock-in / clock-out entries'],
     'payroll-timesheets':['Individual Timesheets','Pay period review by employee'],
@@ -3736,6 +3743,7 @@ function showView(view){
     'rev-dashboard':renderRevDashboard,'rev-import':renderRevImport,
     'rev-settlement':renderRevSettlement,'rev-cash':renderRevCash,
     'bank-ledger':renderBankLedger,
+    'card-ledger':renderCardLedger,
     'payroll-employees':renderPayrollEmployees,
     'payroll-shifts':renderPayrollShifts,
     'payroll-timesheets':renderPayrollTimesheets,
@@ -4901,6 +4909,8 @@ function onGLLineChange(prefix){
       }
     }
     updateSplitCheck();
+  } else if(prefix === 'cl-gl'){
+    updateCardGLCheck();
   }
 }
 
@@ -9671,6 +9681,520 @@ async function unmatchBankRow(rowId){
   if(currentView === 'bank-ledger') renderBankLedger();
   else if(currentView === 'rev-dashboard') renderRevDashboard();
   else if(currentView === 'rev-settlement') renderRevSettlement();
+}
+
+// ═══════════════════════════════════════════════
+// DIVVY CREDIT CARD LEDGER
+// Individual card transactions, each coded straight to the GL: a Charge is
+// DR expense(s) / CR 2110 Divvy Card Payable, a Credit/refund is the
+// mirror. No AP/revenue/payroll matching here (that's what Bank Ledger is
+// for) -- status is just "is there a gl_entries row with ref
+// 'DIRECT-CL-<id>'?", reusing the multi-account GL line editor
+// (glLineRowHtml/addGLLine/etc.) and glEntryTableHtml built for Bank
+// Ledger's Split panel and GL Coding section.
+// ═══════════════════════════════════════════════
+
+function clRowStatus(rowId){
+  return DB.gl.some(function(g){ return g.ref === 'DIRECT-CL-'+rowId; }) ? 'coded' : 'open';
+}
+
+async function saveCardLedgerRow(row){
+  var res = await _sb.from('card_ledger').upsert([row], {onConflict:'id'});
+  if(res.error){ console.error('saveCardLedgerRow', res.error); return false; }
+  return true;
+}
+
+async function deleteCardLedgerRow(id){
+  var res = await _sb.from('card_ledger').delete().eq('id', id);
+  if(res.error){ console.error('deleteCardLedgerRow', res.error); return false; }
+  return true;
+}
+
+function renderCardLedger(){
+  $('topbar-actions').innerHTML =
+    '<button class="btn btn-secondary" onclick="$$(\'card-ledger-file-input\').click()">&#8593; Upload Card File</button>' +
+    '<input type="file" id="card-ledger-file-input" accept=".csv,.xlsx,.xls" style="display:none" onchange="handleCardLedgerFile(this.files[0]);this.value=\'\'">' +
+    '<button class="btn btn-primary" onclick="openCardLedgerModal(null)">+ Add Transaction</button>';
+
+  var rows = [...REV.cardLedger].sort(function(a,b){ return (a.trans_date||'').localeCompare(b.trans_date||''); });
+  var running = 0;
+  rows.forEach(function(r){ running = Math.round((running+(parseFloat(r.gross_amount)||0))*100)/100; r._bal = running; });
+  var owed = rows.length ? rows[rows.length-1]._bal : 0;
+
+  var openCount = rows.filter(function(r){ return clRowStatus(r.id)==='open'; }).length;
+  var codedCount = rows.length - openCount;
+  var pct = rows.length ? Math.round(codedCount/rows.length*100) : 0;
+
+  var filterStatus = window._clFilterStatus || '';
+  var filterType = window._clFilterType || '';
+
+  var filtered = rows.slice().reverse();
+  if(filterStatus) filtered = filtered.filter(function(r){ return clRowStatus(r.id)===filterStatus; });
+  if(filterType) filtered = filtered.filter(function(r){ return r.trans_type===filterType; });
+
+  var tableRows = filtered.map(function(r){
+    var amt = Math.abs(parseFloat(r.gross_amount)||0);
+    var isCharge = r.trans_type === 'Charge';
+    var amtColor = isCharge ? 'var(--red)' : 'var(--green)';
+    var amtSign = isCharge ? '+' : '-';
+    var status = clRowStatus(r.id);
+    var statusPill = status === 'coded'
+      ? '<span class="match-pill match-pill-direct">Coded</span>'
+      : '<span class="match-pill match-pill-open">Open</span>';
+    var actionBtn = status === 'open'
+      ? '<button class="btn btn-ghost btn-sm" style="color:var(--amber)" onclick="openCardLedgerModal(\'' + r.id + '\')">Code to GL</button>'
+      : '<button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="uncodeCardRow(\'' + r.id + '\')">Unmatch</button>';
+    return '<tr>' +
+      '<td class="mono">' + fmtDate(r.trans_date) + '</td>' +
+      '<td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (r.merchant||'') + '</td>' +
+      '<td style="font-size:11px;color:var(--ink-mid)">' + (r.card_holder||'') + '</td>' +
+      '<td style="font-size:11px;color:var(--ink-mid)">' + (r.category||'') + '</td>' +
+      '<td class="text-right mono fw600" style="color:' + amtColor + '">' + amtSign + fmt(amt) + '</td>' +
+      '<td class="text-right mono">' + fmt(r._bal) + '</td>' +
+      '<td>' + statusPill + '</td>' +
+      '<td style="white-space:nowrap">' + actionBtn +
+      '<button class="btn btn-ghost btn-sm" onclick="openCardLedgerModal(\'' + r.id + '\')">&#9998;</button>' +
+      '<button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="confirmDeleteCardRow(\'' + r.id + '\')">&#215;</button></td>' +
+    '</tr>';
+  }).join('');
+
+  $('content').innerHTML =
+    '<div class="ledger-bal-bar" style="grid-template-columns:1fr 1fr">' +
+      '<div class="ledger-bal-card">' +
+        '<div class="ledger-bal-bank">Divvy Card Balance Owed</div>' +
+        '<div class="ledger-bal-amt" style="color:' + (owed>=0?'var(--red)':'var(--green)') + '">' + fmt(owed) + '</div>' +
+        '<div class="ledger-bal-sub">Should tie to GL account 2110 once every row below is coded</div>' +
+      '</div>' +
+      '<div class="ledger-bal-card">' +
+        '<div class="ledger-bal-bank">Coding Progress</div>' +
+        '<div class="ledger-bal-amt" style="color:' + (pct===100?'var(--green)':'var(--amber)') + '">' + pct + '%</div>' +
+        '<div class="ledger-bal-sub">' + openCount + ' open \xb7 ' + codedCount + ' coded</div>' +
+      '</div>' +
+    '</div>' +
+    '<div class="card">' +
+      '<div class="card-header">' +
+        '<span class="card-title">Transactions (' + filtered.length + ')</span>' +
+        '<div style="display:flex;gap:8px;align-items:center">' +
+          '<select style="font-size:12px;padding:4px 8px;border:1px solid var(--border);border-radius:var(--r)" onchange="window._clFilterType=this.value;renderCardLedger()">' +
+            '<option value="">All Types</option>' +
+            '<option value="Charge"' + (filterType==='Charge'?' selected':'') + '>Charge</option>' +
+            '<option value="Credit"' + (filterType==='Credit'?' selected':'') + '>Credit</option>' +
+          '</select>' +
+          '<select style="font-size:12px;padding:4px 8px;border:1px solid var(--border);border-radius:var(--r)" onchange="window._clFilterStatus=this.value;renderCardLedger()">' +
+            '<option value="">All Status</option>' +
+            '<option value="open"' + (filterStatus==='open'?' selected':'') + '>Open</option>' +
+            '<option value="coded"' + (filterStatus==='coded'?' selected':'') + '>Coded</option>' +
+          '</select>' +
+        '</div>' +
+      '</div>' +
+      (filtered.length === 0
+        ? '<div class="empty-state"><div class="empty-icon">&#8942;</div><div>No card transactions yet. Upload a file or add one to get started.</div></div>'
+        : '<div class="tbl-wrap"><table>' +
+          '<thead><tr>' +
+            '<th>Date</th><th>Merchant</th><th>Card Holder</th><th>Category</th>' +
+            '<th class="text-right">Amount</th><th class="text-right">Balance</th><th>Status</th><th></th>' +
+          '</tr></thead>' +
+          '<tbody>' + tableRows + '</tbody>' +
+          '</table></div>'
+      ) +
+    '</div>';
+}
+
+function buildCardGLCodingSection(editId){
+  var gl = DB.gl.find(function(g){ return g.ref === 'DIRECT-CL-'+editId; });
+  if(!gl) return '';
+  return '<div style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">' +
+    '<div style="font-weight:600;font-size:13px;margin-bottom:10px">GL Coding</div>' +
+    glEntryTableHtml(gl) +
+  '</div>';
+}
+
+function openCardLedgerModal(editId){
+  var row = editId ? REV.cardLedger.find(function(r){ return r.id === editId; }) : null;
+  var v = function(field, def){ return row ? (row[field]||def||'') : (def||''); };
+
+  var status = editId ? clRowStatus(editId) : null;
+  _glLineState = {};
+
+  var glSection = '';
+  if(editId && status === 'open'){
+    var rowTotal = Math.abs(parseFloat(row.gross_amount)||0);
+    _glLineState['cl-gl'] = [{ acct:'', amt: rowTotal ? rowTotal.toFixed(2) : '' }];
+    var linesHtml = _glLineState['cl-gl'].map(function(l,i){ return glLineRowHtml('cl-gl', i, l, false); }).join('');
+    glSection =
+      '<div style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">' +
+        '<div style="font-weight:600;font-size:13px;margin-bottom:10px">Book to General Ledger</div>' +
+        '<div class="form-hint" style="margin-bottom:8px">Pick the GL account(s) for this transaction — add more to split it across accounts.</div>' +
+        '<div id="cl-gl-lines">' + linesHtml + '</div>' +
+        '<button type="button" class="btn btn-ghost btn-sm" onclick="addGLLine(\'cl-gl\')">+ Add Account</button>' +
+        '<div id="cl-gl-check" style="font-size:12px;margin-top:8px"></div>' +
+        '<div class="form-group" style="margin-top:12px"><label>GL Memo</label><input id="cl-gl-memo" placeholder="Optional — defaults to merchant and account"></div>' +
+        '<div id="cl-gl-err" style="color:var(--red);font-size:12px;margin-top:8px"></div>' +
+      '</div>';
+  } else if(editId && status !== 'open'){
+    glSection = buildCardGLCodingSection(editId) +
+      '<div style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border);font-size:12px;color:var(--ink-mid)">' +
+      'This transaction is already coded to the GL. Click <strong>Unmatch</strong> on the ledger row first if you need to change how it was booked.' +
+    '</div>';
+  }
+
+  openModal(
+    '<div class="modal" style="max-width:600px">' +
+      '<div class="modal-header">' +
+        '<div><div class="modal-title">' + (row ? 'Edit Card Transaction' : 'New Card Transaction') + '</div>' +
+        (row ? '<div class="modal-sub">' + row.id + '</div>' : '') + '</div>' +
+        '<button class="close-btn" onclick="closeModal()">&#215;</button>' +
+      '</div>' +
+      '<div class="modal-body">' +
+        '<div class="form-grid">' +
+          '<div class="form-group"><label>Transaction Date *</label><input type="date" id="cl-date" value="' + v('trans_date') + '"></div>' +
+          '<div class="form-group"><label>Trans Type *</label><select id="cl-trans-type"><option value="Charge"' + (v('trans_type','Charge')==='Charge'?' selected':'') + '>Charge</option><option value="Credit"' + (v('trans_type')==='Credit'?' selected':'') + '>Credit</option></select></div>' +
+          '<div class="form-group span-2"><label>Merchant *</label><input id="cl-merchant" value="' + v('merchant') + '" placeholder="e.g. Costco Wholesale"></div>' +
+          '<div class="form-group"><label>Card Holder</label><input id="cl-holder" value="' + v('card_holder') + '" placeholder="Name on card"></div>' +
+          '<div class="form-group"><label>Category</label><input id="cl-category" value="' + v('category') + '" placeholder="Divvy category (optional)"></div>' +
+          '<div class="form-group"><label>Amount *</label><input type="number" id="cl-amount" step="0.01" min="0" value="' + (row ? Math.abs(parseFloat(row.gross_amount)||0) : '') + '" placeholder="0.00" oninput="updateCardGLCheck()"></div>' +
+          '<div class="form-group span-2"><label>Description</label><input id="cl-desc" value="' + v('description') + '" placeholder="Optional free-text detail"></div>' +
+          '<div class="form-group span-2"><label>Note</label><input id="cl-note" value="' + v('note') + '" placeholder="Optional free-text note"></div>' +
+        '</div>' +
+        '<div id="cl-err" style="color:var(--red);font-size:12px;margin-top:8px"></div>' +
+        glSection +
+      '</div>' +
+      '<div class="modal-footer">' +
+        '<button class="btn btn-ghost" onclick="closeModal()">Cancel</button>' +
+        '<button class="btn btn-secondary" onclick="saveCardLedgerModal(\'' + (editId||'') + '\')">Save</button>' +
+        (editId && status === 'open' ? '<button class="btn btn-primary" onclick="saveAndPostCardToGL(\'' + editId + '\')">Save &amp; Post to GL</button>' : '') +
+      '</div>' +
+    '</div>'
+  );
+}
+
+// Mirrors readSingleGLLinesFromForm (Bank Ledger) but for the card modal's
+// 'cl-gl' line editor and #cl-amount total field.
+function readCardGLLinesFromForm(rowTotal){
+  if(!$('cl-gl-lines')) return null;
+  var collected = collectGLLines('cl-gl');
+  if(collected.error) return {ok:false, error:collected.error};
+  var lines = collected.lines;
+  if(lines.length===0) return {ok:false, error:'Select a GL account and amount.'};
+  var sum = Math.round(lines.reduce(function(s,l){ return s+l.amt; },0)*100)/100;
+  var diff = Math.round((sum-rowTotal)*100)/100;
+  if(Math.abs(diff) > 0.005){
+    return {ok:false, error:'Lines total '+fmt(sum)+', which is off by '+fmt(Math.abs(diff))+' from the transaction total '+fmt(rowTotal)+'. Fix the amounts before saving.'};
+  }
+  return {ok:true, lines:lines};
+}
+
+function updateCardGLCheck(){
+  var el = $('cl-gl-check');
+  if(!el) return;
+  syncGLLinesFromDOM('cl-gl');
+  var total = Math.abs(parseFloat(($('cl-amount')||{}).value)||0);
+  var sum = Math.round((_glLineState['cl-gl']||[]).reduce(function(s,l){ return s+Math.abs(parseFloat(l.amt)||0); },0)*100)/100;
+  if(sum===0){ el.innerHTML=''; return; }
+  var diff = Math.round((sum-total)*100)/100;
+  el.innerHTML = (Math.abs(diff)<=0.005)
+    ? '<span style="color:var(--green)">Lines total '+fmt(sum)+' ✓ matches transaction total '+fmt(total)+'</span>'
+    : '<span style="color:var(--red)">Lines total '+fmt(sum)+' — off by '+fmt(Math.abs(diff))+' from transaction total '+fmt(total)+'</span>';
+}
+
+function cardLedgerRowFromForm(editId, existingRow){
+  var transType = $('cl-trans-type').value;
+  var amtRaw = parseFloat($('cl-amount').value) || 0;
+  var grossAmt = transType === 'Charge' ? Math.abs(amtRaw) : -Math.abs(amtRaw);
+  return {
+    id: editId || ('CL-' + Date.now()),
+    row_id: existingRow ? existingRow.row_id : null,
+    trans_date: $('cl-date').value,
+    card_holder: $('cl-holder').value.trim(),
+    merchant: $('cl-merchant').value.trim(),
+    description: $('cl-desc').value.trim(),
+    category: $('cl-category').value.trim(),
+    trans_type: transType,
+    gross_amount: grossAmt,
+    note: $('cl-note').value.trim()
+  };
+}
+
+async function saveCardLedgerModal(editId){
+  var errEl = $('cl-err');
+  var date = $('cl-date').value;
+  var merchant = $('cl-merchant').value.trim();
+  var amtRaw = parseFloat($('cl-amount').value) || 0;
+  if(!date){ errEl.textContent='Transaction date required.'; return; }
+  if(!merchant){ errEl.textContent='Merchant required.'; return; }
+  if(!amtRaw){ errEl.textContent='Amount required.'; return; }
+
+  var existingRow = editId ? REV.cardLedger.find(function(r){ return r.id === editId; }) : null;
+  var row = cardLedgerRowFromForm(editId, existingRow);
+
+  showLoadingOverlay('Saving...');
+  var ok = await saveCardLedgerRow(row);
+  hideLoadingOverlay();
+  if(!ok){ errEl.textContent = 'Save failed. Check console.'; return; }
+
+  var idx = REV.cardLedger.findIndex(function(r){ return r.id === row.id; });
+  if(idx >= 0) REV.cardLedger[idx] = row;
+  else REV.cardLedger.push(row);
+
+  closeModal();
+  showToast(editId ? 'Transaction updated' : 'Transaction added');
+  renderCardLedger();
+}
+
+// Charge: DR expense(s) / CR 2110. Credit/refund: DR 2110 / CR expense(s).
+async function postCardRowToGL(row, lines, memoInput){
+  var amtAbs = Math.abs(parseFloat(row.gross_amount)||0);
+  var isCredit = row.trans_type === 'Credit';
+  var parts = lines.map(function(l){ return {acct:l.acct, name:acctName(l.acct)||l.acct, amt:l.amt}; });
+
+  var entries = isCredit
+    ? [{acct:'2110',name:'Divvy Card Payable',dr:amtAbs,cr:0}].concat(parts.map(function(p){ return {acct:p.acct,name:p.name,dr:0,cr:p.amt}; }))
+    : parts.map(function(p){ return {acct:p.acct,name:p.name,dr:p.amt,cr:0}; }).concat([{acct:'2110',name:'Divvy Card Payable',dr:0,cr:amtAbs}]);
+
+  var memoAcctLabel = parts.length === 1 ? parts[0].name : (parts.length + ' accounts');
+  var je = {id:await nextGLId(), date:row.trans_date, ref:'DIRECT-CL-'+row.id, era:ERA.DC,
+    memo:memoInput||((row.merchant||'(no merchant)')+' - '+memoAcctLabel),
+    entries:entries};
+  return await saveGLToSB(je);
+}
+
+async function saveAndPostCardToGL(editId){
+  if(!editId) return;
+  var errEl = $('cl-err');
+  var glErr = $('cl-gl-err');
+
+  var date = $('cl-date').value;
+  var merchant = $('cl-merchant').value.trim();
+  var amtRaw = parseFloat($('cl-amount').value) || 0;
+  if(!date){ errEl.textContent='Transaction date required.'; return; }
+  if(!merchant){ errEl.textContent='Merchant required.'; return; }
+  if(!amtRaw){ errEl.textContent='Amount required.'; return; }
+
+  var glLines = readCardGLLinesFromForm(Math.abs(amtRaw));
+  if(!glLines || !glLines.ok){ if(glErr) glErr.textContent = glLines ? glLines.error : 'GL lines not found.'; return; }
+
+  var existingRow = REV.cardLedger.find(function(r){ return r.id === editId; });
+  var row = cardLedgerRowFromForm(editId, existingRow);
+
+  showLoadingOverlay('Saving & posting...');
+  var saveOk = await saveCardLedgerRow(row);
+  if(!saveOk){ hideLoadingOverlay(); errEl.textContent='Save failed. Check console.'; return; }
+  var idx = REV.cardLedger.findIndex(function(r){ return r.id === editId; });
+  if(idx >= 0) REV.cardLedger[idx] = row; else REV.cardLedger.push(row);
+
+  var memoInput = $('cl-gl-memo').value.trim();
+  var postOk = await postCardRowToGL(row, glLines.lines, memoInput);
+  hideLoadingOverlay();
+  if(!postOk){ glErr.textContent='Transaction saved, but GL posting failed. Check console and try posting again.'; return; }
+
+  closeModal();
+  showToast('Transaction saved and posted to GL');
+  renderCardLedger();
+}
+
+async function uncodeCardRow(rowId){
+  if(!confirm('This transaction was coded directly to a GL account.\n\nRemoving the code will also delete that GL entry, so the amount is no longer recorded anywhere until you re-code it.')) return;
+  showLoadingOverlay('Removing code...');
+  var res = await _sb.from('gl_entries').delete().eq('ref', 'DIRECT-CL-'+rowId);
+  hideLoadingOverlay();
+  if(res.error){ showToast('Failed to remove code','warn'); return; }
+  DB.gl = DB.gl.filter(function(g){ return g.ref !== ('DIRECT-CL-'+rowId); });
+  showToast('GL entry removed — transaction is open again');
+  updateSidebarStats();
+  if(currentView === 'card-ledger') renderCardLedger();
+}
+
+async function confirmDeleteCardRow(id){
+  var row = REV.cardLedger.find(function(r){ return r.id === id; });
+  if(!row) return;
+  if(clRowStatus(id) !== 'open'){ showToast('Unmatch this transaction before deleting it.','warn'); return; }
+  if(!confirm('Delete this transaction?\n\n' + fmtDate(row.trans_date) + ' — ' + (row.merchant||'') + ' — ' + fmt(Math.abs(parseFloat(row.gross_amount)||0)))) return;
+  showLoadingOverlay('Deleting...');
+  var ok = await deleteCardLedgerRow(id);
+  hideLoadingOverlay();
+  if(!ok){ showToast('Delete failed','warn'); return; }
+  REV.cardLedger = REV.cardLedger.filter(function(r){ return r.id !== id; });
+  showToast('Transaction deleted');
+  renderCardLedger();
+}
+
+// ── CARD FILE UPLOAD ────────────────────────────────────────────────────
+// No fixed Divvy/BILL Spend & Expense export format is known yet, so
+// instead of guessing column names (the kind of guess that already bit
+// this project once with silently-wrong financial data), the uploaded
+// file's own header row drives a column-mapping step the user confirms
+// before anything is parsed into card_ledger shape. Works for any
+// CSV/XLSX export, not just Divvy's.
+var _clRawRows = [];
+var _clRawHeaders = [];
+var _clParsed = [];
+
+function handleCardLedgerFile(file){
+  if(!file) return;
+  showLoadingOverlay('Reading file...');
+  var reader = new FileReader();
+  reader.onload = function(e){
+    try{
+      var wb = XLSX.read(e.target.result, {type:'array', cellDates:false});
+      var ws = wb.Sheets[wb.SheetNames[0]];
+      var rows = XLSX.utils.sheet_to_json(ws, {raw:true, defval:''});
+      hideLoadingOverlay();
+      if(!rows.length){ showToast('No rows found in file','warn'); return; }
+      _clRawRows = rows;
+      _clRawHeaders = Object.keys(rows[0]);
+      openCardLedgerMapModal();
+    }catch(err){
+      hideLoadingOverlay();
+      showToast('Parse error: ' + err.message, 'warn');
+      console.error(err);
+    }
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+function guessColumn(headers, keywords){
+  for(var i=0;i<headers.length;i++){
+    var h=headers[i].toLowerCase();
+    for(var j=0;j<keywords.length;j++){
+      if(h.indexOf(keywords[j])!==-1) return headers[i];
+    }
+  }
+  return '';
+}
+
+function openCardLedgerMapModal(){
+  var headers = _clRawHeaders;
+  var guessDate = guessColumn(headers, ['date']);
+  var guessMerchant = guessColumn(headers, ['merchant','vendor','payee']);
+  var guessAmount = guessColumn(headers, ['amount','total']);
+  var guessHolder = guessColumn(headers, ['card holder','cardholder','employee','user','spender','name']);
+  var guessCategory = guessColumn(headers, ['category','gl code','budget']);
+  var guessMemo = guessColumn(headers, ['memo','note','description']);
+
+  var colOpts = function(selected){
+    return '<option value="">-- none --</option>' + headers.map(function(h){
+      return '<option value="'+h+'"'+(h===selected?' selected':'')+'>'+h+'</option>';
+    }).join('');
+  };
+
+  openModal(
+    '<div class="modal" style="max-width:560px">' +
+      '<div class="modal-header">' +
+        '<div><div class="modal-title">Map Card File Columns</div><div class="modal-sub">' + _clRawRows.length + ' row(s) found in file</div></div>' +
+        '<button class="close-btn" onclick="closeModal()">&#215;</button>' +
+      '</div>' +
+      '<div class="modal-body">' +
+        '<div class="form-grid">' +
+          '<div class="form-group"><label>Date Column *</label><select id="cl-map-date">' + colOpts(guessDate) + '</select></div>' +
+          '<div class="form-group"><label>Merchant Column *</label><select id="cl-map-merchant">' + colOpts(guessMerchant) + '</select></div>' +
+          '<div class="form-group"><label>Amount Column *</label><select id="cl-map-amount">' + colOpts(guessAmount) + '</select>' +
+            '<span class="form-hint">A negative amount is imported as a Credit/refund; positive as a Charge.</span></div>' +
+          '<div class="form-group"><label>Card Holder Column</label><select id="cl-map-holder">' + colOpts(guessHolder) + '</select></div>' +
+          '<div class="form-group"><label>Category Column</label><select id="cl-map-category">' + colOpts(guessCategory) + '</select></div>' +
+          '<div class="form-group"><label>Memo / Description Column</label><select id="cl-map-memo">' + colOpts(guessMemo) + '</select></div>' +
+        '</div>' +
+        '<div id="cl-map-err" style="color:var(--red);font-size:12px;margin-top:8px"></div>' +
+      '</div>' +
+      '<div class="modal-footer">' +
+        '<button class="btn btn-ghost" onclick="closeModal()">Cancel</button>' +
+        '<button class="btn btn-primary" onclick="confirmCardLedgerMap()">Preview Import</button>' +
+      '</div>' +
+    '</div>'
+  );
+}
+
+function confirmCardLedgerMap(){
+  var dateCol = $('cl-map-date').value, merchantCol = $('cl-map-merchant').value, amtCol = $('cl-map-amount').value;
+  var holderCol = $('cl-map-holder').value, catCol = $('cl-map-category').value, memoCol = $('cl-map-memo').value;
+  var errEl = $('cl-map-err');
+  if(!dateCol || !merchantCol || !amtCol){ errEl.textContent='Date, Merchant, and Amount columns are required.'; return; }
+
+  var nextRowId = REV.cardLedger.reduce(function(m,r){ return Math.max(m, r.row_id||0); }, 0) + 1;
+  var parsed = _clRawRows.map(function(r){
+    var dateISO = ledgerDateToISO(r[dateCol]);
+    if(!dateISO) return null;
+    var amtRaw = parseFloat(r[amtCol]);
+    if(isNaN(amtRaw) || amtRaw === 0) return null;
+    var rowId = nextRowId++;
+    return {
+      id: 'CL-IMPORT-' + rowId,
+      row_id: rowId,
+      trans_date: dateISO,
+      card_holder: holderCol ? String(r[holderCol]||'').trim() : '',
+      merchant: String(r[merchantCol]||'').trim(),
+      description: memoCol ? String(r[memoCol]||'').trim() : '',
+      category: catCol ? String(r[catCol]||'').trim() : '',
+      trans_type: amtRaw < 0 ? 'Credit' : 'Charge',
+      gross_amount: Math.round(amtRaw*100)/100,
+      note: ''
+    };
+  }).filter(Boolean);
+
+  if(parsed.length === 0){ errEl.textContent='No valid rows after mapping — check the column choices.'; return; }
+  closeModal();
+  renderCardLedgerUploadPreview(parsed);
+}
+
+function cardLedgerDedupeKey(r){
+  return r.trans_date + '|' + (r.merchant||'').toLowerCase().trim() + '|' + r.gross_amount.toFixed(2);
+}
+
+function renderCardLedgerUploadPreview(parsed){
+  var existingKeys = {};
+  REV.cardLedger.forEach(function(r){ existingKeys[cardLedgerDedupeKey(r)] = true; });
+  var newRows = parsed.filter(function(r){ return !existingKeys[cardLedgerDedupeKey(r)]; });
+  var dupCount = parsed.length - newRows.length;
+  _clParsed = newRows;
+
+  var previewRows = newRows.slice(0, 50).map(function(r){
+    return '<tr>' +
+      '<td class="mono">' + fmtDate(r.trans_date) + '</td>' +
+      '<td>' + (r.merchant||'') + '</td>' +
+      '<td style="font-size:11px;color:var(--ink-mid)">' + (r.card_holder||'') + '</td>' +
+      '<td class="text-right mono" style="color:' + (r.trans_type==='Charge'?'var(--red)':'var(--green)') + '">' + fmt(Math.abs(r.gross_amount)) + '</td>' +
+      '<td>' + r.trans_type + '</td>' +
+    '</tr>';
+  }).join('');
+
+  openModal(
+    '<div class="modal" style="max-width:700px">' +
+      '<div class="modal-header">' +
+        '<div><div class="modal-title">Import Preview</div><div class="modal-sub">' + newRows.length + ' new \xb7 ' + dupCount + ' already on file (skipped)</div></div>' +
+        '<button class="close-btn" onclick="closeModal()">&#215;</button>' +
+      '</div>' +
+      '<div class="modal-body">' +
+        (newRows.length === 0
+          ? '<div class="empty-state"><div>Nothing new to import — every row matched an existing transaction by date, merchant, and amount.</div></div>'
+          : '<div class="tbl-wrap" style="max-height:400px;overflow:auto"><table>' +
+            '<thead><tr><th>Date</th><th>Merchant</th><th>Card Holder</th><th class="text-right">Amount</th><th>Type</th></tr></thead>' +
+            '<tbody>' + previewRows + (newRows.length>50?'<tr><td colspan="5" style="text-align:center;color:var(--ink-lo);font-size:12px">+ ' + (newRows.length-50) + ' more</td></tr>':'') + '</tbody>' +
+          '</table></div>'
+        ) +
+        '<div id="cl-import-err" style="color:var(--red);font-size:12px;margin-top:8px"></div>' +
+      '</div>' +
+      '<div class="modal-footer">' +
+        '<button class="btn btn-ghost" onclick="closeModal()">Cancel</button>' +
+        (newRows.length>0?'<button class="btn btn-primary" onclick="commitCardLedgerImport()">Import ' + newRows.length + ' Row' + (newRows.length!==1?'s':'') + '</button>':'') +
+      '</div>' +
+    '</div>'
+  );
+}
+
+async function commitCardLedgerImport(){
+  showLoadingOverlay('Importing...');
+  var CHUNK = 100;
+  var errors = 0;
+  for(var i=0; i<_clParsed.length; i+=CHUNK){
+    var chunk = _clParsed.slice(i, i+CHUNK);
+    var res = await _sb.from('card_ledger').upsert(chunk, {onConflict:'id'});
+    if(res.error){ errors++; console.error('commitCardLedgerImport', res.error); }
+    else REV.cardLedger = REV.cardLedger.concat(chunk);
+  }
+  hideLoadingOverlay();
+  closeModal();
+  if(errors>0) showToast('Import finished with errors on ' + errors + ' batch(es) — check console.', 'warn');
+  else showToast('Imported ' + _clParsed.length + ' card transaction' + (_clParsed.length!==1?'s':''));
+  renderCardLedger();
 }
 
 async function loadAnthropicApiKey(){
