@@ -1101,10 +1101,49 @@ document.head.appendChild(_style);
 // ═══════════════════════════════════════════════
 // RULE MATCHING
 // ═══════════════════════════════════════════════
+// When more than one rule's `match` text appears in the description, the
+// longest match wins -- otherwise array order decides, which is how a short
+// generic match (or simple bad luck in insertion order) could silently
+// shadow a more specific one.
 function findRule(description){
   if(!description)return null;
   const desc=description.toLowerCase();
-  return DB.rules.find(r=>r.match&&desc.includes(r.match.toLowerCase()))||null;
+  const matches=DB.rules.filter(r=>r.match&&desc.includes(r.match.toLowerCase()));
+  if(!matches.length)return null;
+  matches.sort((a,b)=>b.match.length-a.match.length);
+  return matches[0];
+}
+
+// Same longest-match rule as findRule(), but scoped to one ingredient --
+// used once an ingredient is already chosen (by extraction or by hand) to
+// find the specific rule that best explains THIS line's description, so
+// two rules sharing an ingredient (e.g. Gold Seal's "Coconut Milk Baris"
+// at x384 and Morning Fresh's "coconut mix-ins" at x5.8, both -> Coconut
+// Milk) don't collide via DB.rules.find()'s first-match-wins order.
+function bestRuleForIngredient(ingredient, desc){
+  if(!ingredient)return null;
+  const d=(desc||'').toLowerCase();
+  const matches=DB.rules.filter(r=>r.ingredient===ingredient&&r.match&&d.includes(r.match.toLowerCase()));
+  if(!matches.length)return null;
+  matches.sort((a,b)=>b.match.length-a.match.length);
+  return matches[0];
+}
+
+// Resolves the multiplier for an invoice line the same way everywhere it's
+// needed (writeFIFOLayers, the line-item Conv Qty display, the saved-
+// invoice view): the line's own stored multiplier first (set at extraction
+// or manual ingredient pick, matched against that line's own description --
+// see bestRuleForIngredient above), then a fresh description match (covers
+// lines saved before this field existed), then the first rule for the
+// ingredient (pre-fix behavior, still exactly right for New Millennium
+// since every bulk-bean rule shares the same 2267.96 multiplier), then 1.
+function resolveLineMultiplier(line){
+  if(!line||!line.ingredient)return null;
+  if(line.multiplier!=null&&line.multiplier!=='')return Number(line.multiplier);
+  const descMatch=bestRuleForIngredient(line.ingredient,line.description);
+  if(descMatch)return Number(descMatch.multiplier);
+  const fallback=DB.rules.find(r=>r.ingredient===line.ingredient);
+  return fallback?Number(fallback.multiplier):1;
 }
 
 function round2(n){ return Math.round((n||0)*100)/100; }
@@ -1208,8 +1247,7 @@ function ingredientForLine(line){
   if(!line.ingredient)return null;
   const ing=loadIngredients().find(i=>i.name===line.ingredient);
   if(!ing)return null;
-  const rule=DB.rules.find(r=>r.ingredient===line.ingredient);
-  const multiplier=rule?rule.multiplier:1;
+  const multiplier=resolveLineMultiplier(line);
   const qty=(line.qty||1)*multiplier;
   return{ingredient:ing.name,category:ing.cat,unit:ing.unit,multiplier,qty};
 }
@@ -3816,8 +3854,18 @@ function renderDashboard(){
 // ═══════════════════════════════════════════════
 let invFilter={search:'',status:'all',vendor:'all',era:'all'};
 let tbFilter={asOf:'',era:'all'};
+// Bulk card-pay selection -- keyed by invoice id, reset whenever the
+// Invoices view re-renders with a different vendor filter so a stale
+// selection from a previous vendor can't carry over silently.
+var _bulkPaySelected={};
+var _bulkPaySelectedVendor=null;
+
 function renderInvoices(){
-  $('topbar-actions').innerHTML=`<button class="btn btn-primary" onclick="openInvoiceModal()">＋ New Invoice</button>`;
+  const bulkMode=invFilter.vendor!=='all';
+  if(_bulkPaySelectedVendor!==invFilter.vendor){ _bulkPaySelected={}; _bulkPaySelectedVendor=invFilter.vendor; }
+  const selCount=Object.keys(_bulkPaySelected).filter(id=>_bulkPaySelected[id]).length;
+  $('topbar-actions').innerHTML=`<button class="btn btn-primary" onclick="openInvoiceModal()">＋ New Invoice</button>`
+    +(bulkMode?`<button class="btn btn-secondary" onclick="openBulkCardPayModal()" ${selCount?'':'disabled'}>Mark selected paid by card${selCount?' ('+selCount+')':''}</button>`:'');
   let invs=[...DB.invoices].sort((a,b)=>b.date.localeCompare(a.date));
   if(invFilter.search){const q=invFilter.search.toLowerCase();invs=invs.filter(i=>i.id.toLowerCase().includes(q)||vendorName(i.vendorId).toLowerCase().includes(q)||(i.invoiceNum||'').toLowerCase().includes(q)||(i.memo||'').toLowerCase().includes(q))}
   if(invFilter.status!=='all')invs=invs.filter(i=>inferStatus(i)===invFilter.status);
@@ -3828,7 +3876,9 @@ function renderInvoices(){
     const d=daysUntilDue(inv);
     const dueLabel=d===null?'—':d<0?`<span style="color:var(--red)">Due ${Math.abs(d)}d ago</span>`:d===0?`<span style="color:var(--amber)">Due today</span>`:fmtDate(inv.dueDate);
     const invLines=inv.lines?inv.lines.filter(l=>l.ingredient).length:0;
+    const payable=inv.balance>0&&st!=='void';
     return`<tr class="${era==='troy'?'tr-troy':isOverdue(inv)?'tr-overdue':''}">
+      ${bulkMode?`<td>${payable?`<input type="checkbox" ${_bulkPaySelected[inv.id]?'checked':''} onchange="toggleBulkPaySelect('${inv.id}',this.checked)">`:''}</td>`:''}
       <td class="mono">${inv.id}</td><td>${eraPill(era)}</td><td>${vendorName(inv.vendorId)}</td>
       <td class="mono" style="color:var(--ink-mid)">${inv.invoiceNum||'—'}</td><td>${fmtDate(inv.date)}</td><td>${dueLabel}</td>
       <td class="text-right mono">${fmt(inv.total)}</td>
@@ -3837,7 +3887,7 @@ function renderInvoices(){
       <td>${invLines>0?`<span class="inv-pill">⬡ ${invLines}</span>`:''}</td>
       <td><div style="display:flex;gap:4px">
         <button class="btn btn-ghost btn-sm" onclick="viewInvoice('${inv.id}')">View</button>
-        ${inv.balance>0&&st!=='void'?`<button class="btn btn-secondary btn-sm" onclick="openPaymentModal('${inv.id}')">Pay</button>`:''}
+        ${payable?`<button class="btn btn-secondary btn-sm" onclick="openPaymentModal('${inv.id}')">Pay</button>`:''}
       </div></td>
     </tr>`;
   }).join('');
@@ -3861,9 +3911,67 @@ function renderInvoices(){
       </select>
     </div>
     <div class="card"><div class="tbl-wrap"><table>
-      <thead><tr><th>ID</th><th>Era</th><th>Vendor</th><th>Ref</th><th>Date</th><th>Due</th><th class="text-right">Total</th><th class="text-right">Balance</th><th>Status</th><th>Inv</th><th></th></tr></thead>
-      <tbody>${rows||'<tr><td colspan="11" class="text-center" style="padding:32px;color:var(--ink-lo)">No invoices match</td></tr>'}</tbody>
+      <thead><tr>${bulkMode?'<th></th>':''}<th>ID</th><th>Era</th><th>Vendor</th><th>Ref</th><th>Date</th><th>Due</th><th class="text-right">Total</th><th class="text-right">Balance</th><th>Status</th><th>Inv</th><th></th></tr></thead>
+      <tbody>${rows||`<tr><td colspan="${bulkMode?12:11}" class="text-center" style="padding:32px;color:var(--ink-lo)">No invoices match</td></tr>`}</tbody>
     </table></div></div>`;
+}
+
+function toggleBulkPaySelect(id,checked){
+  if(checked)_bulkPaySelected[id]=true; else delete _bulkPaySelected[id];
+  renderInvoices();
+}
+
+function openBulkCardPayModal(){
+  const ids=Object.keys(_bulkPaySelected).filter(id=>_bulkPaySelected[id]);
+  const invs=ids.map(id=>DB.invoices.find(i=>i.id===id)).filter(i=>i&&i.balance>0&&i.status!=='void');
+  if(!invs.length){showToast('No open invoices selected.','warn');return}
+  const total=round2(invs.reduce((s,i)=>s+i.balance,0));
+  const vendor=DB.vendors.find(v=>v.id===invs[0].vendorId);
+  openModal(`<div class="modal" style="max-width:480px">
+    <div class="modal-header">
+      <div><div class="modal-title">Mark Selected Paid by Card</div><div class="modal-sub">${invs.length} invoice${invs.length!==1?'s':''} · ${vendor?vendor.name:''} · ${fmt(total)} total</div></div>
+      <button class="close-btn" onclick="closeModal()">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="alert" style="background:var(--bg);border:1px solid var(--border);font-size:12px;margin-bottom:12px">Posts one full-balance Company Card (Divvy) payment per invoice: DR 2000 / CR 2110.</div>
+      <div class="form-group"><label><input type="radio" name="bulk-pay-date-mode" value="chosen" checked onchange="syncBulkPayDateMode()"> One date for all</label>
+        <input type="date" id="bulk-pay-date" value="${todayStr()}" style="margin-top:6px"></div>
+      <div class="form-group"><label><input type="radio" name="bulk-pay-date-mode" value="due" onchange="syncBulkPayDateMode()"> Each invoice's own due date</label></div>
+    </div>
+    <div class="modal-footer">
+      <span id="bulk-pay-err" style="color:var(--red);font-size:12px;margin-right:auto"></span>
+      <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="confirmBulkCardPay()">Post ${invs.length} Payment${invs.length!==1?'s':''}</button>
+    </div>
+  </div>`);
+}
+
+function syncBulkPayDateMode(){
+  const useChosen=document.querySelector('input[name="bulk-pay-date-mode"]:checked').value==='chosen';
+  const d=$('bulk-pay-date');if(d)d.disabled=!useChosen;
+}
+
+async function confirmBulkCardPay(){
+  const ids=Object.keys(_bulkPaySelected).filter(id=>_bulkPaySelected[id]);
+  const invs=ids.map(id=>DB.invoices.find(i=>i.id===id)).filter(i=>i&&i.balance>0&&i.status!=='void');
+  const errEl=$('bulk-pay-err');
+  if(!invs.length){errEl.textContent='No open invoices selected.';return}
+  const useChosen=document.querySelector('input[name="bulk-pay-date-mode"]:checked').value==='chosen';
+  const chosenDate=$('bulk-pay-date').value;
+  if(useChosen&&!chosenDate){errEl.textContent='Pick a date.';return}
+  showLoadingOverlay('Posting payments...');
+  let failures=[];
+  for(const inv of invs){
+    const date=useChosen?chosenDate:(inv.dueDate||chosenDate||todayStr());
+    const result=await postInvoicePayment(inv,date,inv.balance,'Company Card (Divvy)','2110','','Bulk card payment');
+    if(!result.ok)failures.push(inv.id);
+  }
+  hideLoadingOverlay();
+  closeModal();
+  _bulkPaySelected={};
+  renderInvoices();
+  updateSidebarStats();
+  showToast(failures.length?('Posted '+(invs.length-failures.length)+' of '+invs.length+' — failed: '+failures.join(', ')):('Posted '+invs.length+' card payment'+(invs.length!==1?'s':'')), failures.length?'warn':undefined);
 }
 
 // ═══════════════════════════════════════════════
@@ -4857,11 +4965,12 @@ function viewInvoice(id){
     const hasIng=!!l.ingredient;
     const ing=hasIng?loadIngredients().find(i=>i.name===l.ingredient):null;
     const rule=hasIng?DB.rules.find(r=>r.ingredient===l.ingredient):null;
-    const fifoQty=hasIng?(l.qty||1)*(rule?rule.multiplier:1):null;
+    const multiplier=rule?resolveLineMultiplier(l):null;
+    const fifoQty=hasIng?(l.qty||1)*(multiplier!=null?multiplier:1):null;
     return`<tr>
       <td>${l.description}</td>
       <td style="font-size:12px;color:var(--ink-mid)">${acctLabel(l.acct)}</td>
-      <td>${hasIng?`<div class="inv-pill">⬡ ${l.ingredient}</div>${rule?`<div style="font-size:10px;color:var(--ink-lo);margin-top:2px">${l.qty||1} × ${rule.multiplier} = ${fifoQty} ${ing?.unit}</div>`:''}`:''}</td>
+      <td>${hasIng?`<div class="inv-pill">⬡ ${l.ingredient}</div>${rule?`<div style="font-size:10px;color:var(--ink-lo);margin-top:2px">${l.qty||1} × ${multiplier} = ${fifoQty} ${ing?.unit}</div>`:''}`:''}</td>
       <td class="text-right mono">${l.qty}</td>
       <td class="text-right mono">${fmt(l.unitCost)}</td>
       <td class="text-right mono fw600">${fmt(l.total)}</td>
@@ -5037,6 +5146,12 @@ async function confirmApplyCredit(creditInvoiceId){
 let lineItems=[];
 let _currentEditInvoiceId='';
 let _deliveryDateTouched=false;
+// The invoice total extraction returned (its printed grand total, when the
+// AI could read one), checked against the sum of the entered lines so a
+// misread/missed line doesn't post a quietly wrong accrual. Null when no
+// file was extracted (manual entry) or the AI didn't return one.
+let _extractedInvoiceTotal=null;
+let _invoiceTotalOverride=false;
 
 function syncDeliveryDate(v){ if(_deliveryDateTouched)return; const d=$('inv-delivery'); if(d) d.value=v; }
 
@@ -5045,6 +5160,8 @@ function openInvoiceModal(editId){
   if(!editId) _lastRebelBreadFile = null; // reset on new invoice
   const editing=editId?DB.invoices.find(i=>i.id===editId):null;
   _deliveryDateTouched=!!(editing && editing.deliveryDate && editing.deliveryDate!==editing.date);
+  _extractedInvoiceTotal=null;
+  _invoiceTotalOverride=false;
   lineItems=editing?editing.lines.map(l=>({...l})):[{description:'',acct:'',ingredient:'',qty:1,unitCost:0,total:0}];
   const era=editing?.era||ERA.DC;
   const vendorOpts=[...DB.vendors.filter(v=>v.active)].sort((a,b)=>a.name.localeCompare(b.name)).map(v=>`<option value="${v.id}" ${editing?.vendorId===v.id?'selected':''}>${v.name}</option>`).join('');
@@ -5095,6 +5212,7 @@ function openInvoiceModal(editId){
       <div id="line-items-body"></div>
       <button class="btn btn-ghost btn-sm" onclick="addLine()" style="margin-top:6px">＋ Add line</button>
       <div class="invoice-totals" id="inv-totals"></div>
+      <div id="inv-total-check"></div>
     </div>
     <div class="modal-footer">
       <span id="inv-err" style="color:var(--red);font-size:12px;margin-right:auto"></span>
@@ -5128,6 +5246,26 @@ function showAutoloadErr(msg){
   const e=$('autoload-err');if(e){e.textContent=msg;e.style.display='block'}
 }
 
+// Vendor-specific extraction behavior lives here instead of scattered
+// conditionals through runInvoiceExtraction/saveInvoice -- promptExtra is
+// appended to every extraction's system prompt (simplest version: the
+// instructions are self-conditional, e.g. "if this is a Morning Fresh
+// invoice..."), while the other fields drive code-level post-processing
+// that shouldn't depend on the AI reliably following prose instructions.
+const VENDOR_PROFILES = {
+  'VND-0004': {
+    detect: /morning\s*fresh\s*dairy/i,
+    promptExtra: 'This is a Morning Fresh Dairy (Sage) invoice. Use the SHIPPED column as quantity, not Ordered. '
+      + 'invoice_number is the "Invoice Number" printed like 0221029-IN; keep it exactly as printed. '
+      + 'Also return driver_receipt (the 145R... number after "Driver Receipt:" or "Driver Invoice:"). '
+      + 'Ignore the Item Code column. Unit is EACH. Skip lines with shipped 0. '
+      + 'Return net_invoice and invoice_total from the footer. '
+      + 'If the document title is "Statement" (lists several invoice numbers with a balance due), return {"document_type":"statement"} and nothing else.',
+    termsDays: 20,
+    deliveryDateEqualsInvoiceDate: true
+  }
+};
+
 async function runInvoiceExtraction(file){
   showAutoloadStatus('Reading file…');
   const ext=file.name.split('.').pop().toLowerCase();
@@ -5149,7 +5287,8 @@ async function runInvoiceExtraction(file){
     ?[{type:'document',source:{type:'base64',media_type:'application/pdf',data:b64}},{type:'text',text:'Extract invoice data as JSON.'}]
     :[{type:'image',source:{type:'base64',media_type:mediaType,data:b64}},{type:'text',text:'Extract invoice data as JSON.'}];
 
-  const sysPrompt='You are an invoice parser for a coffee shop. Extract all line items and return ONLY valid JSON (no markdown, no backticks) with this structure: {"invoice_date":"YYYY-MM-DD","delivery_date":"YYYY-MM-DD or null","vendor":"string","invoice_number":"string","invoice_tax_total":number,"lines":[{"raw_description":"string","matched_ingredient":"string or null","match_confidence":"exact|fuzzy|none","quantity":number,"unit":"string","unit_price":number,"line_total":number,"tax":number,"notes":"string or null"}]}. "quantity" is the actual number of units/cases received, as a plain number — some invoices show it as a single count, others as "cases / units" (e.g. "0 / 1" means 0 cases + 1 unit = 1 total); always sum to one number, never return the raw string. "unit_price" and "line_total" are the PRE-TAX price and quantity×price for that line, even if the invoice\'s printed total column for that line includes tax. "tax" is the tax amount charged on that specific line as printed (0 if none, or if tax is not broken out per line). "invoice_tax_total" is the total tax shown for the whole invoice near its subtotal/total (0 if none shown). "delivery_date" is when the goods actually arrived, which can be weeks after the invoice date — look for notes like "Roasted on 9/16/2026. Delivered on 9/17/2026", "This order was roasted and delivered on 1/21/2026", or "This roast is for 12/31/2025". Use the delivered date if the notes give one; otherwise use the roast date; otherwise null. Known ingredients: '+loadIngredients().map(i=>i.name).join(', ')+'. Match each line to the closest ingredient. exact=close name match, fuzzy=partial, none=no match. Return ONLY the JSON object.';
+  const sysPrompt='You are an invoice parser for a coffee shop. Extract all line items and return ONLY valid JSON (no markdown, no backticks) with this structure: {"invoice_date":"YYYY-MM-DD","delivery_date":"YYYY-MM-DD or null","vendor":"string","invoice_number":"string","invoice_total":"number or null (the invoice\'s printed grand total)","invoice_tax_total":number,"document_type":"invoice (default) or statement -- only for a vendor whose instructions below describe a statement format","driver_receipt":"string or null -- only when a vendor\'s instructions below ask for one","lines":[{"raw_description":"string","matched_ingredient":"string or null","match_confidence":"exact|fuzzy|none","quantity":number,"unit":"string","unit_price":number,"line_total":number,"tax":number,"notes":"string or null"}]}. "quantity" is the actual number of units/cases received, as a plain number — some invoices show it as a single count, others as "cases / units" (e.g. "0 / 1" means 0 cases + 1 unit = 1 total); always sum to one number, never return the raw string. "unit_price" and "line_total" are the PRE-TAX price and quantity×price for that line, even if the invoice\'s printed total column for that line includes tax. "tax" is the tax amount charged on that specific line as printed (0 if none, or if tax is not broken out per line). "invoice_tax_total" is the total tax shown for the whole invoice near its subtotal/total (0 if none shown). "delivery_date" is when the goods actually arrived, which can be weeks after the invoice date — look for notes like "Roasted on 9/16/2026. Delivered on 9/17/2026", "This order was roasted and delivered on 1/21/2026", or "This roast is for 12/31/2025". Use the delivered date if the notes give one; otherwise use the roast date; otherwise null. Known ingredients: '+loadIngredients().map(i=>i.name).join(', ')+'. Match each line to the closest ingredient. exact=close name match, fuzzy=partial, none=no match. Return ONLY the JSON object. '
+    +Object.values(VENDOR_PROFILES).map(p=>p.promptExtra).join(' ');
 
   try{
     const resp=await fetch(ANTHROPIC_ENDPOINT,{
@@ -5173,20 +5312,39 @@ async function runInvoiceExtraction(file){
     try{parsed=JSON.parse(text.replace(/```json|```/g,'').trim())}catch(e){showAutoloadErr('Could not parse response: '+text.slice(0,200));return}
 
     hideAutoloadStatus();
+
+    // Morning Fresh weekly statements look enough like an invoice (vendor
+    // name, dates, a total) that letting them fall through would create a
+    // bogus invoice -- stop before touching any field.
+    if(parsed.document_type==='statement'){
+      const dz=$('autoload-zone');
+      if(dz)dz.innerHTML='<div style="padding:8px 12px;background:var(--amber-lo);border:1px solid #E0B87A;border-radius:var(--r);font-size:12px;color:var(--accent)">This is a Morning Fresh statement, not an invoice — upload the invoice PDF (0######IN.PDF).</div>';
+      return;
+    }
+
     if(parsed.invoice_date){$('inv-date').value=parsed.invoice_date;autoEraFromDate(parsed.invoice_date)}
     if(parsed.invoice_number&&!$('inv-num').value)$('inv-num').value=parsed.invoice_number;
+    let matchedVendorId=null;
     if(parsed.vendor){
       const vendorEl=$('inv-vendor');
       const match=DB.vendors.find(v=>v.name.toLowerCase().includes(parsed.vendor.toLowerCase())||parsed.vendor.toLowerCase().includes(v.name.toLowerCase()));
-      if(match&&vendorEl){vendorEl.value=match.id;onVendorChange(match.id,false)}
+      if(match&&vendorEl){vendorEl.value=match.id;onVendorChange(match.id,false);matchedVendorId=match.id}
     }
+    const vProfile=matchedVendorId?VENDOR_PROFILES[matchedVendorId]:null;
     const delEl=$('inv-delivery');
     if(delEl && !_deliveryDateTouched){
-      if(parsed.delivery_date) delEl.value=parsed.delivery_date;
+      if(vProfile&&vProfile.deliveryDateEqualsInvoiceDate&&parsed.invoice_date) delEl.value=parsed.invoice_date;
+      else if(parsed.delivery_date) delEl.value=parsed.delivery_date;
       else if(parsed.invoice_date) delEl.value=parsed.invoice_date;
     }
+    if(parsed.driver_receipt){
+      const memoEl=$('inv-memo');
+      if(memoEl && !memoEl.value.trim()) memoEl.value='Driver receipt '+parsed.driver_receipt;
+    }
+    _extractedInvoiceTotal=(parsed.invoice_total!=null&&parsed.invoice_total!=='')?Math.round(parsed.invoice_total*100)/100:null;
+    _invoiceTotalOverride=false;
     lineItems=(parsed.lines||[]).map(l=>{
-      const rule=DB.rules.find(r=>l.raw_description&&l.raw_description.toLowerCase().includes(r.match.toLowerCase()));
+      const rule=findRule(l.raw_description);
       let ingredient=rule?rule.ingredient:(l.matched_ingredient&&l.match_confidence!=='none'?l.matched_ingredient:'');
       // Never let a 12 oz retail bag land on a bulk (5 lb unit) ingredient --
       // fall back to the AI's own suggestion only if that one isn't bulk too,
@@ -5198,6 +5356,8 @@ async function runInvoiceExtraction(file){
       const ing=ingredient?loadIngredients().find(i=>i.name===ingredient):null;
       const suggestedAcct=ing?CAT_GL[ing.cat]||'1440':'';
       const line={description:l.raw_description||'',acct:suggestedAcct,ingredient:ingredient||'',unit:l.unit||'',qty:l.quantity||1,unitCost:l.unit_price||0,total:l.line_total||((l.quantity||1)*(l.unit_price||0)),lineTax:Math.round((l.tax||0)*100)/100};
+      const matchedRule=bestRuleForIngredient(ingredient,l.raw_description);
+      if(matchedRule){ line.ruleId=matchedRule.id; line.multiplier=matchedRule.multiplier; }
       if(ingredient && isFiveLbIngredient(ingredient)){
         const norm=normalizeBulkLine(l);
         if(norm){
@@ -5284,18 +5444,51 @@ function updateBulkWarn(i){
 }
 function toggleBulk12ozOverride(i,checked){ lineItems[i].bulk12ozOverride=checked; }
 
+// Morning Fresh only: the most recent OTHER non-void Morning Fresh invoice
+// line for this ingredient, so a newly entered unit price can be sanity-
+// checked against what was actually paid last time. Informational only.
+function lastMorningFreshPrice(ingredient,excludeInvoiceId){
+  const invs=DB.invoices.filter(i=>i.vendorId==='VND-0004'&&i.id!==excludeInvoiceId&&i.status!=='void').sort((a,b)=>b.date.localeCompare(a.date));
+  for(const inv of invs){
+    const line=(inv.lines||[]).find(l=>l.ingredient===ingredient);
+    if(line)return line.unitCost;
+  }
+  return null;
+}
+function priceWarnText(i){
+  const line=lineItems[i];
+  const vendorId=$('inv-vendor')?.value||'';
+  if(vendorId!=='VND-0004'||!line.ingredient||!line.unitCost)return'';
+  const lastPrice=lastMorningFreshPrice(line.ingredient,_currentEditInvoiceId);
+  if(lastPrice==null||lastPrice<=0)return'';
+  const pct=(line.unitCost-lastPrice)/lastPrice*100;
+  if(Math.abs(pct)<=5)return'';
+  return line.ingredient+' '+fmt(lastPrice)+' → '+fmt(line.unitCost)+' ('+(pct>=0?'+':'')+pct.toFixed(1)+'%)';
+}
+function updatePriceWarn(i){
+  const el=$('price-warn-'+i);if(!el)return;
+  const t=priceWarnText(i);
+  el.textContent=t;el.style.display=t?'block':'none';
+}
+
 function renderLineItems(){
   const body=$('line-items-body');if(!body)return;
   body.innerHTML=lineItems.map((line,i)=>{
     const rule=line.ingredient?DB.rules.find(r=>r.ingredient===line.ingredient):null;
     const autoMatch=!line.ingredient&&line.description?findRule(line.description):null;
-    const convQty=rule?(line.qty||1)*rule.multiplier:null;
+    // The displayed multiplier goes through the same precedence as
+    // writeFIFOLayers (resolveLineMultiplier) so what the user sees here
+    // is exactly what gets written to FIFO -- gated on `rule` existing at
+    // all for this ingredient so a truly unmapped ingredient still shows
+    // the dash/auto-match hint below instead of a misleading "×1".
+    const multiplier=rule?resolveLineMultiplier(line):null;
+    const convQty=rule?(line.qty||1)*multiplier:null;
     const convUnit=rule?(loadIngredients().find(x=>x.name===line.ingredient)?.unit||rule.unit):'';
     // Converted qty cell — shows result when rule exists, dash otherwise
     const convQtyCell=rule
       ?`<div style="display:flex;flex-direction:column;gap:2px">
           <div id="conv-qty-${i}" style="padding:8px 10px;background:var(--inv-lo);border:1px solid #A8D0E8;border-radius:var(--r);font-size:12px;font-family:var(--font-mono);color:var(--inv);font-weight:600">${convQty} ${convUnit}</div>
-          <div style="font-size:10px;color:var(--inv);opacity:.7">×${rule.multiplier} rule</div>
+          <div style="font-size:10px;color:var(--inv);opacity:.7" title="${line.qty||1} × ${multiplier} = ${convQty} ${convUnit}">${line.qty||1} × ${multiplier} = ${convQty} ${convUnit}</div>
         </div>`
       :autoMatch
       ?`<div style="padding:8px 10px;background:var(--amber-lo);border:1px solid #E0B87A;border-radius:var(--r);font-size:11px;color:var(--amber);cursor:pointer" onclick="applyAutoMatch(${i},'${autoMatch.ingredient}')">⚡ apply: ${autoMatch.ingredient}</div>`
@@ -5332,7 +5525,10 @@ function renderLineItems(){
         <div id="bulk-warn-${i}" style="font-size:10px;color:var(--amber);margin-top:2px;display:${bulkWarn?'block':'none'}">${bulkWarn}</div>
       </div>
       ${convQtyCell}
-      <input type="number" min="0" step="0.01" value="${line.unitCost||''}" placeholder="0.00" oninput="lineItems[${i}].unitCost=+this.value;updateLineTotal(${i})">
+      <div style="display:flex;flex-direction:column;gap:2px">
+        <input type="number" min="0" step="0.01" value="${line.unitCost||''}" placeholder="0.00" oninput="lineItems[${i}].unitCost=+this.value;updateLineTotal(${i});updatePriceWarn(${i})">
+        <div id="price-warn-${i}" style="font-size:10px;color:var(--amber);margin-top:2px;display:${priceWarnText(i)?'block':'none'}">${priceWarnText(i)}</div>
+      </div>
       <div class="line-total" id="lt-${i}">${fmt((line.qty||1)*(line.unitCost||0))}</div>
       <button class="rm-btn" onclick="removeLine(${i})">×</button>
     </div>`;
@@ -5351,7 +5547,8 @@ function updateConvQty(i){
   const el=$(`conv-qty-${i}`);
   if(!el)return;
   const ing=loadIngredients().find(x=>x.name===lineItems[i].ingredient);
-  const convQty=(lineItems[i].qty||1)*rule.multiplier;
+  const multiplier=resolveLineMultiplier(lineItems[i]);
+  const convQty=(lineItems[i].qty||1)*multiplier;
   el.textContent=convQty+' '+(ing?.unit||rule.unit);
 }
 
@@ -5375,6 +5572,13 @@ function onIngredientChange(i){
     const suggestedAcct=CAT_GL[ing.cat]||'1440';
     lineItems[i].acct=suggestedAcct;
   }
+  // Re-derive the multiplier for this specific line's description against
+  // the newly picked ingredient (same precedence writeFIFOLayers uses) --
+  // a manual pick can switch ingredient away from whatever extraction
+  // guessed, so a stale multiplier from the old ingredient must not stick.
+  const matchedRule=bestRuleForIngredient(lineItems[i].ingredient,lineItems[i].description);
+  if(matchedRule){ lineItems[i].ruleId=matchedRule.id; lineItems[i].multiplier=matchedRule.multiplier; }
+  else { delete lineItems[i].ruleId; delete lineItems[i].multiplier; }
   renderLineItems();
 }
 
@@ -5384,7 +5588,25 @@ function refreshRuleHint(i){
 }
 
 function updateLineTotal(i){lineItems[i].total=(lineItems[i].qty||1)*(lineItems[i].unitCost||0);const el=$(`lt-${i}`);if(el)el.textContent=fmt(lineItems[i].total);updateTotals()}
-function updateTotals(){const sub=lineItems.reduce((s,l)=>s+((l.qty||1)*(l.unitCost||0)),0);const t=$('inv-totals');if(t)t.innerHTML=`<div class="totals-row"><span class="totals-label">Subtotal</span><span class="totals-val">${fmt(sub)}</span></div><div class="totals-row totals-grand"><span class="totals-label">Total</span><span class="totals-val">${fmt(sub)}</span></div>`}
+function updateTotals(){
+  const sub=lineItems.reduce((s,l)=>s+((l.qty||1)*(l.unitCost||0)),0);
+  const t=$('inv-totals');if(t)t.innerHTML=`<div class="totals-row"><span class="totals-label">Subtotal</span><span class="totals-val">${fmt(sub)}</span></div><div class="totals-row totals-grand"><span class="totals-label">Total</span><span class="totals-val">${fmt(sub)}</span></div>`;
+  const tc=$('inv-total-check');if(tc)tc.innerHTML=invoiceTotalCheckHtml(sub);
+}
+// Red warning when the extracted invoice_total doesn't match the entered
+// lines -- a mismatch means a line was misread or dropped, not just
+// rounding. The checkbox lets the user say "I reviewed it, save anyway"
+// rather than being stuck if the mismatch is legitimate (e.g. a line the
+// AI couldn't read that the user priced in by hand differently).
+function invoiceTotalCheckHtml(sub){
+  if(_extractedInvoiceTotal==null)return'';
+  const diff=round2(sub-_extractedInvoiceTotal);
+  if(Math.abs(diff)<0.01)return'';
+  return `<div style="margin-top:8px;padding:8px 12px;background:var(--red-lo);border:1px solid var(--red);border-radius:var(--r);font-size:12px;color:var(--red)">
+    Line total ${fmt(sub)} does not match the extracted invoice total ${fmt(_extractedInvoiceTotal)} (off by ${fmt(Math.abs(diff))}).
+    <label style="font-weight:600;cursor:pointer;margin-left:6px"><input type="checkbox" ${_invoiceTotalOverride?'checked':''} onchange="_invoiceTotalOverride=this.checked;renderLineItems()" style="margin-right:4px;vertical-align:middle">Override and save anyway</label>
+  </div>`;
+}
 function addLine(){const v=$('inv-vendor')?.value;const vnd=DB.vendors.find(x=>x.id===v);lineItems.push({description:'',acct:vnd?.defaultAccts?.[0]||'',ingredient:'',qty:1,unitCost:0,total:0});renderLineItems()}
 function removeLine(i){if(lineItems.length===1)return;lineItems.splice(i,1);renderLineItems()}
 
@@ -5434,11 +5656,43 @@ async function saveInvoice(editId){
   const subtotal=round2(lines.reduce((s,l)=>s+l.total,0));
   const vName=vendorName(vendorId);
 
+  // Line total vs. the invoice's own printed total (when extraction found
+  // one) -- a mismatch means a line was misread or dropped, not rounding.
+  // Blocks save unless the user checked the Override box after reviewing it.
+  if(_extractedInvoiceTotal!=null && !_invoiceTotalOverride){
+    const diff=round2(subtotal-_extractedInvoiceTotal);
+    if(Math.abs(diff)>=0.01){
+      errEl.textContent='Line total '+fmt(subtotal)+' does not match the extracted invoice total '+fmt(_extractedInvoiceTotal)+' — fix the lines or check Override above.';
+      showToast('Line total does not match the invoice total — nothing was saved.');
+      return;
+    }
+  }
+
+  // Same invoice number already entered for this vendor is a hard block --
+  // not a "possible" duplicate, since a normalized exact match on vendor +
+  // invoice number is about as certain as this gets.
   const dup=findDuplicateInvoice(vendorId,invoiceNum,editId,{date,total:subtotal});
   if(dup){
-    const reasonTxt=dup.reason==='number'?'the same invoice number':'matching vendor, date, and total (no invoice number entered)';
-    const proceed=confirm('Possible duplicate: invoice '+dup.invoice.id+' for '+vName+' ('+(dup.invoice.invoiceNum||'no ref #')+', '+fmtDate(dup.invoice.date)+', '+fmt(dup.invoice.total)+') already exists, based on '+reasonTxt+'.\n\nSave this invoice anyway?');
+    if(dup.reason==='number'){
+      errEl.textContent='Invoice '+(invoiceNum||dup.invoice.invoiceNum)+' is already entered as '+dup.invoice.id+'.';
+      showToast('Duplicate invoice number — nothing was saved.');
+      return;
+    }
+    const proceed=confirm('Possible duplicate: invoice '+dup.invoice.id+' for '+vName+' ('+(dup.invoice.invoiceNum||'no ref #')+', '+fmtDate(dup.invoice.date)+', '+fmt(dup.invoice.total)+') already exists, based on matching vendor, date, and total (no invoice number entered).\n\nSave this invoice anyway?');
     if(!proceed)return;
+  }
+
+  // Morning Fresh only: the driver leaves a paper receipt and the office
+  // also emails a PDF for the same delivery -- if someone enters both, the
+  // memo's driver-receipt number (145R...) will already be on file.
+  if(vendorId==='VND-0004'){
+    const memoDR=(memo.match(/145R\d+/)||[])[0];
+    if(memoDR){
+      const otherWithDR=DB.invoices.find(inv=>inv.id!==editId&&inv.vendorId===vendorId&&inv.status!=='void'&&inv.memo&&inv.memo.includes(memoDR));
+      if(otherWithDR){
+        if(!confirm('Driver receipt '+memoDR+' also appears on invoice '+otherWithDR.id+' ('+fmtDate(otherWithDR.date)+'). This may be the same delivery entered twice (driver receipt photo + office PDF).\n\nSave anyway?'))return;
+      }
+    }
   }
 
   let glOk=true, fifoOk=true;
@@ -5501,8 +5755,7 @@ async function writeFIFOLayers(inv){
   for(const line of inv.lines){
     if(!line.ingredient)continue;
     const ing=loadIngredients().find(i=>i.name===line.ingredient);if(!ing)continue;
-    const rule=DB.rules.find(r=>r.ingredient===line.ingredient);
-    const multiplier=rule?rule.multiplier:1;
+    const multiplier=resolveLineMultiplier(line);
     const invoiceQty=line.qty||1;
     const convertedQty=invoiceQty*multiplier;
     const layer={
@@ -5571,9 +5824,9 @@ function openPaymentModal(invoiceId){
       </div>
       <div class="form-group"><label>Date *</label><input type="date" id="pmt-date" value="${todayStr()}"></div>
       <div class="form-group"><label>Amount *</label><input type="number" id="pmt-amount" min="0.01" step="0.01" placeholder="0.00" value="${pre?pre.balance.toFixed(2):''}"></div>
-      <div class="form-group"><label>Method</label><select id="pmt-method"><option>ACH</option><option>Check</option><option>Credit Card</option><option>Cash</option><option>Payroll Deduction</option><option>Other</option></select></div>
-      <div class="form-group"><label>Reference / Check #</label><input id="pmt-ref" placeholder="ACH trace, check #…"></div>
-      <div class="form-group"><label>Cash Account</label><select id="pmt-cash">${acctOptionsHtml('1010',a=>a.acct.startsWith('1')&&a.acct!=='1300'&&a.acct!=='1015'&&a.acct!=='1016'&&a.acct!=='1017')}</select></div>
+      <div class="form-group"><label>Method</label><select id="pmt-method" onchange="onPmtMethodChange()"><option>ACH</option><option>Check</option><option>Credit Card</option><option>Company Card (Divvy)</option><option>Cash</option><option>Payroll Deduction</option><option>Other</option></select></div>
+      <div class="form-group"><label>Reference / Check #</label><input id="pmt-ref" placeholder="ACH trace, check #, Divvy transaction id…"></div>
+      <div class="form-group"><label>Cash Account</label><select id="pmt-cash">${acctOptionsHtml('1010',a=>(a.acct.startsWith('1')||a.acct==='2110')&&a.acct!=='1300'&&a.acct!=='1015'&&a.acct!=='1016'&&a.acct!=='1017')}</select></div>
       <div class="form-group span-2"><label>Memo</label><input id="pmt-memo" placeholder="Payment notes…"></div>
     </div>
     <div id="pmt-preview" style="margin-top:8px"></div></div>
@@ -5591,6 +5844,15 @@ function selectPmtEra(val,cls,el,sfx){
   el.classList.add(cls);const h=$('era-val-pmt');if(h)h.value=val;
 }
 
+// Morning Fresh (and any future card-paid vendor) is paid on the Divvy /
+// BILL Spend & Expense card, not by bank ACH/check -- defaulting the Cash
+// Account to 2110 when that method is picked saves re-selecting it every
+// time, same as the invoice-level default_payment_method preselect below.
+function onPmtMethodChange(){
+  const m=$('pmt-method'),c=$('pmt-cash');
+  if(m&&c&&m.value==='Company Card (Divvy)')c.value='2110';
+}
+
 function onPmtInvChange(id){
   const inv=DB.invoices.find(i=>i.id===id);if(!inv)return;
   const amtEl=$('pmt-amount');if(amtEl&&!amtEl.value)amtEl.value=inv.balance.toFixed(2);
@@ -5598,6 +5860,35 @@ function onPmtInvChange(id){
   document.querySelectorAll('#era-sel-pmt .era-opt').forEach(o=>{o.className='era-opt';if(o.dataset.era===era)o.classList.add(o.dataset.cls||'sel-dc')});
   const clr=era==='troy'?'var(--troy)':'var(--ink-mid)';
   $('pmt-preview').innerHTML=`<div class="alert" style="background:var(--bg);border:1px solid var(--border);font-size:12px"><strong>${vendorName(inv.vendorId)}</strong> · ${inv.invoiceNum||inv.id} · ${eraPill(era)}<br>Total: <strong>${fmt(inv.total)}</strong> · Balance: <strong style="color:${clr}">${fmt(inv.balance)}</strong></div>`;
+  const vendor=DB.vendors.find(v=>v.id===inv.vendorId);
+  const methodEl=$('pmt-method');
+  if(vendor&&vendor.default_payment_method&&methodEl){
+    methodEl.value=vendor.default_payment_method;
+    onPmtMethodChange();
+  }
+}
+
+// Posts one full-or-partial payment against `inv`: a payment record, the
+// invoice balance update, and the DR 2000 / CR cashAcct GL entry. Shared by
+// the Record Payment modal (one invoice, full UI) and bulk card payment
+// (one call per selected invoice, no modal) so the posting logic -- and
+// any future fix to it -- only exists once.
+async function postInvoicePayment(inv,date,amount,method,cashAcct,ref,memo,era){
+  let pmtId;
+  try{ pmtId = await nextPaymentId(); }
+  catch(e){ return {ok:false,error:'Could not generate a payment ID. Check connection and try again.'}; }
+  era=era||inv.era||ERA.DC;
+  const pmt={id:pmtId,era,invoiceId:inv.id,vendorId:inv.vendorId,date,amount,method,ref:ref||'',memo:memo||'',glPosted:true};
+  inv.amountPaid=(inv.amountPaid||0)+amount;inv.balance=Math.max(0,inv.total-inv.amountPaid);
+  if(inv.balance<0.005){inv.balance=0;inv.status='paid'}else inv.status='partial';
+  const cashName=acctName(cashAcct)||cashAcct;
+  const je={id:await nextGLId(),date,ref:pmtId,era,
+    memo:'Payment'+(era==='troy'?' (Troy-era)':'')+' — '+vendorName(inv.vendorId)+' '+(ref||pmtId),
+    entries:[{acct:'2000',name:'Accounts Payable',dr:amount,cr:0},{acct:cashAcct,name:cashName,dr:0,cr:amount}]};
+  const pmtOk=await insertPaymentToSB(pmt); // true insert -- payments have no edit path, every payment is brand new
+  const invOk=await saveInvoiceToSB(inv);
+  const glOk=await saveGLToSB(je);
+  return {ok:pmtOk&&invOk&&glOk,pmtOk,invOk,glOk,pmtId};
 }
 
 async function savePayment(){
@@ -5611,19 +5902,9 @@ async function savePayment(){
   if(!amount||amount<=0){errEl.textContent='Enter a valid amount.';return}
   const inv=DB.invoices.find(i=>i.id===invoiceId);
   if(amount>inv.balance+0.005){errEl.textContent=`Exceeds balance of ${fmt(inv.balance)}.`;return}
-  let pmtId;
-  try{ pmtId = await nextPaymentId(); }
-  catch(e){ errEl.textContent='Could not generate a payment ID. Check connection and try again.'; return; }
-  const pmt={id:pmtId,era,invoiceId,vendorId:inv.vendorId,date,amount,method,ref,memo,glPosted:true};
-  inv.amountPaid=(inv.amountPaid||0)+amount;inv.balance=Math.max(0,inv.total-inv.amountPaid);
-  if(inv.balance<0.005){inv.balance=0;inv.status='paid'}else inv.status='partial';
-  const cashName=acctName(cashAcct)||cashAcct;
-  const je={id:await nextGLId(),date,ref:pmtId,era,
-    memo:'Payment'+(era==='troy'?' (Troy-era)':'')+' — '+vendorName(inv.vendorId)+' '+(ref||pmtId),
-    entries:[{acct:'2000',name:'Accounts Payable',dr:amount,cr:0},{acct:cashAcct,name:cashName,dr:0,cr:amount}]};
-  const pmtOk=await insertPaymentToSB(pmt); // true insert -- payments have no edit path, every payment is brand new
-  const invOk=await saveInvoiceToSB(inv);
-  const glOk=await saveGLToSB(je);
+  const result=await postInvoicePayment(inv,date,amount,method,cashAcct,ref,memo,era);
+  if(!result.ok && result.error){ errEl.textContent=result.error; return; }
+  const pmtOk=result.pmtOk,invOk=result.invOk,glOk=result.glOk;
   closeModal();
   const views={payments:renderPayments,dashboard:renderDashboard,invoices:renderInvoices,troy:renderTroy};if(views[currentView])views[currentView]();
   updateSidebarStats();
@@ -6842,6 +7123,21 @@ function processOldFormatLedgerWorkbook(ws){
 // "Add Transaction" form), and a Status column -- only "Posted" rows are
 // imported; "Pending" rows are skipped and reported, since a pending
 // transaction can still change or reverse before it actually clears.
+// Minimal auto-categorization for recognized recurring bank description
+// text during Account History import -- the raw export otherwise leaves
+// description/account blank for every row (manual categorization). Keyed
+// on a lowercase substring of the bank's own Description column.
+var BL_AUTO_CODE_RULES = [
+  { match:'ewallet - divvyp divvy cred', description:'Divvy Card Payment', account:'Credit Card Payment' }
+];
+function autoCodeBankRow(bankDescription){
+  var v=(bankDescription||'').toLowerCase();
+  for(var i=0;i<BL_AUTO_CODE_RULES.length;i++){
+    if(v.indexOf(BL_AUTO_CODE_RULES[i].match)!==-1) return BL_AUTO_CODE_RULES[i];
+  }
+  return null;
+}
+
 function processAccountHistoryWorkbook(ws){
   var rows = XLSX.utils.sheet_to_json(ws, {raw:true, defval:'', range:0});
   var unmappedAccounts = {};
@@ -6864,16 +7160,18 @@ function processAccountHistoryWorkbook(ws){
     var hasDebit = typeof r['Debit'] === 'number';
     var hasCredit = typeof r['Credit'] === 'number';
     if(hasDebit === hasCredit) return null; // need exactly one of the two
+    var bankDesc = String(r['Description']||'').trim();
+    var auto = autoCodeBankRow(bankDesc);
     return {
       pmnt_date: dateISO,
       bank: bank,
-      customer_vendor: String(r['Description']||'').trim(),
-      description: '',
+      customer_vendor: bankDesc,
+      description: auto ? auto.description : '',
       trans_type: hasDebit ? 'Debit' : 'Credit',
       gross_amount: hasDebit ? -Math.abs(r['Debit']) : Math.abs(r['Credit']),
       ck_num: String(r['Check']||'').trim(),
       era: 'dc',
-      stmt_type: '', stmt_sec: '', stmt_category: '', account: '', note: ''
+      stmt_type: '', stmt_sec: '', stmt_category: '', account: auto ? auto.account : '', note: ''
     };
   }).filter(Boolean);
 
@@ -7887,7 +8185,7 @@ var BL_DIRECT_ACCT_MAP = {
   'POS Fees':'6110',
   'Sales Fees':'6110',
   'Sales Tax':'2050',          // liability paydown, not an expense
-  'Credit Card Payment':null,  // needs its own liability account -- not modeled yet
+  'Credit Card Payment':'2110', // Divvy Card Payable -- "Code to GL" posts DR 2110 / CR bank
   'Other Fees':null,           // too ambiguous to guess
   'Loan from DDC':'2100',
   'Online Revenue':'4010',     // reuses In-Store Revenue for now -- flag if volume grows
