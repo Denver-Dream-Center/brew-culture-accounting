@@ -1532,7 +1532,8 @@ var REV = {
   bankLedger: [],
   bankMatches: [],  // bank_ledger_match rows: links bank_ledger.id -> payment.id OR settlement.id
   bankSplits: [],   // bank_ledger_split rows: Troy part + DC part for an era='split' bank_ledger row
-  cardLedger: []    // card_ledger rows: individual Divvy card transactions, coded directly to GL (DR expense / CR 2110 for a Charge)
+  cardLedger: [],   // card_ledger rows: individual Divvy card transactions, coded directly to GL (DR expense / CR 2110 for a Charge)
+  cardMatches: []   // card_ledger_match rows: links card_ledger.id -> payment.id (ap_payment) or an existing payment only (linked_payment)
 };
 
 // Modifier token -> ingredient mapping for COGS (costing only, not inventory deduction yet)
@@ -2214,6 +2215,10 @@ async function loadRevData(){
   var cl = await fetchAllRows('card_ledger', '*', 'trans_date', true);
   if(!cl.error && cl.data){
     REV.cardLedger = cl.data;
+  }
+  var cm = await fetchAllRows('card_ledger_match', '*', 'id', true);
+  if(!cm.error && cm.data){
+    REV.cardMatches = cm.data;
   }
 }
 function blRowSplits(rowId){
@@ -6505,14 +6510,15 @@ function openPaymentModal(invoiceId){
         ${eraSelector(initEra,'-pmt','selectPmtEra',false)}
         <input type="hidden" id="era-val-pmt" value="${initEra}">
       </div>
-      <div class="form-group"><label>Date *</label><input type="date" id="pmt-date" value="${todayStr()}"></div>
-      <div class="form-group"><label>Amount *</label><input type="number" id="pmt-amount" min="0.01" step="0.01" placeholder="0.00" value="${pre?pre.balance.toFixed(2):''}"></div>
+      <div class="form-group"><label>Date *</label><input type="date" id="pmt-date" value="${todayStr()}" onchange="checkCardMatchNotice()"></div>
+      <div class="form-group"><label>Amount *</label><input type="number" id="pmt-amount" min="0.01" step="0.01" placeholder="0.00" value="${pre?pre.balance.toFixed(2):''}" oninput="checkCardMatchNotice()"></div>
       <div class="form-group"><label>Method</label><select id="pmt-method" onchange="onPmtMethodChange()"><option>ACH</option><option>Check</option><option>Credit Card</option><option>Company Card (Divvy)</option><option>Cash</option><option>Payroll Deduction</option><option>Other</option></select></div>
       <div class="form-group"><label>Reference / Check #</label><input id="pmt-ref" placeholder="ACH trace, check #, Divvy transaction id…"></div>
       <div class="form-group"><label>Cash Account</label><select id="pmt-cash">${acctOptionsHtml('1010',a=>(a.acct.startsWith('1')||a.acct==='2110')&&a.acct!=='1300'&&a.acct!=='1015'&&a.acct!=='1016'&&a.acct!=='1017')}</select></div>
       <div class="form-group span-2"><label>Memo</label><input id="pmt-memo" placeholder="Payment notes…"></div>
     </div>
-    <div id="pmt-preview" style="margin-top:8px"></div></div>
+    <div id="pmt-preview" style="margin-top:8px"></div>
+    <div id="pmt-card-notice" style="margin-top:8px"></div></div>
     <div class="modal-footer">
       <span id="pmt-err" style="color:var(--red);font-size:12px;margin-right:auto"></span>
       <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
@@ -6534,6 +6540,7 @@ function selectPmtEra(val,cls,el,sfx){
 function onPmtMethodChange(){
   const m=$('pmt-method'),c=$('pmt-cash');
   if(m&&c&&m.value==='Company Card (Divvy)')c.value='2110';
+  checkCardMatchNotice();
 }
 
 function onPmtInvChange(id){
@@ -6549,6 +6556,29 @@ function onPmtInvChange(id){
     methodEl.value=vendor.default_payment_method;
     onPmtMethodChange();
   }
+  checkCardMatchNotice();
+}
+
+// Informational-only guard against double-paying a Morning Fresh (or other
+// card-paid vendor) invoice by hand in this modal when the same charge is
+// sitting open and unmatched in the Card Ledger — the right place to pay it
+// is the Card Ledger's Match modal, which also creates the card_ledger_match
+// link this modal has no way to create.
+function checkCardMatchNotice(){
+  const notice=$('pmt-card-notice'); if(!notice) return;
+  const invoiceId=$('pmt-invoice')?.value;
+  const method=$('pmt-method')?.value;
+  const amount=parseFloat($('pmt-amount')?.value);
+  notice.innerHTML='';
+  if(!invoiceId||method!=='Company Card (Divvy)'||!amount) return;
+  const inv=DB.invoices.find(i=>i.id===invoiceId); if(!inv) return;
+  const openCharge=REV.cardLedger.find(r=>{
+    if(clRowStatus(r.id)!=='open') return false;
+    if((r.trans_type||'Charge')==='Credit'||(parseFloat(r.gross_amount)||0)<0) return false;
+    return Math.abs(Math.abs(parseFloat(r.gross_amount)||0)-amount)<0.005;
+  });
+  if(!openCharge) return;
+  notice.innerHTML=`<div class="alert" style="background:var(--yellow-lo);border:1px solid var(--amber);font-size:12px;color:#9B6A10">A card charge of ${fmt(amount)} on ${fmtDate(openCharge.trans_date)} is open in the Card Ledger. Match it there instead.</div>`;
 }
 
 // Posts one full-or-partial payment against `inv`: a payment record, the
@@ -10367,8 +10397,39 @@ async function unmatchBankRow(rowId){
 // Ledger's Split panel and GL Coding section.
 // ═══════════════════════════════════════════════
 
+// Status for a card ledger row: 'credit' | 'coded' | 'matched' | 'partial' | 'open'.
+// 'credit' takes priority over everything else -- a refund/credit never has
+// a match action, it's coded manually (out of scope here, per spec).
+// 'coded' is the pre-existing direct-GL-coding path (DIRECT-CL-<id>) and is
+// unaffected by matching. 'matched'/'partial' come from summing this row's
+// card_ledger_match amounts against the charge -- 'partial' is a diagnostic
+// state that shouldn't occur through the match modal (which requires the
+// applied total to equal the charge before Confirm is enabled).
 function clRowStatus(rowId){
-  return DB.gl.some(function(g){ return g.ref === 'DIRECT-CL-'+rowId; }) ? 'coded' : 'open';
+  var row = REV.cardLedger.find(function(r){ return r.id === rowId; });
+  if(row && (row.trans_type === 'Credit' || (parseFloat(row.gross_amount)||0) < 0)) return 'credit';
+  if(DB.gl.some(function(g){ return g.ref === 'DIRECT-CL-'+rowId; })) return 'coded';
+  var matches = clRowMatches(rowId);
+  if(matches.length === 0) return 'open';
+  var matchedSum = Math.round(matches.reduce(function(s,m){ return s+(parseFloat(m.amount)||0); },0)*100)/100;
+  var gross = Math.abs(parseFloat(row && row.gross_amount) || 0);
+  return (Math.abs(matchedSum - gross) < 0.005) ? 'matched' : 'partial';
+}
+
+function clRowMatches(rowId){
+  return REV.cardMatches.filter(function(m){ return m.card_ledger_id === rowId; });
+}
+
+async function saveCardMatch(row){
+  var res = await _sb.from('card_ledger_match').insert([row]);
+  if(res.error){ console.error('saveCardMatch', res.error); return false; }
+  return true;
+}
+
+async function deleteCardMatchesForRow(rowId){
+  var res = await _sb.from('card_ledger_match').delete().eq('card_ledger_id', rowId);
+  if(res.error){ console.error('deleteCardMatchesForRow', res.error); return false; }
+  return true;
 }
 
 async function saveCardLedgerRow(row){
@@ -10395,8 +10456,9 @@ function renderCardLedger(){
   var owed = rows.length ? rows[rows.length-1]._bal : 0;
 
   var openCount = rows.filter(function(r){ return clRowStatus(r.id)==='open'; }).length;
-  var codedCount = rows.length - openCount;
-  var pct = rows.length ? Math.round(codedCount/rows.length*100) : 0;
+  var creditCount = rows.filter(function(r){ return clRowStatus(r.id)==='credit'; }).length;
+  var resolvedCount = rows.length - openCount - creditCount;
+  var pct = rows.length ? Math.round(resolvedCount/rows.length*100) : 0;
 
   var filterStatus = window._clFilterStatus || '';
   var filterType = window._clFilterType || '';
@@ -10411,12 +10473,23 @@ function renderCardLedger(){
     var amtColor = isCharge ? 'var(--red)' : 'var(--green)';
     var amtSign = isCharge ? '+' : '-';
     var status = clRowStatus(r.id);
-    var statusPill = status === 'coded'
-      ? '<span class="match-pill match-pill-direct">Coded</span>'
-      : '<span class="match-pill match-pill-open">Open</span>';
+    var statusPill = status === 'matched'
+      ? '<span class="match-pill match-pill-matched">Matched</span>'
+      : status === 'coded'
+        ? '<span class="match-pill match-pill-direct">Coded</span>'
+        : status === 'partial'
+          ? '<span class="match-pill match-pill-partial" title="Matched amount doesn’t add up to the charge">Partial</span>'
+          : status === 'credit'
+            ? '<span class="match-pill match-pill-open">Credit</span>'
+            : '<span class="match-pill match-pill-open">Open</span>';
     var actionBtn = status === 'open'
-      ? '<button class="btn btn-ghost btn-sm" style="color:var(--amber)" onclick="openCardLedgerModal(\'' + r.id + '\')">Code to GL</button>'
-      : '<button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="uncodeCardRow(\'' + r.id + '\')">Unmatch</button>';
+      ? '<button class="btn btn-ghost btn-sm" style="color:var(--amber)" onclick="openCardMatchModal(\'' + r.id + '\')">Match</button>' +
+        '<button class="btn btn-ghost btn-sm" onclick="openCardLedgerModal(\'' + r.id + '\')">Code to GL</button>'
+      : status === 'coded'
+        ? '<button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="uncodeCardRow(\'' + r.id + '\')">Unmatch</button>'
+        : (status === 'matched' || status === 'partial')
+          ? '<button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="unmatchCardRow(\'' + r.id + '\')">Unmatch</button>'
+          : '<span style="font-size:11px;color:var(--ink-lo)">Credit — code manually</span>';
     return '<tr>' +
       '<td class="mono">' + fmtDate(r.trans_date) + '</td>' +
       '<td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (r.merchant||'') + '</td>' +
@@ -10441,7 +10514,7 @@ function renderCardLedger(){
       '<div class="ledger-bal-card">' +
         '<div class="ledger-bal-bank">Coding Progress</div>' +
         '<div class="ledger-bal-amt" style="color:' + (pct===100?'var(--green)':'var(--amber)') + '">' + pct + '%</div>' +
-        '<div class="ledger-bal-sub">' + openCount + ' open \xb7 ' + codedCount + ' coded</div>' +
+        '<div class="ledger-bal-sub">' + openCount + ' open \xb7 ' + resolvedCount + ' resolved' + (creditCount ? ' \xb7 ' + creditCount + ' credit' : '') + '</div>' +
       '</div>' +
     '</div>' +
     '<div class="card">' +
@@ -10456,7 +10529,10 @@ function renderCardLedger(){
           '<select style="font-size:12px;padding:4px 8px;border:1px solid var(--border);border-radius:var(--r)" onchange="window._clFilterStatus=this.value;renderCardLedger()">' +
             '<option value="">All Status</option>' +
             '<option value="open"' + (filterStatus==='open'?' selected':'') + '>Open</option>' +
+            '<option value="matched"' + (filterStatus==='matched'?' selected':'') + '>Matched</option>' +
+            '<option value="partial"' + (filterStatus==='partial'?' selected':'') + '>Partial</option>' +
             '<option value="coded"' + (filterStatus==='coded'?' selected':'') + '>Coded</option>' +
+            '<option value="credit"' + (filterStatus==='credit'?' selected':'') + '>Credit</option>' +
           '</select>' +
         '</div>' +
       '</div>' +
@@ -10680,7 +10756,8 @@ async function uncodeCardRow(rowId){
 async function confirmDeleteCardRow(id){
   var row = REV.cardLedger.find(function(r){ return r.id === id; });
   if(!row) return;
-  if(clRowStatus(id) !== 'open'){ showToast('Unmatch this transaction before deleting it.','warn'); return; }
+  var delStatus = clRowStatus(id);
+  if(delStatus !== 'open' && delStatus !== 'credit'){ showToast('Unmatch this transaction before deleting it.','warn'); return; }
   if(!confirm('Delete this transaction?\n\n' + fmtDate(row.trans_date) + ' — ' + (row.merchant||'') + ' — ' + fmt(Math.abs(parseFloat(row.gross_amount)||0)))) return;
   showLoadingOverlay('Deleting...');
   var ok = await deleteCardLedgerRow(id);
@@ -10689,6 +10766,635 @@ async function confirmDeleteCardRow(id){
   REV.cardLedger = REV.cardLedger.filter(function(r){ return r.id !== id; });
   showToast('Transaction deleted');
   renderCardLedger();
+}
+
+// ── CARD LEDGER AP MATCHING ─────────────────────────────────────────────
+// Lets an Open card charge (e.g. a Morning Fresh Dairy delivery paid on the
+// Divvy card) be matched to open AP invoice(s): DR 2000 Accounts Payable /
+// CR 2110 Divvy Card Payable, dated on the card charge date. Mirrors the
+// bank ledger's AP match modal (_apMatchState/openAPMatchModal/confirmAPMatch)
+// but adds a vendor-alias preselect, a "Suggestions" ranking, and a second
+// tab for linking a payment that was already entered by hand in the Pay
+// modal with method Company Card (Divvy).
+var _cardMatchState = { rowId:null, vendorId:null, tab:'pay', selectedInvoices:{}, checkOrder:{}, applyAmounts:{}, varianceBooked:false, varianceAcct:'5070', selectedPayments:{} };
+
+// Case-insensitive substring match of vendors.card_merchant_match against
+// the card row's merchant or description -- e.g. 'MORNING FRESH DAIRY'
+// matches merchant 'Morning Fresh Dairy Farm'.
+function findCardMatchVendor(row){
+  var merchant = (row.merchant||'').toLowerCase();
+  var desc = (row.description||'').toLowerCase();
+  return DB.vendors.find(function(v){
+    var needle = (v.card_merchant_match||'').trim().toLowerCase();
+    if(!needle) return false;
+    return merchant.indexOf(needle) >= 0 || desc.indexOf(needle) >= 0;
+  });
+}
+
+function openCardMatchModal(rowId){
+  var row = REV.cardLedger.find(function(r){ return r.id === rowId; });
+  if(!row) return;
+  var preVendor = findCardMatchVendor(row);
+  _cardMatchState = { rowId: rowId, vendorId: preVendor ? preVendor.id : null, tab:'pay', selectedInvoices:{}, checkOrder:[], applyAmounts:{}, varianceBooked:false, varianceAcct:'5070', selectedPayments:{} };
+
+  var amtAbs = Math.abs(parseFloat(row.gross_amount)||0);
+  openModal(
+    '<div class="modal" style="max-width:640px">' +
+      '<div class="modal-header">' +
+        '<div><div class="modal-title">Match Card Charge to AP Invoice</div>' +
+        '<div class="modal-sub">' + fmtDate(row.trans_date) + ' — ' + (row.merchant||'') + (row.card_holder?' — '+row.card_holder:'') + ' — ' + fmt(amtAbs) + '</div></div>' +
+        '<button class="close-btn" onclick="closeModal()">&#215;</button>' +
+      '</div>' +
+      '<div class="modal-body">' +
+        '<div class="form-group">' +
+          '<label>Step 1 — Select Vendor</label>' +
+          '<select id="cl-match-vendor" onchange="onCardMatchVendorChange()">' +
+            '<option value="">-- Select vendor --</option>' +
+            DB.vendors.slice().sort(function(a,b){return (a.name||'').localeCompare(b.name||'');}).map(function(v){
+              return '<option value="' + v.id + '"' + (v.id===_cardMatchState.vendorId?' selected':'') + '>' + v.name + '</option>';
+            }).join('') +
+          '</select>' +
+        '</div>' +
+        '<div class="tabs" style="margin-top:10px">' +
+          '<button type="button" class="tab active" id="cl-match-tab-pay" onclick="switchCardMatchTab(\'pay\')">Pay invoices</button>' +
+          '<button type="button" class="tab" id="cl-match-tab-link" onclick="switchCardMatchTab(\'link\')">Link existing payment</button>' +
+        '</div>' +
+        '<div id="cl-match-body"></div>' +
+        '<div id="cl-match-err" style="color:var(--red);font-size:12px;margin-top:8px"></div>' +
+      '</div>' +
+      '<div class="modal-footer">' +
+        '<button class="btn btn-ghost" onclick="closeModal()">Cancel</button>' +
+        '<button class="btn btn-primary" id="cl-match-confirm" onclick="confirmCardMatchAction()" disabled>Confirm Match</button>' +
+      '</div>' +
+    '</div>'
+  );
+  renderCardMatchBody();
+}
+
+function onCardMatchVendorChange(){
+  _cardMatchState.vendorId = $('cl-match-vendor').value;
+  _cardMatchState.selectedInvoices = {};
+  _cardMatchState.checkOrder = [];
+  _cardMatchState.applyAmounts = {};
+  _cardMatchState.varianceBooked = false;
+  _cardMatchState.selectedPayments = {};
+  renderCardMatchBody();
+}
+
+function switchCardMatchTab(tab){
+  _cardMatchState.tab = tab;
+  var payTab = $('cl-match-tab-pay'), linkTab = $('cl-match-tab-link');
+  if(payTab) payTab.className = 'tab' + (tab==='pay'?' active':'');
+  if(linkTab) linkTab.className = 'tab' + (tab==='link'?' active':'');
+  renderCardMatchBody();
+}
+
+function renderCardMatchBody(){
+  var body = $('cl-match-body'); if(!body) return;
+  var errEl = $('cl-match-err'); if(errEl) errEl.textContent = '';
+  if(_cardMatchState.tab === 'pay') renderCardMatchPayTab();
+  else renderCardMatchLinkTab();
+}
+
+// ---- Pay invoices tab ---------------------------------------------------
+
+function cardMatchOpenInvoices(vendorId){
+  return DB.invoices.filter(function(inv){
+    return inv.vendorId === vendorId && inv.balance > 0.005 && (inv.status==='open'||inv.status==='partial');
+  }).sort(function(a,b){ return (a.date||'').localeCompare(b.date||''); });
+}
+
+// Suggestions: a single invoice whose open balance equals the charge
+// exactly, or a 2-3 invoice combination that sums exactly to the charge.
+// Only considers invoices dated 45 days before to 14 days after the charge
+// (Morning Fresh is charged on a different day of week than it invoices,
+// per the spec's own open question -- the wide window covers that).
+function cardMatchSuggestions(row, candidates){
+  var amtAbs = Math.abs(parseFloat(row.gross_amount)||0);
+  var windowStart = addDays(row.trans_date, -45);
+  var windowEnd = addDays(row.trans_date, 14);
+  var inWindow = candidates.filter(function(inv){ return inv.date >= windowStart && inv.date <= windowEnd; });
+  var suggestions = [];
+  inWindow.forEach(function(inv){
+    if(Math.abs(inv.balance - amtAbs) < 0.005) suggestions.push({invoiceIds:[inv.id], total: inv.balance});
+  });
+  for(var i=0;i<inWindow.length;i++){
+    for(var j=i+1;j<inWindow.length;j++){
+      var sum2 = Math.round((inWindow[i].balance+inWindow[j].balance)*100)/100;
+      if(Math.abs(sum2-amtAbs) < 0.005) suggestions.push({invoiceIds:[inWindow[i].id,inWindow[j].id], total: sum2});
+      for(var k=j+1;k<inWindow.length;k++){
+        var sum3 = Math.round((inWindow[i].balance+inWindow[j].balance+inWindow[k].balance)*100)/100;
+        if(Math.abs(sum3-amtAbs) < 0.005) suggestions.push({invoiceIds:[inWindow[i].id,inWindow[j].id,inWindow[k].id], total: sum3});
+      }
+    }
+  }
+  return suggestions;
+}
+
+function renderCardMatchPayTab(){
+  var body = $('cl-match-body');
+  var row = REV.cardLedger.find(function(r){ return r.id === _cardMatchState.rowId; });
+  var vendorId = _cardMatchState.vendorId;
+  if(!vendorId){ body.innerHTML = ''; updateCardMatchSummary(); return; }
+
+  var openInvoices = cardMatchOpenInvoices(vendorId);
+  if(openInvoices.length === 0){
+    body.innerHTML = '<div class="empty-state" style="padding:24px"><div>No open invoices for this vendor.</div></div>';
+    updateCardMatchSummary();
+    return;
+  }
+
+  var suggestions = cardMatchSuggestions(row, openInvoices);
+  var suggestedIds = {};
+  suggestions.forEach(function(s){ s.invoiceIds.forEach(function(id){ suggestedIds[id] = true; }); });
+  var rest = openInvoices.filter(function(inv){ return !suggestedIds[inv.id]; });
+
+  var suggestionsHtml = suggestions.length
+    ? '<div style="margin-top:10px">' +
+        '<label style="display:block;margin-bottom:6px">Suggested</label>' +
+        suggestions.map(function(s,idx){
+          var names = s.invoiceIds.map(function(id){ var inv = DB.invoices.find(function(x){ return x.id===id; }); return inv?(inv.invoiceNum||inv.id):id; }).join(' + ');
+          return '<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 10px;background:var(--green-lo);border-radius:var(--r);margin-bottom:6px;font-size:12px">' +
+            '<span>' + names + ' — ' + fmt(s.total) + '</span>' +
+            '<button type="button" class="btn btn-ghost btn-sm" onclick="applyCardMatchSuggestion(' + idx + ')">Use this</button>' +
+          '</div>';
+        }).join('') +
+      '</div>'
+    : '';
+  window._cardMatchSuggestions = suggestions;
+
+  body.innerHTML =
+    suggestionsHtml +
+    '<label style="margin-top:10px;display:block">Step 2 — Select Invoice(s)</label>' +
+    '<div class="match-row-list">' +
+      rest.concat(openInvoices.filter(function(inv){ return suggestedIds[inv.id]; })).map(function(inv){
+        var isPartial = (inv.amountPaid||0) > 0.005;
+        return '<div class="match-row-item" id="cl-inv-' + inv.id + '" onclick="toggleCardMatchInvoiceSelect(\'' + inv.id + '\')">' +
+          '<div class="match-row-check">&#10003;</div>' +
+          '<div style="flex:1">' +
+            '<div style="font-weight:600;font-size:13px">' + (inv.invoiceNum||inv.id) +
+              (isPartial?' <span style="font-weight:600;font-size:10px;color:var(--amber);background:var(--yellow-lo);padding:1px 6px;border-radius:4px;margin-left:4px">PARTIAL</span>':'') +
+            '</div>' +
+            '<div style="font-size:11px;color:var(--ink-lo)">Invoiced ' + fmtDate(inv.date) + (inv.deliveryDate && inv.deliveryDate!==inv.date ? ' \xb7 Delivered ' + fmtDate(inv.deliveryDate) : '') + ' \xb7 Total ' + fmt(inv.total) + '</div>' +
+            (inv.memo ? '<div style="font-size:11px;color:var(--ink-lo)">' + inv.memo + '</div>' : '') +
+            '<div style="margin-top:6px;display:flex;gap:12px;align-items:center;flex-wrap:wrap" onclick="event.stopPropagation()">' +
+              '<label style="font-size:11px;color:var(--ink-mid);display:flex;align-items:center;gap:4px">Apply ' +
+                '<input type="number" step="0.01" min="0" style="width:90px" id="cl-apply-' + inv.id + '" disabled oninput="updateCardMatchApplyAmount(\'' + inv.id + '\')">' +
+              '</label>' +
+              '<span style="font-size:11px;color:var(--ink-lo)">Remaining: <span class="mono" id="cl-remaining-' + inv.id + '">' + fmt(inv.balance) + '</span></span>' +
+            '</div>' +
+            '<div id="cl-apply-err-' + inv.id + '" style="color:var(--red);font-size:11px;margin-top:2px"></div>' +
+          '</div>' +
+          '<div class="mono fw600">' + fmt(inv.balance) + '</div>' +
+        '</div>';
+      }).join('') +
+    '</div>' +
+    '<div id="cl-match-summary"></div>';
+
+  // Re-apply selection state (e.g. after a suggestion click re-rendered the list).
+  Object.keys(_cardMatchState.selectedInvoices).forEach(function(invId){
+    var el = $('cl-inv-' + invId);
+    if(el) el.classList.add('selected');
+    var inputEl = $('cl-apply-' + invId);
+    if(inputEl){ inputEl.disabled = false; inputEl.value = (_cardMatchState.applyAmounts[invId]||0).toFixed(2); }
+    var inv = DB.invoices.find(function(i){ return i.id === invId; });
+    var remEl = $('cl-remaining-' + invId);
+    if(remEl && inv) remEl.textContent = fmt(Math.round((inv.balance-(_cardMatchState.applyAmounts[invId]||0))*100)/100);
+  });
+  updateCardMatchSummary();
+}
+
+function applyCardMatchSuggestion(idx){
+  var s = (window._cardMatchSuggestions||[])[idx];
+  if(!s) return;
+  _cardMatchState.selectedInvoices = {};
+  _cardMatchState.checkOrder = [];
+  _cardMatchState.applyAmounts = {};
+  s.invoiceIds.forEach(function(id){
+    var inv = DB.invoices.find(function(i){ return i.id === id; });
+    if(!inv) return;
+    _cardMatchState.selectedInvoices[id] = true;
+    _cardMatchState.checkOrder.push(id);
+    _cardMatchState.applyAmounts[id] = inv.balance;
+  });
+  renderCardMatchPayTab();
+}
+
+function toggleCardMatchInvoiceSelect(invId){
+  var el = $('cl-inv-' + invId);
+  var inv = DB.invoices.find(function(i){ return i.id === invId; });
+  if(!inv) return;
+  if(_cardMatchState.selectedInvoices[invId]){
+    delete _cardMatchState.selectedInvoices[invId];
+    el.classList.remove('selected');
+    _cardMatchState.checkOrder = _cardMatchState.checkOrder.filter(function(id){ return id !== invId; });
+    delete _cardMatchState.applyAmounts[invId];
+    var inputEl = $('cl-apply-' + invId);
+    if(inputEl){ inputEl.value = ''; inputEl.disabled = true; }
+    var remEl = $('cl-remaining-' + invId);
+    if(remEl) remEl.textContent = fmt(inv.balance);
+    var errEl = $('cl-apply-err-' + invId);
+    if(errEl) errEl.textContent = '';
+  } else {
+    _cardMatchState.selectedInvoices[invId] = true;
+    el.classList.add('selected');
+    var row = REV.cardLedger.find(function(r){ return r.id === _cardMatchState.rowId; });
+    var amtAbs = Math.abs(parseFloat(row.gross_amount)||0);
+    var alreadyApplied = _cardMatchState.checkOrder.reduce(function(s,id){ return s + (_cardMatchState.applyAmounts[id]||0); }, 0);
+    var remainingCharge = Math.max(0, Math.round((amtAbs - alreadyApplied)*100)/100);
+    var prefill = Math.round(Math.min(inv.balance, remainingCharge)*100)/100;
+    _cardMatchState.applyAmounts[invId] = prefill;
+    var inputEl = $('cl-apply-' + invId);
+    if(inputEl){ inputEl.disabled = false; inputEl.value = prefill.toFixed(2); }
+    var remEl = $('cl-remaining-' + invId);
+    if(remEl) remEl.textContent = fmt(Math.round((inv.balance-prefill)*100)/100);
+    _cardMatchState.checkOrder.push(invId);
+  }
+  updateCardMatchSummary();
+}
+
+function updateCardMatchApplyAmount(invId){
+  var inputEl = $('cl-apply-' + invId);
+  var inv = DB.invoices.find(function(i){ return i.id === invId; });
+  if(!inputEl || !inv) return;
+  var val = parseFloat(inputEl.value);
+  if(isNaN(val) || val < 0) val = 0;
+  val = Math.round(val*100)/100;
+  _cardMatchState.applyAmounts[invId] = val;
+  var remEl = $('cl-remaining-' + invId);
+  if(remEl) remEl.textContent = fmt(Math.round((inv.balance-val)*100)/100);
+  updateCardMatchSummary();
+}
+
+function validateCardMatchRows(){
+  var ok = true;
+  (_cardMatchState.checkOrder||[]).forEach(function(invId){
+    var inv = DB.invoices.find(function(i){ return i.id === invId; });
+    var errEl = $('cl-apply-err-' + invId);
+    if(!inv) return;
+    var amt = _cardMatchState.applyAmounts[invId] || 0;
+    var msg = '';
+    if(amt <= 0) msg = 'Enter an amount to apply.';
+    else if(amt > inv.balance + 0.005) msg = 'Exceeds open balance of ' + fmt(inv.balance) + '.';
+    if(errEl) errEl.textContent = msg;
+    if(msg) ok = false;
+  });
+  return ok;
+}
+
+function updateCardMatchSummary(){
+  var row = REV.cardLedger.find(function(r){ return r.id === _cardMatchState.rowId; });
+  var amtAbs = Math.abs(parseFloat(row.gross_amount)||0);
+  var selectedIds = Object.keys(_cardMatchState.selectedInvoices);
+  var sumEl = $('cl-match-summary');
+  var btnEl = $('cl-match-confirm');
+  if(!sumEl || !btnEl) return;
+
+  if(selectedIds.length === 0){
+    sumEl.innerHTML = '';
+    btnEl.disabled = true;
+    return;
+  }
+
+  var totalApplied = Math.round(selectedIds.reduce(function(s,id){ return s + (_cardMatchState.applyAmounts[id]||0); }, 0)*100)/100;
+  var difference = Math.round((amtAbs - totalApplied) * 100) / 100;
+  if(Math.abs(difference) < 0.005) _cardMatchState.varianceBooked = false;
+
+  sumEl.innerHTML =
+    '<div class="match-summary-bar">' +
+      '<span>Charge Amount: <strong class="mono">' + fmt(amtAbs) + '</strong></span>' +
+      '<span>Total Applied: <strong class="mono">' + fmt(totalApplied) + '</strong></span>' +
+      '<span>Difference: <strong class="mono ' + (Math.abs(difference)<0.005?'match-variance-ok':'match-variance-bad') + '">' + (difference>=0?'+':'') + fmt(difference) + '</strong></span>' +
+    '</div>' +
+    '<div id="cl-variance-block"></div>';
+
+  if(Math.abs(difference) >= 0.005) renderCardMatchVarianceBlock(difference);
+  else recomputeCardMatchGate();
+}
+
+function renderCardMatchVarianceBlock(difference){
+  var block = $('cl-variance-block'); if(!block) return;
+  var booked = !!_cardMatchState.varianceBooked;
+  block.innerHTML =
+    '<div style="margin-top:10px;padding:10px;background:var(--bg);border:1px solid var(--border);border-radius:var(--r)">' +
+      '<label style="display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600;cursor:pointer">' +
+        '<input type="checkbox" id="cl-variance-booked"' + (booked?' checked':'') + ' onchange="toggleCardVarianceBooked()"> Book difference to variance' +
+      '</label>' +
+      (booked
+        ? '<div style="margin-top:10px" class="form-group"><label>Account</label>' +
+            '<select id="cl-variance-acct" onchange="_cardMatchState.varianceAcct=this.value">' +
+              acctOptionsHtml(_cardMatchState.varianceAcct, function(a){ return a.type!=='Liability' && a.type!=='Equity' && a.type!=='Revenue'; }) +
+            '</select>' +
+          '</div>'
+        : '') +
+    '</div>';
+  recomputeCardMatchGate();
+}
+
+function toggleCardVarianceBooked(){
+  var cb = $('cl-variance-booked');
+  _cardMatchState.varianceBooked = !!(cb && cb.checked);
+  updateCardMatchSummary();
+}
+
+function recomputeCardMatchGate(){
+  var row = REV.cardLedger.find(function(r){ return r.id === _cardMatchState.rowId; });
+  var btnEl = $('cl-match-confirm');
+  var errEl = $('cl-match-err');
+  if(!row || !btnEl) return;
+  if(_cardMatchState.tab !== 'pay') return;
+
+  var amtAbs = Math.abs(parseFloat(row.gross_amount)||0);
+  var selectedIds = Object.keys(_cardMatchState.selectedInvoices);
+  var totalApplied = Math.round(selectedIds.reduce(function(s,id){ return s + (_cardMatchState.applyAmounts[id]||0); }, 0)*100)/100;
+  var difference = Math.round((amtAbs - totalApplied) * 100) / 100;
+
+  var rowsValid = validateCardMatchRows();
+  var diffZero = Math.abs(difference) < 0.005;
+  var booked = !!_cardMatchState.varianceBooked;
+  var diffOk = diffZero || (booked && _cardMatchState.varianceAcct);
+
+  if(errEl) errEl.textContent = (selectedIds.length && !diffOk)
+    ? 'Applied amounts must equal the charge amount, or book the difference to variance.' : '';
+
+  btnEl.disabled = selectedIds.length === 0 || !rowsValid || !diffOk;
+}
+
+async function confirmCardMatch(){
+  var row = REV.cardLedger.find(function(r){ return r.id === _cardMatchState.rowId; });
+  if(!row) return;
+  var selectedIds = Object.keys(_cardMatchState.selectedInvoices);
+  if(selectedIds.length === 0) return;
+
+  var btnEl = $('cl-match-confirm');
+  if(btnEl){ btnEl.disabled = true; btnEl.textContent = 'Recording...'; }
+
+  var amtAbs = Math.abs(parseFloat(row.gross_amount)||0);
+  var invoices = selectedIds.map(function(id){ return DB.invoices.find(function(i){ return i.id === id; }); }).filter(Boolean);
+  var totalApplied = Math.round(invoices.reduce(function(s,inv){ return s + (Math.round((parseFloat(_cardMatchState.applyAmounts[inv.id])||0)*100)/100); }, 0)*100)/100;
+  var variance = Math.round((amtAbs - totalApplied) * 100) / 100;
+
+  var diffOk = Math.abs(variance) < 0.005 || (_cardMatchState.varianceBooked && _cardMatchState.varianceAcct);
+  if(!diffOk){
+    var errEl1 = $('cl-match-err');
+    if(errEl1) errEl1.textContent = 'Applied amounts must equal the charge amount, or book the difference to variance.';
+    if(btnEl){ btnEl.disabled = false; btnEl.textContent = 'Confirm Match'; }
+    return;
+  }
+  var applyOk = invoices.every(function(inv){
+    var amt = Math.round((parseFloat(_cardMatchState.applyAmounts[inv.id])||0)*100)/100;
+    return amt > 0 && amt <= inv.balance + 0.005;
+  });
+  if(!applyOk){
+    var errEl2 = $('cl-match-err');
+    if(errEl2) errEl2.textContent = 'Check the apply amount on each selected invoice.';
+    if(btnEl){ btnEl.disabled = false; btnEl.textContent = 'Confirm Match'; }
+    return;
+  }
+
+  showLoadingOverlay('Recording payment(s)...');
+
+  var dateStr = row.trans_date;
+  var dateParts = dateStr.split('-');
+  var mdy = dateParts.length===3 ? (parseInt(dateParts[1],10)+'/'+parseInt(dateParts[2],10)+'/'+dateParts[0]) : dateStr;
+  var varSign = variance > 0 ? 1 : -1; // positive: applied < charge (variance is an extra expense); negative: applied > charge
+  var pmtFailures = [], invFailures = [], glFailures = [];
+
+  for(var i = 0; i < invoices.length; i++){
+    var inv = invoices[i];
+    var isLast = (i === invoices.length - 1);
+    var applyAmt = Math.round((parseFloat(_cardMatchState.applyAmounts[inv.id])||0)*100)/100;
+    var feeVariance = (isLast && _cardMatchState.varianceBooked) ? variance : 0;
+    var payAmt = Math.max(0, applyAmt + feeVariance);
+
+    var invEra = inv.era || ERA.DC;
+    var pmtId = await nextPaymentId();
+    var pmt = {id:pmtId, era:invEra, invoiceId:inv.id, vendorId:inv.vendorId, date:dateStr,
+               amount:payAmt, method:'Company Card (Divvy)', ref:row.id,
+               memo:'Card charge ' + (row.merchant||'') + ' ' + mdy, glPosted:true};
+    inv.amountPaid = (inv.amountPaid||0) + applyAmt;
+    inv.balance = Math.round(Math.max(0, inv.total - inv.amountPaid)*100)/100;
+    if(inv.balance < 0.005){ inv.balance = 0; inv.status = 'paid'; } else inv.status = 'partial';
+
+    var jeEntries = [{acct:'2000',name:'Accounts Payable',dr:applyAmt,cr:0}];
+    if(Math.abs(feeVariance) >= 0.005){
+      var varAcctName = acctName(_cardMatchState.varianceAcct)||_cardMatchState.varianceAcct;
+      jeEntries.push(varSign>0
+        ? {acct:_cardMatchState.varianceAcct,name:varAcctName,dr:Math.abs(feeVariance),cr:0}
+        : {acct:_cardMatchState.varianceAcct,name:varAcctName,dr:0,cr:Math.abs(feeVariance)});
+    }
+    jeEntries.push({acct:'2110',name:'Divvy Card Payable',dr:0,cr:payAmt});
+    var je = {id:await nextGLId(), date:dateStr, ref:pmtId, era:invEra,
+      memo:'Card payment - ' + vendorName(inv.vendorId) + ' ' + (inv.invoiceNum||inv.id),
+      entries:jeEntries};
+
+    var pmtOk = await insertPaymentToSB(pmt);
+    if(!pmtOk) pmtFailures.push(inv.id);
+    var invOk = await saveInvoiceToSB(inv);
+    if(!invOk) invFailures.push(inv.id);
+    var glOk = await saveGLToSB(je);
+    if(!glOk) glFailures.push(inv.id+' ('+pmtId+')');
+
+    var clm = {id:'CLM-'+Date.now()+'-'+i, card_ledger_id:row.id, match_kind:'ap_payment', payment_id:pmtId, invoice_id:inv.id, amount:applyAmt, created_at:new Date().toISOString()};
+    await saveCardMatch(clm);
+    REV.cardMatches.push(clm);
+  }
+
+  hideLoadingOverlay();
+  closeModal();
+  if(pmtFailures.length||invFailures.length||glFailures.length){
+    var parts=[];
+    if(pmtFailures.length)parts.push('payment record failed for: '+pmtFailures.join(', '));
+    if(invFailures.length)parts.push('invoice balance update failed for: '+invFailures.join(', '));
+    if(glFailures.length)parts.push('GL entry failed for: '+glFailures.join(', '));
+    showToast('Match partially recorded — '+parts.join('; ')+'. Check Trial Balance and correct manually.','warn');
+  } else {
+    showToast('Matched ' + invoices.length + ' invoice(s)' + (Math.abs(variance)>=0.01 ? ' — variance ' + fmt(variance) + ' booked' : ''));
+  }
+  updateSidebarStats();
+  if(currentView === 'card-ledger') renderCardLedger();
+}
+
+// ---- Link existing payment tab ------------------------------------------
+// Payments already entered by hand in the Pay modal with method Company
+// Card (Divvy), for this vendor, that have no card_ledger_match of any
+// kind yet (a payment can only be linked once).
+
+function cardMatchUnmatchedPayments(vendorId){
+  return DB.payments.filter(function(p){
+    return p.vendorId === vendorId && p.method === 'Company Card (Divvy)' &&
+      !REV.cardMatches.some(function(m){ return m.payment_id === p.id; });
+  }).sort(function(a,b){ return (a.date||'').localeCompare(b.date||''); });
+}
+
+function renderCardMatchLinkTab(){
+  var body = $('cl-match-body');
+  var vendorId = _cardMatchState.vendorId;
+  if(!vendorId){ body.innerHTML = ''; var btnEl0=$('cl-match-confirm'); if(btnEl0) btnEl0.disabled=true; return; }
+
+  var payments = cardMatchUnmatchedPayments(vendorId);
+  if(payments.length === 0){
+    body.innerHTML = '<div class="empty-state" style="padding:24px"><div>No unmatched Company Card (Divvy) payments for this vendor.</div></div>';
+    var btnEl1=$('cl-match-confirm'); if(btnEl1) btnEl1.disabled=true;
+    return;
+  }
+
+  body.innerHTML =
+    '<label style="margin-top:10px;display:block">Select payment(s) that sum to the charge amount</label>' +
+    '<div class="match-row-list">' +
+      payments.map(function(p){
+        var inv = DB.invoices.find(function(i){ return i.id === p.invoiceId; });
+        return '<div class="match-row-item" id="cl-pmt-' + p.id + '" onclick="toggleCardMatchPaymentSelect(\'' + p.id + '\')">' +
+          '<div class="match-row-check">&#10003;</div>' +
+          '<div style="flex:1">' +
+            '<div style="font-weight:600;font-size:13px">' + (inv?(inv.invoiceNum||inv.id):(p.invoiceId||p.id)) + '</div>' +
+            '<div style="font-size:11px;color:var(--ink-lo)">' + fmtDate(p.date) + '</div>' +
+          '</div>' +
+          '<div class="mono fw600">' + fmt(p.amount) + '</div>' +
+        '</div>';
+      }).join('') +
+    '</div>' +
+    '<div id="cl-link-summary"></div>';
+
+  Object.keys(_cardMatchState.selectedPayments).forEach(function(pmtId){
+    var el = $('cl-pmt-' + pmtId);
+    if(el) el.classList.add('selected');
+  });
+  updateCardMatchLinkSummary();
+}
+
+function toggleCardMatchPaymentSelect(pmtId){
+  var el = $('cl-pmt-' + pmtId);
+  if(_cardMatchState.selectedPayments[pmtId]){
+    delete _cardMatchState.selectedPayments[pmtId];
+    if(el) el.classList.remove('selected');
+  } else {
+    _cardMatchState.selectedPayments[pmtId] = true;
+    if(el) el.classList.add('selected');
+  }
+  updateCardMatchLinkSummary();
+}
+
+function updateCardMatchLinkSummary(){
+  var row = REV.cardLedger.find(function(r){ return r.id === _cardMatchState.rowId; });
+  var amtAbs = Math.abs(parseFloat(row.gross_amount)||0);
+  var selectedIds = Object.keys(_cardMatchState.selectedPayments);
+  var sumEl = $('cl-link-summary');
+  var btnEl = $('cl-match-confirm');
+  if(!sumEl || !btnEl) return;
+
+  if(selectedIds.length === 0){ sumEl.innerHTML = ''; btnEl.disabled = true; return; }
+
+  var total = Math.round(selectedIds.reduce(function(s,id){
+    var p = DB.payments.find(function(x){ return x.id === id; });
+    return s + (p?parseFloat(p.amount)||0:0);
+  }, 0)*100)/100;
+  var diff = Math.round((amtAbs - total)*100)/100;
+  sumEl.innerHTML =
+    '<div class="match-summary-bar">' +
+      '<span>Charge Amount: <strong class="mono">' + fmt(amtAbs) + '</strong></span>' +
+      '<span>Selected Total: <strong class="mono">' + fmt(total) + '</strong></span>' +
+      '<span>Difference: <strong class="mono ' + (Math.abs(diff)<0.005?'match-variance-ok':'match-variance-bad') + '">' + (diff>=0?'+':'') + fmt(diff) + '</strong></span>' +
+    '</div>';
+  btnEl.disabled = Math.abs(diff) >= 0.005;
+}
+
+async function confirmLinkPayment(){
+  var row = REV.cardLedger.find(function(r){ return r.id === _cardMatchState.rowId; });
+  if(!row) return;
+  var selectedIds = Object.keys(_cardMatchState.selectedPayments);
+  if(selectedIds.length === 0) return;
+
+  var btnEl = $('cl-match-confirm');
+  if(btnEl){ btnEl.disabled = true; btnEl.textContent = 'Linking...'; }
+  showLoadingOverlay('Linking payment(s)...');
+
+  for(var i = 0; i < selectedIds.length; i++){
+    var pmt = DB.payments.find(function(x){ return x.id === selectedIds[i]; });
+    if(!pmt) continue;
+    var clm = {id:'CLM-'+Date.now()+'-'+i, card_ledger_id:row.id, match_kind:'linked_payment', payment_id:pmt.id, invoice_id:pmt.invoiceId, amount:pmt.amount, created_at:new Date().toISOString()};
+    await saveCardMatch(clm);
+    REV.cardMatches.push(clm);
+  }
+
+  hideLoadingOverlay();
+  closeModal();
+  showToast('Linked ' + selectedIds.length + ' payment(s) to the card charge');
+  updateSidebarStats();
+  if(currentView === 'card-ledger') renderCardLedger();
+}
+
+function confirmCardMatchAction(){
+  if(_cardMatchState.tab === 'pay') confirmCardMatch();
+  else confirmLinkPayment();
+}
+
+// ---- Unmatch -------------------------------------------------------------
+
+async function unmatchCardRow(rowId){
+  var matches = clRowMatches(rowId);
+  var apMatches = matches.filter(function(m){ return m.match_kind === 'ap_payment'; });
+  var linkMatches = matches.filter(function(m){ return m.match_kind === 'linked_payment'; });
+
+  var reverseToo = false;
+  if(apMatches.length > 0){
+    reverseToo = confirm(
+      'This charge is matched to ' + apMatches.length + ' AP payment(s).\n\n' +
+      'Click OK to remove the match AND reverse the payment(s) — this will restore ' +
+      'the invoice balance(s) and delete the associated GL entries.\n\n' +
+      'Click Cancel to remove only the match link and leave the payment(s) in place.'
+    );
+    if(!reverseToo){
+      if(!confirm('Remove match link only? The payment(s) will remain recorded in AP.')) return;
+    }
+  } else if(linkMatches.length > 0){
+    if(!confirm('Remove this link? The payment stays recorded in AP; only the link to this card charge is removed.')) return;
+  } else {
+    if(!confirm('Remove match(es) for this card charge?')) return;
+  }
+
+  // Block unmatch if an ap_payment match's payment was reversed or edited
+  // elsewhere (no longer exists, or no longer matches the amount recorded).
+  if(reverseToo){
+    for(var c = 0; c < apMatches.length; c++){
+      var checkPmt = DB.payments.find(function(x){ return x.id === apMatches[c].payment_id; });
+      if(!checkPmt){
+        showToast('Cannot unmatch — a linked payment no longer exists. It may have been reversed elsewhere.','warn');
+        return;
+      }
+    }
+  }
+
+  showLoadingOverlay('Removing match...');
+
+  if(reverseToo){
+    for(var i = 0; i < apMatches.length; i++){
+      var m = apMatches[i];
+      var inv = DB.invoices.find(function(x){ return x.id === m.invoice_id; });
+      var pmt = DB.payments.find(function(x){ return x.id === m.payment_id; });
+      if(inv && pmt){
+        inv.amountPaid = Math.max(0, (inv.amountPaid||0) - pmt.amount);
+        inv.balance = Math.max(0, inv.total - inv.amountPaid);
+        inv.status = inv.balance <= 0.005 ? 'paid' : (inv.amountPaid > 0.005 ? 'partial' : 'open');
+        await saveInvoiceToSB(inv);
+      }
+      if(pmt){
+        await _sb.from('payments').delete().eq('id', pmt.id);
+        DB.payments = DB.payments.filter(function(x){ return x.id !== pmt.id; });
+        await _sb.from('gl_entries').delete().eq('ref', pmt.id);
+        DB.gl = DB.gl.filter(function(x){ return x.ref !== pmt.id; });
+      }
+    }
+  }
+
+  var ok = await deleteCardMatchesForRow(rowId);
+  hideLoadingOverlay();
+  if(!ok){ showToast('Failed to remove match','warn'); return; }
+  REV.cardMatches = REV.cardMatches.filter(function(m){ return m.card_ledger_id !== rowId; });
+
+  showToast(reverseToo ? 'Match removed and payment(s) reversed' : 'Match link removed — payment(s) left in place');
+  updateSidebarStats();
+  if(currentView === 'card-ledger') renderCardLedger();
 }
 
 // ── CARD FILE UPLOAD ────────────────────────────────────────────────────
