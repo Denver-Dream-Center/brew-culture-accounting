@@ -12869,6 +12869,23 @@ var _cloverOrdersCache = {};
 
 var CLOVER_ORDERS_FETCH_TIMEOUT_MS = 8000;
 
+// The ONLY place that ever writes a day's entry in _cloverOrdersCache --
+// always REPLACES the day's array (deduped by order_id as a second line of
+// defense), never appends. A day that's already cached can therefore never
+// be double-counted by a later call that happens to re-fetch a range
+// covering it (the bug that caused doubled tips 10/11/26 and again
+// 11/9-11/22/26: ensureCloverOrdersLoadedForRange used to .push() fetched
+// rows onto whatever array was already in the cache for that day).
+function setCloverDayCache(day, rows){
+  const seen = new Set();
+  const deduped = [];
+  (rows||[]).forEach(r=>{
+    if(r.order_id!=null){ if(seen.has(r.order_id)) return; seen.add(r.order_id); }
+    deduped.push(r);
+  });
+  _cloverOrdersCache[day] = deduped;
+}
+
 // Fetches and caches one date's Clover order rows, with a hard timeout so a
 // single stalled request can't block the caller forever -- degrades to "not
 // loaded yet" for that date instead, and leaves the cache unset so a later
@@ -12880,10 +12897,10 @@ async function fetchCloverOrdersForDate(dateStr){
   let timeoutId;
   try{
     const {data, error} = await Promise.race([
-      _sb.from('clover_orders').select('sale_time,order_tip_amount').eq('sale_date', dateStr),
+      _sb.from('clover_orders').select('sale_time,order_tip_amount,order_id').eq('sale_date', dateStr),
       new Promise((_,reject)=>{ timeoutId = setTimeout(()=>reject(new Error('clover_orders fetch timed out for '+dateStr)), CLOVER_ORDERS_FETCH_TIMEOUT_MS); })
     ]);
-    _cloverOrdersCache[dateStr] = (!error && data) ? data : [];
+    setCloverDayCache(dateStr, (!error && data) ? data : []);
   }catch(e){
     console.error('fetchCloverOrdersForDate', dateStr, 'ms=', Math.round(performance.now()-_t0), e);
   } finally {
@@ -12923,6 +12940,7 @@ async function ensureCloverOrdersLoadedForRange(startDate, endDate){
   // to terminate regardless; it's not open-ended like the earlier addDays
   // bug, since each iteration consumes real, finite data and stops as soon
   // as a page comes back short.
+  const daySet = new Set(days);
   const PAGE_SIZE = 1000, MAX_PAGES = 50;
   let allRows = [];
   try{
@@ -12930,7 +12948,7 @@ async function ensureCloverOrdersLoadedForRange(startDate, endDate){
       const offset = page*PAGE_SIZE;
       let timeoutId;
       const result = await Promise.race([
-        _sb.from('clover_orders').select('sale_date,sale_time,order_tip_amount').gte('sale_date', startDate).lte('sale_date', endDate).order('sale_date').range(offset, offset+PAGE_SIZE-1),
+        _sb.from('clover_orders').select('sale_date,sale_time,order_tip_amount,order_id').gte('sale_date', startDate).lte('sale_date', endDate).order('sale_date').range(offset, offset+PAGE_SIZE-1),
         new Promise((_,reject)=>{ timeoutId = setTimeout(()=>reject(new Error('clover_orders range fetch timed out for '+startDate+'..'+endDate+' page '+page)), CLOVER_ORDERS_FETCH_TIMEOUT_MS); })
       ]);
       clearTimeout(timeoutId);
@@ -12940,12 +12958,20 @@ async function ensureCloverOrdersLoadedForRange(startDate, endDate){
       if(pageRows.length < PAGE_SIZE) break; // last page
     }
 
-    days.forEach(day=>{ _cloverOrdersCache[day] = []; }); // mark every requested day as loaded, even ones with zero orders
+    // Group fetched rows by day, but ONLY for days actually requested
+    // (`days`/`daySet`) -- the range query can return rows for a day that
+    // was already cached (e.g. opened individually via Daily Shift Entry
+    // before this range call), and that day's cache must never be touched
+    // again here, or it doubles. `fresh` starts empty for every requested
+    // day so a day with zero orders still gets marked loaded.
+    const fresh = {};
+    days.forEach(day=>{ fresh[day] = []; });
     allRows.forEach(row=>{
       const key = String(row.sale_date).slice(0,10); // normalize in case the wire format ever includes a time component
-      if(_cloverOrdersCache[key]===undefined) _cloverOrdersCache[key] = [];
-      _cloverOrdersCache[key].push(row);
+      if(!daySet.has(key)) return; // already cached by someone else -- skip, never append
+      fresh[key].push(row);
     });
+    days.forEach(day=>{ setCloverDayCache(day, fresh[day]); });
   }catch(e){
     // Leave the cache unset for the requested days so a later render can retry.
     console.error('ensureCloverOrdersLoadedForRange', startDate, endDate, e);
@@ -12959,6 +12985,28 @@ async function ensureCloverOrdersLoadedForRange(startDate, endDate){
 // Volunteer Tip Revenue instead of any individual. rawRows is any array of
 // {employeeId, clockIn, clockOut}; rows missing a clock-out (still open) or
 // an employee are skipped entirely, same rule as Hours/Pay.
+// Sums the orders in `orderRows` whose sale_time falls outside every
+// [start,end) range in `coveredRanges` -- i.e. tips rung up when nobody
+// (not even a volunteer) was clocked in: before the first clock-in, after
+// the last clock-out, or in a gap between shifts. Shared by the zero-shifts
+// early-return and the normal path below so both report the same shape.
+function _tipsUncoveredBy(orderRows, coveredRanges){
+  let unallocatedCents = 0;
+  const unallocatedOrders = [];
+  orderRows.forEach(o=>{
+    if(!o.sale_time) return;
+    const amt = Number(o.order_tip_amount)||0;
+    if(amt<=0) return;
+    const mins = timeToMinutes(o.sale_time);
+    const covered = coveredRanges.some(([s,e])=>mins>=s && mins<e);
+    if(!covered){
+      unallocatedCents += Math.round(amt*100);
+      unallocatedOrders.push({time:o.sale_time, amount:amt});
+    }
+  });
+  return {unallocatedCents, unallocatedOrders};
+}
+
 function computeTipSplitForDay(dateStr, rawRows){
   const rows = (rawRows||[]).filter(r=>r.employeeId && r.clockIn && r.clockOut && shiftDurationHours(r.clockIn,r.clockOut)!==null);
   const perEmployee = {}; let volunteerRevenue = 0;
@@ -12967,8 +13015,13 @@ function computeTipSplitForDay(dateStr, rawRows){
   // the same employee/day, and each row should only show what THAT shift
   // earned, not the employee's whole-day total repeated on every row.
   const perRowMap = new Map();
-  if(!rows.length) return {perEmployee, volunteerRevenue, perRowMap};
   const orderRows = _cloverOrdersCache[dateStr] || [];
+  if(!rows.length){
+    // No shifts at all -- nothing is covered, so every order with a tip is
+    // unallocated (test case: orders exist but no shifts entered yet).
+    const {unallocatedCents, unallocatedOrders} = _tipsUncoveredBy(orderRows, []);
+    return {perEmployee, volunteerRevenue, perRowMap, unallocatedCents, unallocatedOrders};
+  }
 
   const boundarySet = new Set();
   rows.forEach(r=>{ boundarySet.add(timeToMinutes(r.clockIn)); boundarySet.add(timeToMinutes(r.clockOut)); });
@@ -12976,12 +13029,19 @@ function computeTipSplitForDay(dateStr, rawRows){
 
   let volunteerCents = 0;
   const perEmployeeCents = {};
+  // Segments ([segStart,segEnd)) where at least one person was clocked in
+  // -- whether their tips ended up allocated to an individual or routed to
+  // Volunteer Tip Revenue below. Anything NOT in one of these ranges is a
+  // true coverage gap (nobody on the clock), tracked as unallocated after
+  // the loop via _tipsUncoveredBy.
+  const coveredRanges = [];
 
   for(let k=0;k<boundaries.length-1;k++){
     const segStart=boundaries[k], segEnd=boundaries[k+1];
     if(segEnd<=segStart) continue;
     const present = rows.filter(r=>timeToMinutes(r.clockIn)<=segStart && timeToMinutes(r.clockOut)>=segEnd);
     if(!present.length) continue;
+    coveredRanges.push([segStart, segEnd]);
     const presentIds = [...new Set(present.map(r=>r.employeeId))];
     // Tip-ineligible employees (e.g. Jose Orozco, hourly but not in the tip
     // pool) still count as present for hours/wages -- that's computed
@@ -13040,7 +13100,69 @@ function computeTipSplitForDay(dateStr, rawRows){
   volunteerRevenue = volunteerCents/100;
   const perRowMapDollars = new Map();
   perRowMap.forEach((cents,row)=>perRowMapDollars.set(row, cents/100));
-  return {perEmployee, volunteerRevenue, perRowMap:perRowMapDollars};
+  const {unallocatedCents, unallocatedOrders} = _tipsUncoveredBy(orderRows, coveredRanges);
+  return {perEmployee, volunteerRevenue, perRowMap:perRowMapDollars, unallocatedCents, unallocatedOrders};
+}
+
+// Period-level tip tie-out (collected vs. allocated + volunteer-routed) for
+// every calendar day in [startDate,endDate] -- used by Individual
+// Timesheets and Timesheet Summary. Unlike the Daily Shift Entry check
+// (renderShiftTipCheckBar), this always reads DB.shiftLog (saved shifts),
+// never the in-progress draft rows, since those views show saved data only.
+function computeTipCheckForRange(startDate, endDate){
+  let collected=0, allocated=0, volunteer=0, unallocatedCents=0;
+  const dayBreakdown = [];
+  let d = startDate;
+  while(d <= endDate){
+    const orders = _cloverOrdersCache[d] || [];
+    const dayCollected = orders.reduce((s,o)=>s+(Number(o.order_tip_amount)||0),0);
+    collected = Math.round((collected+dayCollected)*100)/100;
+    const dayShifts = DB.shiftLog.filter(s=>s.workDate===d);
+    const split = computeTipSplitForDay(d, dayShifts);
+    const dayAllocated = Object.keys(split.perEmployee||{}).reduce((s,id)=>s+(split.perEmployee[id]||0),0);
+    allocated = Math.round((allocated+dayAllocated)*100)/100;
+    volunteer = Math.round((volunteer+(split.volunteerRevenue||0))*100)/100;
+    unallocatedCents += (split.unallocatedCents||0);
+    if((split.unallocatedCents||0) > 0){
+      dayBreakdown.push({date:d, unallocated:(split.unallocatedCents||0)/100, orders:split.unallocatedOrders||[]});
+    }
+    d = addDays(d,1);
+  }
+  const unallocated = Math.round(unallocatedCents)/100;
+  const diff = Math.round((allocated+volunteer-collected)*100)/100;
+  return {collected, allocated, volunteer, unallocated, diff, dayBreakdown};
+}
+
+// Renders the collected/allocated/volunteer/difference bar for a period
+// check, with a collapsible per-day breakdown when the difference is
+// nonzero. idSuffix keeps the <details> element id unique per view.
+function tipCheckBannerHtml(check, idSuffix){
+  const diffOk = Math.abs(check.diff) < 0.005;
+  const diffDisplay = check.diff>=0 ? ('+'+fmt(check.diff)) : ('('+fmt(Math.abs(check.diff))+')');
+  let listHtml = '';
+  if(!diffOk && check.dayBreakdown.length){
+    listHtml =
+      '<details style="margin-top:8px;font-size:12px">' +
+        '<summary style="cursor:pointer;color:var(--red)">Days with unallocated tips (' + check.dayBreakdown.length + ')</summary>' +
+        '<div style="margin-top:6px">' +
+          check.dayBreakdown.map(d=>{
+            const times = d.orders.map(o=>o.time).sort();
+            const range = times.length ? (fmtTime12(times[0])+'-'+fmtTime12(times[times.length-1])) : '';
+            return '<div style="padding:4px 0;border-top:1px solid var(--border-lo)">' + fmtDate(d.date) + ' — ' + fmt(d.unallocated) + ' unallocated (' + d.orders.length + ' order' + (d.orders.length!==1?'s':'') + (range?', '+range:'') + ')</div>';
+          }).join('') +
+        '</div>' +
+      '</details>';
+  }
+  return '<div class="card" style="margin-bottom:16px">' +
+    '<div class="card-body" style="padding:14px 16px">' +
+      '<div class="match-summary-bar" style="flex-wrap:wrap;gap:12px' + (diffOk?'':';background:var(--red-lo)') + '">' +
+        '<span>Tips collected: <strong class="mono">' + fmt(check.collected) + '</strong></span>' +
+        '<span>Allocated: <strong class="mono">' + fmt(check.allocated) + '</strong></span>' +
+        '<span>Volunteer-routed: <strong class="mono">' + fmt(check.volunteer) + '</strong></span>' +
+        '<span>Over / (under) allocated: <strong class="mono ' + (diffOk?'match-variance-ok':'match-variance-bad') + '">' + diffDisplay + '</strong></span>' +
+      '</div>' + listHtml +
+    '</div>' +
+  '</div>';
 }
 
 function shiftLogDaySummaries(){
@@ -13162,6 +13284,7 @@ async function renderPayrollShifts(){
       <button class="btn btn-ghost btn-sm" onclick="addShiftRow()" style="margin-top:6px">＋ Add row</button>
       ${!dateSelected?'<div class="alert alert-info" style="margin-top:12px">Select a date to enable the employee list.</div>':activeEmps.length===0?'<div class="alert alert-info" style="margin-top:12px">No employees were active on this date.</div>':''}
       <div id="shift-volunteer-note" style="margin-top:8px;font-size:12px;color:var(--ink-mid)"></div>
+      <div id="shift-tip-check" style="margin-top:8px"></div>
       <div style="display:flex;justify-content:space-between;align-items:center;margin-top:16px;padding-top:14px;border-top:1px solid var(--border-lo)">
         <span id="shift-total-hrs" style="font-size:13px;color:var(--ink-mid)"></span>
         <div><span id="shift-save-err" style="color:var(--red);font-size:12px;margin-right:10px"></span>
@@ -13244,6 +13367,42 @@ function renderShiftRows(){
   updateShiftTotal();
   const noteEl = $('shift-volunteer-note');
   if(noteEl) noteEl.textContent = dayTips.volunteerRevenue>0 ? (fmt(dayTips.volunteerRevenue)+' routed to Volunteer Tip Revenue for this day.') : '';
+  renderShiftTipCheckBar(dayTips);
+}
+
+// Tie-out bar for the selected date: tips collected (Clover) vs. allocated
+// to employees + routed to Volunteer Tip Revenue. Reflects the unsaved
+// draft rows (shiftFormRows via dayTips), so adding a missing shift turns
+// it green before saving. Styled like the bank ledger match summary bar.
+function renderShiftTipCheckBar(dayTips){
+  const el = $('shift-tip-check'); if(!el) return;
+  if(!shiftLogDate){ el.innerHTML=''; return; }
+  if(_cloverOrdersCache[shiftLogDate]===undefined){
+    el.innerHTML = '<div class="match-summary-bar"><span>Loading tip data...</span></div>';
+    return;
+  }
+  const collected = Math.round((_cloverOrdersCache[shiftLogDate]||[]).reduce((s,o)=>s+(Number(o.order_tip_amount)||0),0)*100)/100;
+  const allocated = Math.round(Object.keys(dayTips.perEmployee||{}).reduce((s,id)=>s+(dayTips.perEmployee[id]||0),0)*100)/100;
+  const volunteer = Math.round((dayTips.volunteerRevenue||0)*100)/100;
+  const unallocated = Math.round((dayTips.unallocatedCents||0))/100;
+  const diff = Math.round((allocated+volunteer-collected)*100)/100;
+  const diffOk = Math.abs(diff) < 0.005;
+  const diffDisplay = diff>=0 ? ('+'+fmt(diff)) : ('('+fmt(Math.abs(diff))+')');
+
+  let causeHtml = '';
+  if(!diffOk && (dayTips.unallocatedOrders||[]).length){
+    const times = dayTips.unallocatedOrders.map(o=>o.time).sort();
+    const earliest = fmtTime12(times[0]), latest = fmtTime12(times[times.length-1]);
+    causeHtml = '<div style="margin-top:6px;font-size:12px;color:var(--red)">' + fmt(unallocated) + ' in tips rung up when nobody was clocked in (times: ' + earliest + '-' + latest + ', ' + dayTips.unallocatedOrders.length + ' order' + (dayTips.unallocatedOrders.length!==1?'s':'') + '). Check for a missing or late clock-in.</div>';
+  }
+
+  el.innerHTML =
+    '<div class="match-summary-bar" style="flex-wrap:wrap;gap:12px' + (diffOk?'':';background:var(--red-lo)') + '">' +
+      '<span>Tips collected: <strong class="mono">' + fmt(collected) + '</strong></span>' +
+      '<span>Allocated to employees: <strong class="mono">' + fmt(allocated) + '</strong></span>' +
+      '<span>Routed to Volunteer Tip Revenue: <strong class="mono">' + fmt(volunteer) + '</strong></span>' +
+      '<span>Over / (under) allocated: <strong class="mono ' + (diffOk?'match-variance-ok':'match-variance-bad') + '">' + diffDisplay + '</strong></span>' +
+    '</div>' + causeHtml;
 }
 
 function addShiftRow(){
@@ -13447,7 +13606,8 @@ async function renderPayrollTimesheets(){
       </div>`;
     }).join('');
   }
-  $('content').innerHTML = html;
+  const tipCheck = computeTipCheckForRange(period.start, period.end);
+  $('content').innerHTML = tipCheckBannerHtml(tipCheck, 'timesheets') + html;
 }
 
 // Overtime: 1.5x the regular rate for hours over 40 in the calendar week
@@ -13653,7 +13813,8 @@ async function renderPayrollTimesheetSummary(){
   const totHours = totRegHours + totOTHours;
   const avgRateTotal = totHours>0 ? totGross/totHours : 0;
 
-  $('content').innerHTML = `<div class="card">
+  const tipCheck = computeTipCheckForRange(period.start, period.end);
+  $('content').innerHTML = tipCheckBannerHtml(tipCheck, 'summary') + `<div class="card">
     <div class="card-header"><span class="card-title">${fmtDate(period.start)} \u2013 ${fmtDate(period.end)}</span><span style="font-size:12px;color:var(--ink-mid)">${employeeIds.length} employee${employeeIds.length!==1?'s':''}</span></div>
     <div class="tbl-wrap"><table>
       <thead><tr><th>Employee</th><th class="text-right">Reg Hours</th><th class="text-right">OT Hours</th><th class="text-right">Avg Rate</th><th class="text-right">Gross Pay</th><th class="text-right">OT Premium</th><th class="text-right">Tips</th><th class="text-right">Total Pay (incl. Tips)</th></tr></thead>
