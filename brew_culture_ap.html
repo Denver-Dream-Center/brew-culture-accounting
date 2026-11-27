@@ -830,7 +830,10 @@ function mapInvoiceFromDB(r) {
     id: r.id, vendorId: r.vendor_id, invoiceNum: r.invoice_number,
     date: r.invoice_date, dueDate: r.due_date, deliveryDate: r.delivery_date, era: r.era, status: r.status,
     lines: r.lines || [], total: r.total, amountPaid: r.amount_paid || 0,
-    balance: r.balance || 0, memo: r.memo, glPosted: r.gl_posted
+    balance: r.balance || 0, memo: r.memo, glPosted: r.gl_posted,
+    sourceFilePath: r.source_file_path || null, sourceFileName: r.source_file_name || null,
+    sourceFileType: r.source_file_type || null, sourceFileSize: r.source_file_size || null,
+    sourceUrl: r.source_url || null, sourceAddedAt: r.source_added_at || null, sourceAddedBy: r.source_added_by || null
   };
 }
 
@@ -839,7 +842,10 @@ function mapInvoiceToDB(inv) {
     id: inv.id, vendor_id: inv.vendorId, invoice_number: inv.invoiceNum,
     invoice_date: inv.date, due_date: inv.dueDate, delivery_date: inv.deliveryDate || null, era: inv.era, status: inv.status,
     lines: inv.lines, total: inv.total, amount_paid: inv.amountPaid || 0,
-    balance: inv.balance || 0, memo: inv.memo, gl_posted: inv.glPosted || false
+    balance: inv.balance || 0, memo: inv.memo, gl_posted: inv.glPosted || false,
+    source_file_path: inv.sourceFilePath || null, source_file_name: inv.sourceFileName || null,
+    source_file_type: inv.sourceFileType || null, source_file_size: inv.sourceFileSize || null,
+    source_url: inv.sourceUrl || null, source_added_at: inv.sourceAddedAt || null, source_added_by: inv.sourceAddedBy || null
   };
 }
 
@@ -3912,7 +3918,7 @@ function renderInvoices(){
       <td class="text-right mono">${fmt(inv.total)}</td>
       <td class="text-right mono fw600" style="color:${inv.balance>0?'var(--red)':'var(--green)'}">${fmt(inv.balance)}</td>
       <td>${badgeHtml(st)}</td>
-      <td>${invLines>0?`<span class="inv-pill">⬡ ${invLines}</span>`:''}</td>
+      <td>${invLines>0?`<span class="inv-pill">⬡ ${invLines}</span>`:''}${(inv.sourceFilePath||inv.sourceUrl)?`<a href="#" onclick="event.preventDefault();openInvoiceSourceFile('${inv.id}')" title="${(inv.sourceFileName||'Google Drive').replace(/"/g,'&quot;')}" style="margin-left:4px;text-decoration:none">📄</a>`:''}</td>
       <td><div style="display:flex;gap:4px">
         <button class="btn btn-ghost btn-sm" onclick="viewInvoice('${inv.id}')">View</button>
         ${payable?`<button class="btn btn-secondary btn-sm" onclick="openPaymentModal('${inv.id}')">Pay</button>`:''}
@@ -5642,6 +5648,152 @@ function updateSplitCheck(){
 // ═══════════════════════════════════════════════
 // VIEW INVOICE
 // ═══════════════════════════════════════════════
+
+// The three mutually-exclusive source-document states: a stored file, an
+// external Drive link, or neither. Attach/Replace/Remove/Edit-link follow
+// the same access gate as editing an invoice (there is no separate
+// can_edit_invoice permission -- editing itself is only gated by AP module
+// access). Open/Preview have no gate beyond that, since viewInvoice itself
+// is only reachable with AP module access already.
+function invoiceSourceDocRowHtml(inv){
+  const canEdit = canAccessModule('ap');
+  if(inv.sourceFilePath){
+    const sizeStr = inv.sourceFileSize ? ' (' + Math.round(inv.sourceFileSize/1024) + ' KB)' : '';
+    const isPreviewable = /pdf/i.test(inv.sourceFileType||'') || /image\//i.test(inv.sourceFileType||'') || /\.(pdf|png|jpe?g|webp)$/i.test(inv.sourceFileName||'');
+    return `<div style="margin-bottom:14px;padding:10px 12px;background:var(--bg);border-radius:var(--r);font-size:13px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+        <div>📄 <strong>${inv.sourceFileName||'source document'}</strong>${sizeStr}</div>
+        <div style="display:flex;gap:10px;font-size:12px">
+          <a href="#" onclick="event.preventDefault();openInvoiceSourceFile('${inv.id}')" style="text-decoration:underline">Open</a>
+          ${isPreviewable?`<a href="#" onclick="event.preventDefault();toggleInvoiceSourcePreview('${inv.id}')" style="text-decoration:underline">Preview</a>`:''}
+          ${canEdit?`<a href="#" onclick="event.preventDefault();promptAttachInvoicePDF('${inv.id}')" style="text-decoration:underline">Replace</a>`:''}
+          ${canEdit?`<a href="#" onclick="event.preventDefault();removeInvoiceSourceDoc('${inv.id}')" style="text-decoration:underline;color:var(--red)">Remove</a>`:''}
+        </div>
+      </div>
+      <div id="inv-source-preview-${inv.id}" style="display:none;margin-bottom:14px"></div>`;
+  }
+  if(inv.sourceUrl){
+    return `<div style="margin-bottom:14px;padding:10px 12px;background:var(--bg);border-radius:var(--r);font-size:13px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+      <div>🔗 Google Drive</div>
+      <div style="display:flex;gap:10px;font-size:12px">
+        <a href="${inv.sourceUrl}" target="_blank" rel="noopener" style="text-decoration:underline">Open</a>
+        ${canEdit?`<a href="#" onclick="event.preventDefault();promptAttachInvoicePDF('${inv.id}')" style="text-decoration:underline">Attach PDF</a>`:''}
+        ${canEdit?`<a href="#" onclick="event.preventDefault();promptInvoiceDriveLink('${inv.id}')" style="text-decoration:underline">Edit link</a>`:''}
+      </div>
+    </div>`;
+  }
+  return `<div style="margin-bottom:14px;padding:10px 12px;background:var(--bg);border-radius:var(--r);font-size:13px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+    <div style="color:var(--ink-lo)">No source document</div>
+    <div style="display:flex;gap:10px;font-size:12px">
+      ${canEdit?`<a href="#" onclick="event.preventDefault();promptAttachInvoicePDF('${inv.id}')" style="text-decoration:underline">Attach PDF</a>`:''}
+      ${canEdit?`<a href="#" onclick="event.preventDefault();promptInvoiceDriveLink('${inv.id}')" style="text-decoration:underline">Add Drive link</a>`:''}
+    </div>
+  </div>`;
+}
+
+// Creates a fresh 10-minute signed URL at click time (never stored or
+// shared) and opens it in a new tab -- so the link is only ever as long-
+// lived as the tab the user already has open.
+async function openInvoiceSourceFile(invId){
+  const inv = DB.invoices.find(i=>i.id===invId); if(!inv) return;
+  if(inv.sourceUrl){ window.open(inv.sourceUrl, '_blank'); return; }
+  if(!inv.sourceFilePath){ showToast('No source document on file.','warn'); return; }
+  const res = await _sb.storage.from('invoice-files').createSignedUrl(inv.sourceFilePath, 600);
+  if(res.error || !res.data){ showToast('Could not open the file: '+(res.error?res.error.message:'unknown error'),'warn'); return; }
+  window.open(res.data.signedUrl, '_blank');
+}
+
+async function toggleInvoiceSourcePreview(invId){
+  const inv = DB.invoices.find(i=>i.id===invId); if(!inv||!inv.sourceFilePath) return;
+  const el = $('inv-source-preview-'+invId); if(!el) return;
+  if(el.style.display !== 'none' && el.innerHTML){ el.style.display='none'; el.innerHTML=''; return; }
+  const res = await _sb.storage.from('invoice-files').createSignedUrl(inv.sourceFilePath, 600);
+  if(res.error || !res.data){ showToast('Could not load preview: '+(res.error?res.error.message:'unknown error'),'warn'); return; }
+  const url = res.data.signedUrl;
+  const isPdf = /pdf/i.test(inv.sourceFileType||'') || /\.pdf$/i.test(inv.sourceFileName||'');
+  el.innerHTML = isPdf
+    ? `<iframe src="${url}" style="width:100%;height:480px;border:1px solid var(--border);border-radius:var(--r)"></iframe>`
+    : `<img src="${url}" style="max-width:100%;max-height:480px;border:1px solid var(--border);border-radius:var(--r)">`;
+  el.style.display = 'block';
+}
+
+// Attach (nothing on file yet) or Replace (something already is) -- same
+// action either way, since attachInvoiceFile() always just uploads a new
+// object and points the row at it; the old object is left in storage.
+// Uses a one-off file input created on the fly, since this fires from the
+// read-only invoice card, not the New/Edit Invoice modal's own picker.
+function promptAttachInvoicePDF(invId){
+  if(!canAccessModule('ap')){ showToast('You do not have permission to attach files.','warn'); return; }
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.pdf,.png,.jpg,.jpeg,.webp,.heic';
+  input.style.display = 'none';
+  input.onchange = async function(){
+    const file = input.files[0];
+    if(input.parentNode) input.parentNode.removeChild(input);
+    if(!file) return;
+    const inv = DB.invoices.find(i=>i.id===invId); if(!inv) return;
+    const wasReplace = !!inv.sourceFilePath;
+    showLoadingOverlay(wasReplace?'Replacing file...':'Uploading file...');
+    const result = await attachInvoiceFile(inv, file);
+    hideLoadingOverlay();
+    if(!result.ok){ showToast((wasReplace?'Replace failed: ':'Upload failed: ')+result.error,'warn'); return; }
+    showToast(wasReplace?'File replaced':'File attached');
+    closeModal();
+    viewInvoice(invId);
+    if(currentView==='invoices') renderInvoices();
+  };
+  document.body.appendChild(input);
+  input.click();
+}
+
+async function removeInvoiceSourceDoc(invId){
+  if(!canAccessModule('ap')){ showToast('You do not have permission to remove files.','warn'); return; }
+  const inv = DB.invoices.find(i=>i.id===invId); if(!inv) return;
+  if(!confirm('Remove the source document from this invoice? The file stays in storage for the audit trail.')) return;
+  inv.sourceFilePath = null;
+  inv.sourceFileName = null;
+  inv.sourceFileType = null;
+  inv.sourceFileSize = null;
+  inv.sourceAddedAt = null;
+  inv.sourceAddedBy = null;
+  showLoadingOverlay('Removing...');
+  const ok = await saveInvoiceToSB(inv);
+  hideLoadingOverlay();
+  if(!ok){ showToast('Failed to remove the source document.','warn'); return; }
+  showToast('Source document removed');
+  closeModal();
+  viewInvoice(invId);
+  if(currentView==='invoices') renderInvoices();
+}
+
+function promptInvoiceDriveLink(invId){
+  if(!canAccessModule('ap')){ showToast('You do not have permission to edit the source link.','warn'); return; }
+  const inv = DB.invoices.find(i=>i.id===invId); if(!inv) return;
+  const url = prompt('Google Drive link for this invoice:', inv.sourceUrl||'');
+  if(url===null) return; // cancelled
+  const trimmed = url.trim();
+  if(!trimmed) return;
+  if(!/^https:\/\/(drive|docs)\.google\.com\//.test(trimmed)){
+    showToast('Only drive.google.com or docs.google.com links are accepted.','warn');
+    return;
+  }
+  saveInvoiceDriveLink(inv, trimmed);
+}
+
+async function saveInvoiceDriveLink(inv, url){
+  inv.sourceUrl = url;
+  inv.sourceAddedAt = new Date().toISOString();
+  inv.sourceAddedBy = (_session && _session.user && _session.user.email) || '';
+  showLoadingOverlay('Saving link...');
+  const ok = await saveInvoiceToSB(inv);
+  hideLoadingOverlay();
+  if(!ok){ showToast('Failed to save the link.','warn'); return; }
+  showToast('Drive link saved');
+  closeModal();
+  viewInvoice(inv.id);
+  if(currentView==='invoices') renderInvoices();
+}
+
 function viewInvoice(id){
   const inv=DB.invoices.find(i=>i.id===id);if(!inv)return;
   const vendor=DB.vendors.find(v=>v.id===inv.vendorId);
@@ -5670,6 +5822,7 @@ function viewInvoice(id){
       <button class="close-btn" onclick="closeModal()">×</button>
     </div>
     <div class="modal-body">
+      ${invoiceSourceDocRowHtml(inv)}
       ${eraNote}
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px;margin-bottom:16px;font-size:13px">
         <div><div style="color:var(--ink-lo);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;margin-bottom:3px">Date</div>${fmtDate(inv.date)}</div>
@@ -5846,6 +5999,7 @@ function syncDeliveryDate(v){ if(_deliveryDateTouched)return; const d=$('inv-del
 function openInvoiceModal(editId){
   _currentEditInvoiceId=editId||'';
   if(!editId) _lastRebelBreadFile = null; // reset on new invoice
+  _pendingInvoiceFile = null; // reset on every open -- never carry a file over between invoices
   const editing=editId?DB.invoices.find(i=>i.id===editId):null;
   _deliveryDateTouched=!!(editing && editing.deliveryDate && editing.deliveryDate!==editing.date);
   _extractedInvoiceTotal=null;
@@ -5856,7 +6010,7 @@ function openInvoiceModal(editId){
   openModal(`<div class="modal" style="max-width:960px">
     <div class="modal-header">
       <div><div class="modal-title">${editing?'Edit Invoice':'New Invoice'}</div><div class="modal-sub">${editing?editing.id:'Auto-assigned on save'}</div></div>
-      <button class="close-btn" onclick="closeModal()">×</button>
+      <button class="close-btn" onclick="closeInvoiceModal()">×</button>
     </div>
     <div class="modal-body">
       <div id="autoload-zone" style="margin-bottom:16px">
@@ -5875,6 +6029,11 @@ function openInvoiceModal(editId){
           <span id="autoload-msg">Reading file…</span>
         </div>
         <div id="autoload-err" style="display:none;margin-top:8px;padding:8px 12px;background:var(--red-lo);border:1px solid #EAB5B1;border-radius:var(--r);font-size:12px;color:var(--red)"></div>
+        <div style="text-align:center;margin-top:8px;font-size:11px;color:var(--ink-lo)">
+          or <a href="#" onclick="event.preventDefault();document.getElementById('attach-only-file-input').click()" style="text-decoration:underline;color:inherit">attach a file only (no extraction)</a>
+        </div>
+        <input type="file" id="attach-only-file-input" accept=".pdf,.png,.jpg,.jpeg,.webp,.heic" style="display:none" onchange="handleAttachOnlyFile(this.files[0])">
+        <div id="attach-only-status" style="display:none;margin-top:8px;padding:8px 12px;background:var(--green-lo);border:1px solid #A8D5B8;border-radius:var(--r);font-size:12px;color:var(--green);text-align:center"></div>
       </div>
       <div style="text-align:center;font-size:11px;color:var(--ink-lo);margin-bottom:14px">— or enter manually below —</div>
       <div class="form-grid" style="margin-bottom:14px">
@@ -5904,7 +6063,7 @@ function openInvoiceModal(editId){
     </div>
     <div class="modal-footer">
       <span id="inv-err" style="color:var(--red);font-size:12px;margin-right:auto"></span>
-      <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-ghost" onclick="closeInvoiceModal()">Cancel</button>
       <button class="btn btn-primary" onclick="saveInvoice('${editId||''}')">${editing?'Save Changes':'Save Invoice'}</button>
     </div>
   </div>`);
@@ -6095,7 +6254,9 @@ async function runInvoiceExtraction(file){
       const reasonTxt=dup.reason==='number'?'matching invoice number':'matching vendor, date, and total (no invoice number on this file)';
       if(dz)dz.innerHTML='<div style="padding:8px 12px;background:var(--red-lo);border:1px solid #EAB5B1;border-radius:var(--r);font-size:12px;color:var(--red)">Possible duplicate - <strong>'+dup.invoice.id+'</strong> ('+(dup.invoice.invoiceNum||'no ref #')+', '+fmtDate(dup.invoice.date)+', '+fmt(dup.invoice.total)+') already exists for this vendor, based on '+reasonTxt+'. <button class="btn btn-ghost btn-sm" onclick="closeModal();viewInvoice(\''+dup.invoice.id+'\')" style="margin-left:6px">View existing invoice</button></div>';
     }else if(dz){
-      dz.innerHTML='<div style="padding:8px 12px;background:var(--green-lo);border:1px solid #A8D5B8;border-radius:var(--r);font-size:12px;color:var(--green)">✓ Extracted from <strong>'+file.name+'</strong> — '+lineItems.length+' lines loaded. Review below and confirm ingredients.</div>';
+      dz.innerHTML='<div style="padding:8px 12px;background:var(--green-lo);border:1px solid #A8D5B8;border-radius:var(--r);font-size:12px;color:var(--green)">✓ Extracted from <strong>'+file.name+'</strong> — '+lineItems.length+' lines loaded. Review below and confirm ingredients.'
+        +'<div id="autoload-attach-note" style="margin-top:4px">This file will be attached to the invoice. <a href="#" onclick="event.preventDefault();dontAttachInvoiceFile()" style="color:inherit;text-decoration:underline">Don\'t attach</a></div>'
+      +'</div>';
     }
   }catch(e){showAutoloadErr('Extraction failed: '+e.message)}
 }
@@ -6407,6 +6568,24 @@ async function saveInvoice(editId){
   const views={invoices:renderInvoices,dashboard:renderDashboard,troy:renderTroy,fifo:renderFIFO};if(views[currentView])views[currentView]();
   updateSidebarStats();
 
+  // Resolve the saved invoice object once -- used below for both the
+  // source-file attach and the Rebel Bread pastry trigger.
+  const savedInvId = editId || DB.invoices[DB.invoices.length-1]?.id;
+  const savedInv = DB.invoices.find(i=>i.id===savedInvId);
+
+  // Attach the pending source file (if any) after the accounting entries
+  // are saved, so an upload problem never blocks or rolls them back --
+  // and independent of glOk/fifoOk below, since the invoice row itself is
+  // already saved either way.
+  if(_pendingInvoiceFile && savedInv){
+    const fileToAttach = _pendingInvoiceFile;
+    _pendingInvoiceFile = null;
+    const attachResult = await attachInvoiceFile(savedInv, fileToAttach);
+    if(!attachResult.ok){
+      showToast('Invoice saved, but the PDF didn\'t upload: '+attachResult.error+'. Open the invoice and use Attach PDF to retry.','warn');
+    }
+  }
+
   if(!glOk){
     showToast('Invoice saved, but the GL accrual entry failed to save — check Trial Balance and post a manual correcting Journal Entry.','warn');
     return;
@@ -6417,8 +6596,6 @@ async function saveInvoice(editId){
   }
 
   // Auto-run pastry extraction if this is a Rebel Bread invoice
-  const savedInvId = editId || DB.invoices[DB.invoices.length-1]?.id;
-  const savedInv = DB.invoices.find(i=>i.id===savedInvId);
   const isRB = savedInv && vendorName(savedInv.vendorId).toLowerCase().includes('rebel bread');
   if(isRB){
     if(_lastRebelBreadFile){
@@ -6485,6 +6662,46 @@ async function postInvoiceGL(inv){
   // was entered (e.g. non-coffee vendors).
   const je={id:await nextGLId(),date:inv.deliveryDate||inv.date,ref:inv.id,era,memo:'A/P accrual'+(era==='troy'?' (Troy-era)':'')+' — '+vendorName(inv.vendorId)+' '+(inv.invoiceNum||inv.id),entries};
   return await saveGLToSB(je);
+}
+
+// ═══════════════════════════════════════════════
+// INVOICE SOURCE DOCUMENT (PDF/image attachment)
+// ═══════════════════════════════════════════════
+// Uploads `file` into the private invoice-files bucket and points `inv` at
+// it (clearing any sourceUrl Drive link, since a stored file and a link
+// are mutually exclusive). Shared by the initial save (saveInvoice, via
+// _pendingInvoiceFile) and the Attach/Replace actions on an already-saved
+// invoice -- one function, one path convention, so there's exactly one
+// place that decides where a file lives. Never touches GL/FIFO and never
+// rolls anything back on failure -- callers already saved the invoice row.
+async function attachInvoiceFile(inv, file){
+  const safeName = file.name.replace(/[^A-Za-z0-9._-]/g, '_');
+  const year = (inv.date||'').slice(0,4) || String(new Date().getFullYear());
+  const dotIdx = safeName.lastIndexOf('.');
+  const ext = dotIdx > 0 ? safeName.slice(dotIdx) : '';
+  const base = dotIdx > 0 ? safeName.slice(0, dotIdx) : safeName;
+
+  let finalPath = null, uploadErr = null;
+  for(let n = 1; n <= 20; n++){
+    const tryPath = inv.vendorId+'/'+year+'/'+inv.id+'_'+base+(n>1?('_'+n):'')+ext;
+    const res = await _sb.storage.from('invoice-files').upload(tryPath, file, {upsert:false, contentType:file.type||'application/octet-stream'});
+    if(!res.error){ finalPath = tryPath; uploadErr = null; break; }
+    uploadErr = res.error;
+    if(!/exist|duplicate/i.test(res.error.message||'')) break; // only retry on a name collision
+  }
+  if(!finalPath) return {ok:false, error:(uploadErr&&uploadErr.message)||'Upload failed'};
+
+  inv.sourceFilePath = finalPath;
+  inv.sourceFileName = file.name;
+  inv.sourceFileType = file.type || '';
+  inv.sourceFileSize = file.size || null;
+  inv.sourceUrl = null;
+  inv.sourceAddedAt = new Date().toISOString();
+  inv.sourceAddedBy = (_session && _session.user && _session.user.email) || '';
+
+  const saveOk = await saveInvoiceToSB(inv);
+  if(!saveOk) return {ok:false, error:'File uploaded, but the invoice record failed to update. Open the invoice and use Replace to retry.'};
+  return {ok:true};
 }
 
 // ═══════════════════════════════════════════════
@@ -7613,6 +7830,14 @@ async function writePastryBilledFromInvoice(inv, dailyDetail){
 // ==================================================
 var _lastRebelBreadFile = null; // store file ref for re-extraction
 
+// Holds the file (if any) to upload as the invoice's source document once
+// it's saved -- set either by the extraction drop zone (handleInvoiceFile)
+// or the separate "Attach file only" picker (handleAttachOnlyFile), and
+// consumed by saveInvoice via attachInvoiceFile(). Reset by
+// openInvoiceModal() / closeInvoiceModal() so it never leaks between
+// invoices.
+var _pendingInvoiceFile = null;
+
 function handleInvoiceFile(file){
   if(!file)return;
   const ext=file.name.split('.').pop().toLowerCase();
@@ -7620,7 +7845,38 @@ function handleInvoiceFile(file){
     showAutoloadErr('Unsupported file type. Please use PDF, PNG, JPG, or WebP.');return;
   }
   _lastRebelBreadFile = file; // store for potential pastry re-extraction
+  _pendingInvoiceFile = file; // store to attach as the invoice's source document on save
   runInvoiceExtraction(file);
+}
+
+// Separate "Attach file only (no extraction)" picker -- never calls the AI
+// extraction, just queues the file for attachInvoiceFile() on save. Kept
+// as its own file input/handler rather than a flag on the extraction path,
+// so the two flows stay structurally distinct.
+function handleAttachOnlyFile(file){
+  if(!file)return;
+  const ext=file.name.split('.').pop().toLowerCase();
+  if(!['pdf','png','jpg','jpeg','webp','heic'].includes(ext)){
+    showAutoloadErr('Unsupported file type. Please use PDF, PNG, JPG, WebP, or HEIC.');return;
+  }
+  _pendingInvoiceFile = file;
+  const s = $('attach-only-status');
+  if(s){
+    s.style.display = 'block';
+    s.innerHTML = '📎 <strong>'+file.name+'</strong> will be attached to the invoice. '
+      + '<a href="#" onclick="event.preventDefault();_pendingInvoiceFile=null;$(\'attach-only-status\').style.display=\'none\'" style="color:inherit;text-decoration:underline">Remove</a>';
+  }
+}
+
+function dontAttachInvoiceFile(){
+  _pendingInvoiceFile = null;
+  const note = $('autoload-attach-note');
+  if(note) note.textContent = 'This file will not be attached to the invoice.';
+}
+
+function closeInvoiceModal(){
+  _pendingInvoiceFile = null;
+  closeModal();
 }
 
 
